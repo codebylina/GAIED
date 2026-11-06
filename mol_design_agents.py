@@ -121,6 +121,10 @@ class SomeAPILLM:
         return _SomeAPIResponse(content=content)
 
 
+if os.environ.get('OLLAMA_MODEL'):  # [gaied-docker patch]
+    from local_llm import OllamaLLM as SomeAPILLM  # noqa: F811
+
+
 def _generate_initial_xyz(mol_string: str) -> str:
     """Generate the XYZ coordinates for a molecule.
 
@@ -392,6 +396,7 @@ class XTBSimulationAgent(Agent):
         # Pool is created AFTER _ap._ACTIVE_INTERCEPTOR is set so that the
         # patched ProcessPoolExecutor.__init__ (from the main process) injects
         # _worker_init into XTB pool workers, wiring up per-task provenance.
+        n_workers = int(os.environ.get('N_XTB_WORKERS', n_workers))  # [gaied-docker patch]
         self.pool = ProcessPoolExecutor(max_workers=n_workers)
 
         tools = [tool(self.compute_ionization_energy)]

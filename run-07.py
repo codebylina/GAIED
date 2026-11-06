@@ -29,7 +29,7 @@ async def main() -> int:
             HighThroughputExecutor(
                 provider=LocalProvider(
                     worker_init=(
-                        f'cd {os.getcwd()}conda activate ./mol-design;'
+                        ''  # [gaied-docker patch] conda activate inutile dans Docker
                     ),
                 ),
                 max_workers_per_node=2,
@@ -39,13 +39,10 @@ async def main() -> int:
     executor = ParslPoolExecutor(config)
 
     async with await Manager.from_exchange_factory(
-        factory=RedisExchangeFactory('localhost', 6379),
+        factory=RedisExchangeFactory(os.environ.get('REDIS_HOST', 'localhost'), 6379),  # [gaied-docker patch]
         executors=executor,
     ) as manager:
-        seeds = [
-            'CNC(N)=O',
-            'CC1=C(O)N=C(O)N1',
-        ]
+        seeds = os.environ.get('SEEDS', 'CNC(N)=O,CC1=C(O)N=C(O)N1').split(',')  # [gaied-docker patch]
 
         agents = []
         for molecule in seeds:
@@ -55,7 +52,7 @@ async def main() -> int:
                     args=(
                         XTBConfig(),
                         molecule,
-                        20,   # max_iterations
+                        int(os.environ.get('MAX_ITERATIONS', '20')),   # max_iterations  # [gaied-docker patch]
                         3,   # no_improvement_tolerance
                     ),
                 ),
@@ -64,23 +61,25 @@ async def main() -> int:
         print('Starting discovery campaign')
         print('=' * 80)
         # Track each agent's last known molecule count; exit when all stable.
-        active: dict[int, tuple] = {i: (agent, -1) for i, agent in enumerate(agents)}
+        active: dict[int, tuple] = {i: (agent, -1, 0) for i, agent in enumerate(agents)}  # [gaied-docker stop-rule]
+        max_stable = int(os.environ.get('STABLE_REPORTS', '20'))
         try:
             while active:
                 await asyncio.sleep(30)
                 finished = []
-                for i, (agent, last_count) in list(active.items()):
+                for i, (agent, last_count, stable) in list(active.items()):
                     try:
                         report = await asyncio.wait_for(agent.report(), timeout=15.0)
                         count = len(report)
                         print(f'Progress report from agent {i}')
                         print(f'Number of molecules simulated: {count}')
                         print(f'Five best molecules: {report[:5]}')
-                        if count == last_count and count > 0:
-                            print(f'Agent {i} finished (no new molecules).')
+                        stable = stable + 1 if (count == last_count and count > 0) else 0
+                        if stable >= max_stable:
+                            print(f'Agent {i} finished (no new molecules for {stable} reports).')
                             finished.append(i)
                         else:
-                            active[i] = (agent, count)
+                            active[i] = (agent, count, stable)
                     except Exception:
                         print(f'Agent {i} has finished.')
                         finished.append(i)

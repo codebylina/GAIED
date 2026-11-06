@@ -1,0 +1,213 @@
+flowcept_version: 1.0.5 # Version of the Flowcept package. Do not update this manually. The CI updates it. This setting file is compatible with this version.
+
+project:
+  debug: true # Toggle debug mode. This will add a property `debug: true` to all saved data, making it easier to retrieve/delete them later.
+  json_serializer: default # JSON serialization mode: default or complex. If "complex", Flowcept will deal with complex python dicts that may contain JSON unserializable values
+  replace_non_json_serializable: true # Replace values that can't be JSON serialized
+  performance_logging: false # Enable performance logging if true. Particularly useful for MQ flushes.
+  enrich_messages: false # Add extra metadata to task messages, such as IP addresses of the node that executed the task, UTC timestamps, GitHub repo metadata.
+  db_flush_mode: offline # Mode for flushing DB entries: "online" or "offline". If online, flushes to the DB will happen before the workflow ends.
+  dump_buffer: # This is particularly useful if you need to run completely offline. If you omit this, even offline, buffer data will not be persisted.
+    enabled: true # If true, persist the in-memory buffer to JSONL on disk during/at the end of a run.
+    path: output/flowcept_buffer.jsonl # Base JSONL path used by dump_buffer() and read_buffer_file() when no explicit path is passed.
+    append_id_to_path: true # If true, append a unique suffix to reduce collisions across parallel writers (e.g., *_<id>.jsonl).
+    append_workflow_id_to_path: true # If true, append the workflow_id before the file extension (e.g., *_<workflow_id>.jsonl).
+    delete_previous_file: false # If true, delete any existing buffer file at startup before writing a new one.
+
+log:
+  log_path: "default" # Path for log file output; "default" will write the log in the directory where the main executable is running from.
+  log_file_level: error # Logging level (error, debug, info, critical) for file logs; use "disable" to turn off.
+  log_stream_level: error # Logging level (error, debug, info, critical) for console/stream logs; use "disable" to turn off.
+
+telemetry_capture: # This toggles each individual type of telemetry capture. GPU capture is treated different depending on the vendor (AMD or NVIDIA).
+  gpu: ~ # ~ means None. This is a list with GPU metrics. AMD=[activity,used,power,temperature,others,id]; NVIDIA=[used,temperature,power,name,id]
+  cpu: false
+  per_cpu: false
+  process_info: false
+  mem: false
+  disk: false
+  network: false
+  machine_info: false
+
+instrumentation:
+  enabled: true # This toggles data capture for instrumentation.
+  torch:
+    what: parent_and_children # Scope of instrumentation: "parent_only" -- will capture only at the main model level, "parent_and_children" -- will capture the inner layers, or ~ (disable).
+    children_mode: telemetry_and_tensor_inspection   # What to capture if parent_and_children is chosen in the scope. Possible values: "tensor_inspection" (i.e., tensor metadata), "telemetry", "telemetry_and_tensor_inspection"
+    epoch_loop: lightweight # lightweight, ~ (disable), or default (default will use the default telemetry capture method)
+    batch_loop: lightweight # lightweight, ~ (disable), or default (default will use the default telemetry capture method)
+    capture_epochs_at_every: 1 # Will capture data at every N epochs; please use a value that is multiple of the total number of #epochs.
+    register_workflow: true # Will store the parent model forward as a workflow itself in the database.
+
+experiment:
+  user: root  # Optionally identify the user running the experiment. The logged username will be captured anyways.
+
+mq:
+  enabled: false
+  type: redis  # or kafka, mofka, rabbitmq, diaspora; adjust port accordingly (redis: 6379, kafka: 9092, rabbitmq: 5672). If mofka, also set group_file.
+  host: redis
+  # uri: ?
+  # instances: ["localhost:6379"] # We can have multiple MQ instances being accessed by the consumers but each interceptor will currently access one single MQ..
+  port: 6379
+  # group_file: mofka.json
+  # username: guest  # RabbitMQ only (AMQP); default is "guest"
+  # vhost: /         # RabbitMQ only; default is "/"
+  channel: interception
+  buffer_size: 50
+  insertion_buffer_time_secs: 5
+  timing: false
+  # uri: use Redis connection uri here
+  chunk_size: -1  # use 0 or -1 to disable this. Or simply omit this from the config file.
+  same_as_kvdb: false # Set this to true if you are using the same Redis instance both as an MQ and as the KV_DB. In that case, no need to repeat connection parameters in MQ. Use only what you define in KV_DB.
+#  bin: /usr/local/bin/redis-server # Use this if you want to start redis using the flowcept-cli.
+#  conf_file: /etc/redis/redis.conf
+
+kv_db:
+  enabled: false
+  host: redis
+  port: 6379
+  # uri: use Redis connection uri here
+
+web_server:
+  host: 127.0.0.1  # Bind address; use 0.0.0.0 to expose on all interfaces. Env: WEBSERVER_HOST.
+  port: 8008       # HTTP port for the FastAPI webservice and built UI. Env: WEBSERVER_PORT.
+  ui_enabled: true # Serve the built web UI (if assets are present) at the root path.
+  cors_origins: [] # Extra allowed CORS origins; empty disables the CORS middleware (UI is same-origin).
+  sse_poll_interval_sec: 2.0 # How often live (SSE) endpoints poll the DB for new data.
+  sse_max_batch: 500 # Max records pushed per SSE event.
+  dashboards_dir: ~/.flowcept/dashboards # Dashboard JSON storage when MongoDB is disabled.
+  max_label_length: 30 # Limit for graph labels. Fall back to inputs/outputs sequential names if exceeded.
+
+sys_metadata:
+  environment_id: "laptop"   # We use this to keep track of the environment used to run an experiment. Typical values include the cluster name, but it can be anything that you think will help identify your experimentation environment.
+
+extra_metadata: # We use this to store any extra metadata you want to keep track of during an experiment.
+  place_holder: ""
+
+db_buffer:
+  insertion_buffer_time_secs: 5   # Time interval (in seconds) to buffer incoming records before flushing to the database
+  buffer_size: 50    # Maximum number of records to hold in the buffer before forcing a flush
+  remove_empty_fields: false    # If true, fields with null/empty values will be removed before insertion
+  stop_max_trials: 300    # Maximum number of trials before giving up when waiting for a fully safe stop (i.e., all records have been inserted as expected).
+  stop_trials_sleep: 0.1  # Sleep duration (in seconds) between trials when waiting for a fully safe stop.
+
+agent:
+  enabled: false
+  mcp_host: localhost
+  mcp_port: 8000
+  mcp_allowed_hosts: ["localhost:*", "127.0.0.1:*"]  # Default is ["localhost:*", "127.0.0.1:*"]
+  mcp_allowed_origins: ["http://localhost:*", "http://127.0.0.1:*"]  # Default is ["http://localhost:*", "http://127.0.0.1:*"]
+  llm_server_url: '?'
+  api_key: '?'
+  model: '?'
+  service_provider: '?'
+  model_kwargs: {}
+  audio_enabled: false
+  debug: true
+  start_persistence: false
+  chat_enabled: true # Enable the /api/v1/chat endpoint (requires the llm_agent extra and LLM settings above).
+  chat_max_tool_iterations: 5 # Max LLM tool-calling iterations per chat message.
+  chat_max_query_limit: 1000 # Hard cap for records returned by chat LLM query tools.
+  agent_mode: disabled # How the MCP agent is deployed: disabled | separate | colocated
+
+databases:
+  lmdb:
+    enabled: false
+    path: flowcept_lmdb
+
+  mongodb:
+    enabled: false
+    host: mongo
+    port: 27017
+    db: flowcept
+    create_collection_index: true  # Whether flowcept should create collection indices if they haven't been created yet. This is done only at the Flowcept start up.
+#    bin: /usr/bin/mongod
+#    db_path:
+#    log_path: /var/log/mongodb/mongod.log
+#    lock_file_path: /var/run/mongod.pid
+
+
+plugins:
+  # Agent-framework plugins — set enabled: true to activate without any code changes.
+  # When Flowcept starts (via context manager or .start()), enabled plugins are
+  # automatically started and stopped alongside Flowcept. No need to call
+  # plugin.start() / plugin.stop() or pass a config dict in your code.
+  #
+  # Each entry key is an arbitrary name; "kind" selects the plugin class:
+  #   academy   → FlowceptAcademyPlugin
+  #   langgraph → FlowceptLangGraphPlugin
+  #   crewai    → FlowceptCrewAIPlugin
+  #   autogen   → FlowceptAutoGenPlugin
+  #
+  # All other keys are forwarded as the plugin's config dict.
+
+  academy:
+    enabled: false
+    kind: academy
+    workflow_name: "academy-workflow"
+    performance_tracking: true
+    # perf_csv: "provenance_perf.csv"
+    # campaign_id: ~
+
+  # langgraph:
+  #   enabled: true
+  #   kind: langgraph
+  #   workflow_name: "langgraph-workflow"
+  #   performance_tracking: true
+
+  # crewai:
+  #   enabled: true
+  #   kind: crewai
+  #   workflow_name: "crewai-workflow"
+  #   performance_tracking: true
+
+  # autogen:
+  #   enabled: true
+  #   kind: autogen
+  #   workflow_name: "autogen-workflow"
+  #   performance_tracking: true
+
+adapters:
+  # For each key below, you can have multiple instances. Like mlflow1, mlflow2; zambeze1, zambeze2. Use an empty dict, {}, if you won't use any adapter.
+
+  broker_mqtt:
+    kind: broker
+    host: localhost
+    port: 30011
+    protocol: mqtt3.1.1
+    queues: ["#"]
+    username: postman
+    password: p
+    qos: 2
+    task_subtype: intersect_msg
+    tracked_keys:
+      used: payload
+      generated: ~
+      custom_metadata: [headers, msgId]
+      activity_id: operationId
+      submitted_at: ~
+      started_at: ~
+      ended_at: ~
+      registered_at: ~
+
+  mlflow:
+    kind: mlflow
+    file_path: mlflow.db
+    log_params: ['*']
+    log_metrics: ['*']
+    watch_interval_sec: 1
+
+  tensorboard:
+    kind: tensorboard
+    file_path: tensorboard_events
+    log_tags: ['scalars', 'hparams', 'tensors']
+    log_metrics: ['accuracy']
+    watch_interval_sec: 5
+
+  dask:
+    kind: dask
+    worker_should_get_input: true
+    scheduler_should_get_input: true
+    worker_should_get_output: true
+    scheduler_create_timestamps: true
+    worker_create_timestamps: false

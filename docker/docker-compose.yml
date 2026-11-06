@@ -1,0 +1,50 @@
+# Ce fichier se trouve dans GAIED/docker/ (votre fork de GAIED).
+# Toutes les commandes se lancent depuis ce dossier docker/.
+#
+# Démarrer :  docker compose up -d redis ollama
+#             docker compose exec ollama ollama pull qwen3.5:4b
+#             docker compose run --rm gaied
+# Avec MongoDB : ajouter --profile mongo
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]   # persistance sur disque (AOF)
+    ports: ["6379:6379"]
+    volumes: [redis-data:/data]
+
+  mongo:
+    image: mongo:7
+    profiles: ["mongo"]                                # lancé seulement avec --profile mongo
+    ports: ["27017:27017"]
+    volumes: [mongo-data:/data/db]
+
+  ollama:
+    image: ollama/ollama:latest
+    ports: ["11434:11434"]
+    volumes: [ollama-models:/root/.ollama]             # les modèles téléchargés sont gardés
+
+  gaied:
+    build: .
+    user: root                                         # évite les problèmes de droits sur le dossier monté
+    depends_on: [redis, ollama]
+    working_dir: /app
+    shm_size: 1gb
+    environment:
+      REDIS_HOST: redis
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_MODEL: qwen3.5:4b          # qwen3.5:9b si vous avez 16 Go de RAM ou plus
+      OLLAMA_THINK: "false"             # mode raisonnement désactivé : beaucoup plus rapide sur CPU
+      NUM_PREDICT: "1024"
+      SEEDS: "CNC(N)=O"                 # 1 agent pour le premier essai ; "CNC(N)=O,CNC(N)=O" pour tester les doublons
+      MAX_ITERATIONS: "3"
+      N_XTB_WORKERS: "1"
+      FLOWCEPT_SETTINGS_PATH: /app/docker/flowcept_settings.yaml
+      PYTHONPATH: /app:/app/docker                # pour trouver local_llm.py
+    volumes:
+      - ..:/app                                   # le dossier GAIED entier
+
+volumes:
+  redis-data:
+  mongo-data:
+  ollama-models:

@@ -4,3 +4,13 @@ __pycache__/
 runinfo/
 *.log
 .env
+# copies créées par docker/apply_patches.py
+*.orig
+# provenance générée à chaque campagne (garder seulement les exemples d'Amal)
+output/flowcept_buffer_*.jsonl
+!output/flowcept_buffer_SC.jsonl
+provenance_perf*.csv
+# fichiers temporaires Python et Parsl
+__pycache__/
+runinfo/
+run-07.py.before-stop-rule
