@@ -27,6 +27,7 @@ from rdkit.Chem import AllChem
 from xtb.ase.calculator import XTB
 
 from academy.agent import action
+from shared_memory import SharedMemory, SimulationFailed  # [shared-memory]
 from academy.agent import Agent
 from academy.agent import loop
 
@@ -198,6 +199,7 @@ def _compute_energy_with_prov(
     parent_task_id: str | None,
     workflow_id: str | None,
     campaign_id: str | None,
+    task_id: str | None = None,  # [shared-memory] même id dans la mémoire et dans Flowcept
 ) -> float:
     """Wrapper around _compute_energy_sync that records provenance in the XTB worker.
 
@@ -241,6 +243,8 @@ def _compute_energy_with_prov(
                     task['workflow_id'] = workflow_id
                 if campaign_id:
                     task['campaign_id'] = campaign_id
+                if task_id:  # [shared-memory]
+                    task['task_id'] = task_id
                 interceptor.intercept_task(task)
         except Exception:
             pass
@@ -405,6 +409,13 @@ class XTBSimulationAgent(Agent):
         self.tools_by_name = {tool.name: tool for tool in tools}
         self.llm_with_tools = self.generation_llm.bind_tools(tools)
 
+        # [shared-memory] mémoire partagée Redis (None si SHARED_MEMORY=false ou Redis absent)
+        import uuid as _uuid
+        self.agent_name = f'{self.search_state.seed}#{_uuid.uuid4().hex[:6]}'
+        self.memory = SharedMemory.from_env(agent_id=self.agent_name)
+        logger.warning('Shared memory %s for agent %s',
+                       'ENABLED' if self.memory else 'disabled', self.agent_name)
+
     async def agent_on_shutdown(self) -> None:
         if self._lg_interceptor is not None:
             try:
@@ -452,15 +463,27 @@ class XTBSimulationAgent(Agent):
             campaign_id = self._academy_interceptor._campaign_id
 
         loop = asyncio.get_event_loop()
-        ionization_energy = await loop.run_in_executor(
-            self.pool,
-            _compute_energy_with_prov,
-            self.config,
-            smiles,
-            parent_task_id,
-            workflow_id,
-            campaign_id,
-        )
+
+        async def _run_xtb(task_id: str | None = None) -> float:
+            return await loop.run_in_executor(
+                self.pool,
+                _compute_energy_with_prov,
+                self.config,
+                smiles,
+                parent_task_id,
+                workflow_id,
+                campaign_id,
+                task_id,
+            )
+
+        # [shared-memory] PULL (déjà calculée ? en cours ailleurs ?) → CLAIM → calcul → PUSH
+        if getattr(self, 'memory', None) is not None:
+            import uuid as _uuid
+            ionization_energy = await self.memory.get_or_compute(
+                smiles, _run_xtb, new_task_id=lambda: str(_uuid.uuid4()),
+            )
+        else:
+            ionization_energy = await _run_xtb()
         self.molecule_cache[smiles] = ionization_energy
         return ionization_energy
 
@@ -475,6 +498,15 @@ class XTBSimulationAgent(Agent):
         ionizationenergy, using the starting molecule as a seed for the
         search space.
         """
+
+        def _memory_block() -> str:  # [shared-memory] résumé borné de la mémoire pour le prompt
+            if self.memory is None:
+                return ''
+            try:
+                return '\n\n' + self.memory.render_for_prompt()
+            except Exception as exc:
+                logger.warning('Shared memory read failed: %s', exc)
+                return ''
 
         async def plan(state: SearchState) -> SearchState:
             response = await self.reasoning_llm.ainvoke(
@@ -504,6 +536,7 @@ class XTBSimulationAgent(Agent):
                         content=(
                             'Look for molecules with high ionization energy '
                             f'starting with the molecule {state.seed}'
+                            + _memory_block()  # [shared-memory]
                         ),
                     ),
                 ],
@@ -524,6 +557,10 @@ class XTBSimulationAgent(Agent):
             previously_simulated = ' '.join(
                 state.simulated_molecules.keys(),
             )
+            if self.memory is not None:  # [shared-memory] molécules de TOUTE l'équipe
+                previously_simulated = ' '.join(
+                    sorted(set(state.simulated_molecules) | set(self.memory.known_molecules())),
+                )
             response = await self.llm_with_tools.ainvoke(
                 [
                     SystemMessage(
@@ -542,6 +579,7 @@ class XTBSimulationAgent(Agent):
                             f'Plan: {state.plan}\n\n'
                             f'Simulated Molecules: {previously_simulated} '
                             'Do not repeat those molecules in the tool calls.'
+                            + _memory_block()  # [shared-memory]
                         ),
                     ),
                 ],
@@ -661,6 +699,14 @@ class XTBSimulationAgent(Agent):
                 ],
             )
             logger.info(f'Conclusions: {response}')
+            if self.memory is not None:  # [shared-memory] PUSH des conclusions pour les autres agents
+                try:
+                    self.memory.push_lesson(
+                        response.content, kind='conclusion',
+                        evidence=list(state.simulated_molecules)[-10:],
+                    )
+                except Exception as exc:
+                    logger.warning('Shared memory write failed: %s', exc)
             new_state = SearchState(
                 seed=state.seed,
                 plan=response.content,

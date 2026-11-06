@@ -32,6 +32,12 @@ services:
     shm_size: 1gb
     environment:
       REDIS_HOST: redis
+      # --- Choix du LLM : "ollama" (local) ou "openai" (API en ligne, clé dans docker/.env) ---
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      LLM_MODEL: ${LLM_MODEL:-}                   # vide = OLLAMA_MODEL ci-dessous
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_SEND_TEMPERATURE: ${LLM_SEND_TEMPERATURE:-true}
       OLLAMA_URL: http://ollama:11434
       OLLAMA_MODEL: qwen3.5:4b          # qwen3.5:9b si vous avez 16 Go de RAM ou plus
       OLLAMA_THINK: "false"             # mode raisonnement désactivé : beaucoup plus rapide sur CPU
@@ -39,6 +45,9 @@ services:
       SEEDS: "CNC(N)=O"                 # 1 agent pour le premier essai ; "CNC(N)=O,CNC(N)=O" pour tester les doublons
       MAX_ITERATIONS: "3"
       N_XTB_WORKERS: "1"
+      SHARED_MEMORY: ${SHARED_MEMORY:-true}    # [shared-memory] false = agents sans mémoire partagée (référence)
+      MEMORY_CLAIM_TTL: "900"           # un verrou de molécule expire après 15 min (agent planté)
+      STABLE_REPORTS: "60"              # arrêt après 60 rapports (30 min) sans nouvelle molécule : le LLM sur CPU est lent
       FLOWCEPT_SETTINGS_PATH: /app/docker/flowcept_settings.yaml
       PYTHONPATH: /app:/app/docker                # pour trouver local_llm.py
     volumes:

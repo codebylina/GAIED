@@ -1,6 +1,8 @@
 """
-local_llm.py — Remplace le client LLM anonymisé de GAIED (SomeAPILLM) par un modèle
-open source servi localement par Ollama.
+local_llm.py — Remplace le client LLM anonymisé de GAIED (SomeAPILLM) par :
+  - un modèle LOCAL servi par Ollama           (LLM_PROVIDER=ollama, par défaut)
+  - ou une API EN LIGNE au format OpenAI        (LLM_PROVIDER=openai)
+    → OpenAI, Google Gemini, Groq, OpenRouter, DeepSeek, Anthropic… (avec une clé API)
 
 Même interface que SomeAPILLM :
   - attributs  : model, temperature, _tools   (lus par le patch de provenance Flowcept)
@@ -8,15 +10,21 @@ Même interface que SomeAPILLM :
   - réponse    : objet avec .content et .tool_calls
 
 Comme l'original, les appels d'outils passent par un JSON demandé dans le prompt
-({"tool_calls": [{"name": ..., "args": {"smiles": ...}}]}). Cela marche avec n'importe
-quel modèle, même sans support natif des « tools ».
+({"tool_calls": [{"name": ..., "args": {"smiles": ...}}]}) : marche avec tout modèle.
 
 Variables d'environnement :
+  LLM_PROVIDER   "ollama" (défaut) ou "openai"
+  LLM_MODEL      nom du modèle (à défaut : OLLAMA_MODEL) — remplace le "gpt54" demandé par GAIED
+  --- Ollama ---
   OLLAMA_URL     (défaut http://localhost:11434)
-  OLLAMA_MODEL   (ex. qwen3.5:4b) — remplace le nom de modèle demandé par GAIED (gpt54)
-  OLLAMA_THINK   "false" (défaut) ou "true" : mode raisonnement de Qwen (très lent sur CPU)
-  NUM_PREDICT    nombre maximal de tokens générés (défaut 1024)
+  OLLAMA_THINK   "false" (défaut) / "true" / autre valeur = ne rien envoyer
   NUM_CTX        taille du contexte (défaut 8192)
+  --- API en ligne (format OpenAI) ---
+  LLM_BASE_URL   ex. https://api.openai.com/v1
+  LLM_API_KEY    la clé (à mettre dans docker/.env, jamais dans Git)
+  LLM_SEND_TEMPERATURE  "true" (défaut) ; "false" pour les modèles qui l'imposent (ex. certains GPT-5)
+  --- Commun ---
+  NUM_PREDICT    nombre maximal de tokens générés (défaut 1024)
 """
 from __future__ import annotations
 
@@ -40,10 +48,10 @@ class _LLMResponse:
 
 class OllamaLLM:
     def __init__(self, model: str, temperature: float = 0.1) -> None:
-        self.model = os.environ.get("OLLAMA_MODEL", model)
+        self.provider = os.environ.get("LLM_PROVIDER", "ollama").lower()
+        self.model = os.environ.get("LLM_MODEL") or os.environ.get("OLLAMA_MODEL") or model
         self.temperature = temperature
         self._tools: list | None = None
-        self.base_url = os.environ.get("OLLAMA_URL", "http://localhost:11434").rstrip("/")
 
     def bind_tools(self, tools: list) -> "OllamaLLM":
         bound = OllamaLLM(self.model, self.temperature)
@@ -51,7 +59,7 @@ class OllamaLLM:
         return bound
 
     # ------------------------------------------------------------------ helpers
-    def _to_ollama_messages(self, messages: list) -> list[dict]:
+    def _to_chat_messages(self, messages: list) -> list[dict]:
         out = []
         for msg in messages:
             if isinstance(msg, SystemMessage):
@@ -67,7 +75,7 @@ class OllamaLLM:
                 "Respond with ONLY a JSON object: "
                 '{"tool_calls": [{"name": "<tool>", "args": {"smiles": "<SMILES>"}}]}'
             )
-            for m in reversed(out):            # ajouter la consigne au dernier message utilisateur
+            for m in reversed(out):            # consigne ajoutée au dernier message utilisateur
                 if m["role"] == "user":
                     m["content"] += instruction
                     break
@@ -86,11 +94,12 @@ class OllamaLLM:
                 calls.append({"name": c.get("name") or default_name, "args": {"smiles": args["smiles"]}})
         return calls
 
-    # ------------------------------------------------------------------ API
-    async def ainvoke(self, messages: list) -> _LLMResponse:
+    # ------------------------------------------------------------------ backends
+    def _post_ollama(self, messages: list[dict]) -> str:
+        url = os.environ.get("OLLAMA_URL", "http://localhost:11434").rstrip("/")
         payload = {
             "model": self.model,
-            "messages": self._to_ollama_messages(messages),
+            "messages": messages,
             "stream": False,
             "options": {
                 "temperature": self.temperature,
@@ -101,15 +110,37 @@ class OllamaLLM:
         think = os.environ.get("OLLAMA_THINK", "false").lower()
         if think in ("true", "false"):
             payload["think"] = think == "true"
+        resp = requests.post(f"{url}/api/chat", json=payload, timeout=1800)
+        resp.raise_for_status()
+        return resp.json().get("message", {}).get("content", "")
 
-        def _post() -> dict:
-            resp = requests.post(f"{self.base_url}/api/chat", json=payload, timeout=1800)
-            resp.raise_for_status()
-            return resp.json()
+    def _post_openai(self, messages: list[dict]) -> str:
+        base = os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+        key = os.environ.get("LLM_API_KEY", "")
+        if not key:
+            raise RuntimeError("LLM_PROVIDER=openai mais LLM_API_KEY est vide (voir docker/.env).")
+        max_tokens = int(os.environ.get("NUM_PREDICT", "1024"))
+        payload: dict = {"model": self.model, "messages": messages}
+        # api.openai.com attend max_completion_tokens ; les autres fournisseurs, max_tokens
+        payload["max_completion_tokens" if "api.openai.com" in base else "max_tokens"] = max_tokens
+        if os.environ.get("LLM_SEND_TEMPERATURE", "true").lower() == "true":
+            payload["temperature"] = self.temperature
+        resp = requests.post(
+            f"{base}/chat/completions",
+            json=payload,
+            headers={"Authorization": f"Bearer {key}"},
+            timeout=600,
+        )
+        if resp.status_code >= 400:   # message d'erreur du fournisseur, sans afficher la clé
+            raise RuntimeError(f"Erreur API {resp.status_code} : {resp.text[:500]}")
+        return resp.json()["choices"][0]["message"].get("content") or ""
 
-        data = await asyncio.to_thread(_post)
-        content = _THINK_RE.sub("", data.get("message", {}).get("content", "")).strip()
-
+    # ------------------------------------------------------------------ API
+    async def ainvoke(self, messages: list) -> _LLMResponse:
+        chat = self._to_chat_messages(messages)
+        post = self._post_openai if self.provider == "openai" else self._post_ollama
+        content = await asyncio.to_thread(post, chat)
+        content = _THINK_RE.sub("", content).strip()
         if self._tools:
             return _LLMResponse(content=content, tool_calls=self._parse_tool_calls(content))
         return _LLMResponse(content=content)
