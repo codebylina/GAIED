@@ -14,3 +14,5 @@ provenance_perf*.csv
 __pycache__/
 runinfo/
 run-07.py.before-stop-rule
+# réglages personnels de VS Code
+.vscode/
