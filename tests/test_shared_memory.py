@@ -1,10 +1,10 @@
 """
-Tests de la mémoire partagée, SANS LLM ni xTB (quelques secondes).
+Tests of the shared memory module, WITHOUT LLM or xTB (a few seconds).
 
-Dans Docker (Redis réel), depuis GAIED/docker :
+In Docker (real Redis), from GAIED/docker:
     docker compose run --rm gaied python tests/test_shared_memory.py
 
-Sans Redis (Redis simulé, nécessite `pip install fakeredis`) :
+Without Redis (simulated Redis, requires `pip install fakeredis`):
     python tests/test_shared_memory.py --fake
 """
 import asyncio
@@ -28,7 +28,7 @@ def make_client():
 
 
 CLIENT = make_client()
-CAMPAIGN = f"test-{uuid.uuid4().hex[:8]}"   # campagne jetable, effacée à la fin
+CAMPAIGN = f"test-{uuid.uuid4().hex[:8]}"   # throwaway campaign, deleted at the end
 
 
 def mem(agent):
@@ -41,17 +41,17 @@ def test_canonical():
         import rdkit  # noqa: F401
         assert a == b, (a, b)
     except ImportError:
-        print("    (RDKit absent : canonisation non testée)")
+        print("    (RDKit missing: canonicalization not tested)")
 
 
 def test_claim_is_exclusive():
     a, b = mem("A"), mem("B")
     assert a.claim("CCN")
-    assert not b.claim("CCN"), "B ne doit pas pouvoir prendre une molécule déjà prise"
-    b.release("CCN")                      # B n'est pas propriétaire : sans effet
+    assert not b.claim("CCN"), "B must not be able to take a molecule already claimed"
+    b.release("CCN")                      # B is not the owner: no effect
     assert a.claimed_by("CCN") == "A"
     a.release("CCN")
-    assert b.claim("CCN"), "après libération, B peut la prendre"
+    assert b.claim("CCN"), "after release, B can take it"
     b.release("CCN")
 
 
@@ -59,7 +59,7 @@ def test_push_pull_results():
     a, b = mem("A"), mem("B")
     a.push_result("NC(N)=O", 14.96, task_id="t-1")
     a.push_result("C(=O)", None, error="Parse failure")
-    rec = b.get_result("NC(N)=O")                 # B voit le résultat de A
+    rec = b.get_result("NC(N)=O")                 # B sees A's result
     assert rec["energy"] == 14.96 and rec["agent"] == "A" and rec["task_id"] == "t-1"
     assert canonical_smiles("NC(N)=O") in b.pull_results()
     assert b.get_result("C(=O)")["status"] == "error"
@@ -67,14 +67,14 @@ def test_push_pull_results():
 
 
 def test_no_duplicate_computation():
-    """Deux agents demandent en même temps des molécules en partie identiques :
-    chaque molécule ne doit être calculée qu'UNE fois."""
+    """Two agents ask at the same time for partly identical molecules:
+    each molecule must be computed only ONCE."""
     calls = []
 
     def compute_for(smiles):
         async def compute(task_id):
             calls.append(smiles)
-            await asyncio.sleep(0.3)              # simule un calcul xTB
+            await asyncio.sleep(0.3)              # simulates an xTB computation
             return 10 + len(smiles) / 10
         return compute
 
@@ -88,13 +88,13 @@ def test_no_duplicate_computation():
 
     ra, rb = asyncio.run(main())
     assert sorted(calls) == sorted(["CCCl", "CCBr", "CCI", "CCF"]), calls
-    assert ra[1] == rb[0] and ra[2] == rb[1], "les deux agents obtiennent la même valeur"
+    assert ra[1] == rb[0] and ra[2] == rb[1], "both agents get the same value"
     stats = CLIENT.hgetall(f"mem:{CAMPAIGN}:stats")
     assert int(stats.get("computed", 0)) >= 4
 
 
 def test_failure_is_shared():
-    """Un échec mémorisé évite aux autres agents de retenter la même molécule invalide."""
+    """A stored failure prevents other agents from retrying the same invalid molecule."""
     calls = []
 
     async def failing(task_id):
@@ -113,14 +113,14 @@ def test_failure_is_shared():
             return True
         return False
 
-    assert asyncio.run(main()), "B doit recevoir l'échec mémorisé"
-    assert len(calls) == 1, "la molécule invalide ne doit être tentée qu'une fois"
+    assert asyncio.run(main()), "B must receive the stored failure"
+    assert len(calls) == 1, "the invalid molecule must be tried only once"
 
 
 def test_crashed_agent_lock_expires():
-    """Un agent qui plante en tenant un verrou ne bloque pas les autres : le verrou expire."""
+    """An agent that crashes while holding a lock does not block the others: the lock expires."""
     ghost = mem("ghost")
-    assert ghost.claim("CCO", ttl=1)              # « ghost » prend la molécule puis disparaît
+    assert ghost.claim("CCO", ttl=1)              # "ghost" takes the molecule then disappears
 
     async def compute(task_id):
         return 12.0
@@ -158,7 +158,7 @@ def test_in_progress_visible():
     assert a.claim("CC#N")
     assert canonical_smiles("CC#N") in b.known_molecules()
     assert "RIGHT NOW" in b.render_for_prompt() and canonical_smiles("CC#N") in b.render_for_prompt()
-    assert "RIGHT NOW" not in a.render_for_prompt(), "un agent ne se voit pas lui-même"
+    assert "RIGHT NOW" not in a.render_for_prompt(), "an agent does not see itself"
     a.release("CC#N")
     assert canonical_smiles("CC#N") not in b.known_molecules()
 
@@ -178,8 +178,8 @@ if __name__ == "__main__":
                 print(f"[OK]    {t.__name__}")
             except Exception as exc:
                 failed += 1
-                print(f"[ÉCHEC] {t.__name__} : {exc!r}")
+                print(f"[FAIL]  {t.__name__}: {exc!r}")
     finally:
         cleanup()
-    print(f"\n{len(tests) - failed}/{len(tests)} tests réussis")
+    print(f"\n{len(tests) - failed}/{len(tests)} tests passed")
     sys.exit(1 if failed else 0)

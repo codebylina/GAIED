@@ -1,15 +1,16 @@
 """
-patch_stop_rule.py — Corrige la règle d'arrêt de run-07.py.
+patch_stop_rule.py — Fixes the stop rule of run-07.py.
+(Already applied and committed on the docker-local branch: do not run it again.)
 
-Avant : un agent était déclaré « fini » dès que son nombre de molécules ne changeait
-pas entre deux rapports (30 s). Avec un LLM sur CPU, une seule réponse peut durer
-plus longtemps : la campagne s'arrêtait après la première itération.
+Before: an agent was declared "finished" as soon as its number of molecules did not
+change between two reports (30 s). With an LLM on CPU, a single response can take
+longer, so the campaign stopped after the first iteration.
 
-Après : l'agent est déclaré fini seulement après STABLE_REPORTS rapports consécutifs
-sans nouvelle molécule (défaut 20, soit 10 minutes), ou quand il s'arrête lui-même
-(MAX_ITERATIONS atteint, ou plus d'amélioration).
+After: the agent is declared finished only after STABLE_REPORTS consecutive reports
+without a new molecule (default 20, i.e. 10 minutes), or when it stops by itself
+(MAX_ITERATIONS reached, or no more improvement).
 
-Usage (dans le conteneur GAIED, depuis GAIED/docker) :
+Usage (in the GAIED container, from GAIED/docker):
     docker compose run --rm gaied python docker/patch_stop_rule.py .
 """
 import shutil
@@ -43,21 +44,21 @@ def main(repo: Path) -> int:
     path = repo / "run-07.py"
     text = path.read_text()
     if MARK in text:
-        print("[=] run-07.py : règle d'arrêt déjà corrigée, rien à faire")
+        print("[=] run-07.py: stop rule already fixed, nothing to do")
         return 0
     for old, _ in EDITS:
         if text.count(old) != 1:
-            print(f"[!] run-07.py : bloc introuvable, rien n'a été modifié :\n    {old.strip()[:80]}")
+            print(f"[!] run-07.py: block not found, nothing was changed:\n    {old.strip()[:80]}")
             return 1
     shutil.copy(path, path.with_name("run-07.py.before-stop-rule"))
     for old, new in EDITS:
         text = text.replace(old, new)
     path.write_text(text)
-    print("[+] run-07.py : règle d'arrêt corrigée (copie : run-07.py.before-stop-rule)")
+    print("[+] run-07.py: stop rule fixed (copy: run-07.py.before-stop-rule)")
     return 0
 
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        sys.exit("Usage : python docker/patch_stop_rule.py <chemin vers GAIED>")
+        sys.exit("Usage: python docker/patch_stop_rule.py <path to GAIED>")
     sys.exit(main(Path(sys.argv[1])))

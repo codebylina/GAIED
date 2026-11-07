@@ -27,7 +27,7 @@ from rdkit.Chem import AllChem
 from xtb.ase.calculator import XTB
 
 from academy.agent import action
-from shared_memory import SharedMemory, SimulationFailed  # [shared-memory]
+from shared_memory import SharedMemory  # [shared-memory]
 from academy.agent import Agent
 from academy.agent import loop
 
@@ -199,7 +199,7 @@ def _compute_energy_with_prov(
     parent_task_id: str | None,
     workflow_id: str | None,
     campaign_id: str | None,
-    task_id: str | None = None,  # [shared-memory] même id dans la mémoire et dans Flowcept
+    task_id: str | None = None,  # [shared-memory] same id in shared memory and in Flowcept
 ) -> float:
     """Wrapper around _compute_energy_sync that records provenance in the XTB worker.
 
@@ -409,7 +409,7 @@ class XTBSimulationAgent(Agent):
         self.tools_by_name = {tool.name: tool for tool in tools}
         self.llm_with_tools = self.generation_llm.bind_tools(tools)
 
-        # [shared-memory] mémoire partagée Redis (None si SHARED_MEMORY=false ou Redis absent)
+        # [shared-memory] Redis shared memory (None if SHARED_MEMORY=false or Redis is unreachable)
         import uuid as _uuid
         self.agent_name = f'{self.search_state.seed}#{_uuid.uuid4().hex[:6]}'
         self.memory = SharedMemory.from_env(agent_id=self.agent_name)
@@ -465,18 +465,38 @@ class XTBSimulationAgent(Agent):
         loop = asyncio.get_event_loop()
 
         async def _run_xtb(task_id: str | None = None) -> float:
-            return await loop.run_in_executor(
-                self.pool,
-                _compute_energy_with_prov,
-                self.config,
-                smiles,
-                parent_task_id,
-                workflow_id,
-                campaign_id,
-                task_id,
-            )
+            import time as _time
+            import uuid as _uuid
+            task_id = task_id or str(_uuid.uuid4())
+            started_at = _time.time()
+            result, error = None, None
+            try:
+                result = await loop.run_in_executor(
+                    self.pool,
+                    _compute_energy_with_prov,
+                    self.config,
+                    smiles,
+                    parent_task_id,
+                    workflow_id,
+                    campaign_id,
+                    task_id,
+                )
+                return result
+            except Exception as exc:
+                error = exc
+                raise
+            finally:
+                # [shared-memory] Record the xTB task from the agent process.
+                # _compute_energy_with_prov tries to record it inside the pool
+                # worker, but no interceptor exists there: Flowcept only patches
+                # ProcessPoolExecutor in FlowceptAcademyPlugin.start(), which GAIED
+                # does not call, so that record is silently skipped.
+                self._record_xtb_task(
+                    task_id, smiles, started_at, _time.time(), result, error,
+                    parent_task_id, workflow_id, campaign_id,
+                )
 
-        # [shared-memory] PULL (déjà calculée ? en cours ailleurs ?) → CLAIM → calcul → PUSH
+        # [shared-memory] PULL (known? being computed elsewhere?) -> CLAIM -> compute -> PUSH
         if getattr(self, 'memory', None) is not None:
             import uuid as _uuid
             ionization_energy = await self.memory.get_or_compute(
@@ -486,6 +506,47 @@ class XTBSimulationAgent(Agent):
             ionization_energy = await _run_xtb()
         self.molecule_cache[smiles] = ionization_energy
         return ionization_energy
+
+    def _record_xtb_task(  # [shared-memory]
+        self,
+        task_id: str,
+        smiles: str,
+        started_at: float,
+        ended_at: float,
+        result: float | None,
+        error: Exception | None,
+        parent_task_id: str | None,
+        workflow_id: str | None,
+        campaign_id: str | None,
+    ) -> None:
+        """Write the provenance record of one xTB computation (subtype parsl_task)."""
+        if self._academy_interceptor is None:
+            return
+        task: dict = {
+            'task_id': task_id,
+            'activity_id': 'compute_ionization_energy',
+            'subtype': 'parsl_task',
+            'status': 'ERROR' if error else 'FINISHED',
+            'started_at': started_at,
+            'ended_at': ended_at,
+            'used': {'smiles': smiles},
+            'generated': {'ionization_energy': result} if result is not None else None,
+            'stderr': str(error) if error else None,
+            'custom_metadata': {
+                'agent': getattr(self, 'agent_name', None),
+                'recorded_by': 'agent_process',
+            },
+        }
+        if parent_task_id:
+            task['parent_task_id'] = parent_task_id
+        if workflow_id:
+            task['workflow_id'] = workflow_id
+        if campaign_id:
+            task['campaign_id'] = campaign_id
+        try:
+            self._academy_interceptor.intercept_task(task)
+        except Exception as exc:
+            logger.warning('Flowcept xTB task record failed: %s', exc)
 
     @loop
     async def conduct_simulation_campaign(  # noqa: C901,PLR0915
@@ -499,7 +560,7 @@ class XTBSimulationAgent(Agent):
         search space.
         """
 
-        def _memory_block() -> str:  # [shared-memory] résumé borné de la mémoire pour le prompt
+        def _memory_block() -> str:  # [shared-memory] bounded summary of the shared memory for the prompt
             if self.memory is None:
                 return ''
             try:
@@ -557,7 +618,7 @@ class XTBSimulationAgent(Agent):
             previously_simulated = ' '.join(
                 state.simulated_molecules.keys(),
             )
-            if self.memory is not None:  # [shared-memory] molécules de TOUTE l'équipe
+            if self.memory is not None:  # [shared-memory] molecules of the WHOLE team
                 previously_simulated = ' '.join(
                     sorted(set(state.simulated_molecules) | set(self.memory.known_molecules())),
                 )
@@ -699,7 +760,7 @@ class XTBSimulationAgent(Agent):
                 ],
             )
             logger.info(f'Conclusions: {response}')
-            if self.memory is not None:  # [shared-memory] PUSH des conclusions pour les autres agents
+            if self.memory is not None:  # [shared-memory] PUSH conclusions for the other agents
                 try:
                     self.memory.push_lesson(
                         response.content, kind='conclusion',

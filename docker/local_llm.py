@@ -1,30 +1,30 @@
 """
-local_llm.py — Remplace le client LLM anonymisé de GAIED (SomeAPILLM) par :
-  - un modèle LOCAL servi par Ollama           (LLM_PROVIDER=ollama, par défaut)
-  - ou une API EN LIGNE au format OpenAI        (LLM_PROVIDER=openai)
-    → OpenAI, Google Gemini, Groq, OpenRouter, DeepSeek, Anthropic… (avec une clé API)
+local_llm.py — Replaces GAIED's anonymized LLM client (SomeAPILLM) with:
+  - a LOCAL model served by Ollama              (LLM_PROVIDER=ollama, default)
+  - or an ONLINE API in the OpenAI format        (LLM_PROVIDER=openai)
+    -> OpenAI, Google Gemini, Groq, OpenRouter, DeepSeek, Anthropic... (with an API key)
 
-Même interface que SomeAPILLM :
-  - attributs  : model, temperature, _tools   (lus par le patch de provenance Flowcept)
-  - méthodes   : bind_tools(tools), ainvoke(messages)
-  - réponse    : objet avec .content et .tool_calls
+Same interface as SomeAPILLM:
+  - attributes : model, temperature, _tools   (read by the Flowcept provenance patch)
+  - methods    : bind_tools(tools), ainvoke(messages)
+  - response   : object with .content and .tool_calls
 
-Comme l'original, les appels d'outils passent par un JSON demandé dans le prompt
-({"tool_calls": [{"name": ..., "args": {"smiles": ...}}]}) : marche avec tout modèle.
+As in the original, tool calls go through a JSON object requested in the prompt
+({"tool_calls": [{"name": ..., "args": {"smiles": ...}}]}), which works with any model.
 
-Variables d'environnement :
-  LLM_PROVIDER   "ollama" (défaut) ou "openai"
-  LLM_MODEL      nom du modèle (à défaut : OLLAMA_MODEL) — remplace le "gpt54" demandé par GAIED
+Environment variables:
+  LLM_PROVIDER   "ollama" (default) or "openai"
+  LLM_MODEL      model name (fallback: OLLAMA_MODEL); replaces the "gpt54" requested by GAIED
   --- Ollama ---
-  OLLAMA_URL     (défaut http://localhost:11434)
-  OLLAMA_THINK   "false" (défaut) / "true" / autre valeur = ne rien envoyer
-  NUM_CTX        taille du contexte (défaut 8192)
-  --- API en ligne (format OpenAI) ---
-  LLM_BASE_URL   ex. https://api.openai.com/v1
-  LLM_API_KEY    la clé (à mettre dans docker/.env, jamais dans Git)
-  LLM_SEND_TEMPERATURE  "true" (défaut) ; "false" pour les modèles qui l'imposent (ex. certains GPT-5)
-  --- Commun ---
-  NUM_PREDICT    nombre maximal de tokens générés (défaut 1024)
+  OLLAMA_URL     (default http://localhost:11434)
+  OLLAMA_THINK   "false" (default) / "true" / any other value = send nothing
+  NUM_CTX        context size (default 8192)
+  --- Online API (OpenAI format) ---
+  LLM_BASE_URL   e.g. https://api.openai.com/v1
+  LLM_API_KEY    the key (put it in docker/.env, never in Git)
+  LLM_SEND_TEMPERATURE  "true" (default); "false" for models that enforce it (e.g. some GPT-5)
+  --- Common ---
+  NUM_PREDICT    maximum number of generated tokens (default 1024)
 """
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ class OllamaLLM:
                 out.append({"role": "system", "content": msg.content})
             elif isinstance(msg, HumanMessage):
                 out.append({"role": "user", "content": msg.content})
-            else:  # ex. réponse précédente renvoyée lors d'un nouvel essai
+            else:  # e.g. a previous response sent back on a retry
                 out.append({"role": "assistant", "content": str(getattr(msg, "content", msg))})
         if self._tools:
             tool_names = ", ".join(t.name for t in self._tools)
@@ -75,7 +75,7 @@ class OllamaLLM:
                 "Respond with ONLY a JSON object: "
                 '{"tool_calls": [{"name": "<tool>", "args": {"smiles": "<SMILES>"}}]}'
             )
-            for m in reversed(out):            # consigne ajoutée au dernier message utilisateur
+            for m in reversed(out):            # instruction appended to the last user message
                 if m["role"] == "user":
                     m["content"] += instruction
                     break
@@ -118,18 +118,18 @@ class OllamaLLM:
         base = (os.environ.get("LLM_BASE_URL") or "").strip().rstrip("/")
         key = os.environ.get("LLM_API_KEY", "").strip()
         if not key:
-            raise RuntimeError("LLM_PROVIDER=openai mais LLM_API_KEY est vide (voir docker/.env).")
+            raise RuntimeError("LLM_PROVIDER=openai but LLM_API_KEY is empty (see docker/.env).")
         if not base.startswith("http"):
             raise RuntimeError(
-                "LLM_PROVIDER=openai mais LLM_BASE_URL est vide ou invalide : dans docker/.env, "
-                "retirez le # devant les lignes LLM_BASE_URL et LLM_MODEL de votre fournisseur.")
+                "LLM_PROVIDER=openai but LLM_BASE_URL is empty or invalid: in docker/.env, "
+                "remove the # in front of your provider's LLM_BASE_URL and LLM_MODEL lines.")
         if not os.environ.get("LLM_MODEL"):
             raise RuntimeError(
-                "LLM_PROVIDER=openai mais LLM_MODEL est vide : dans docker/.env, "
-                "retirez le # devant la ligne LLM_MODEL de votre fournisseur.")
+                "LLM_PROVIDER=openai but LLM_MODEL is empty: in docker/.env, "
+                "remove the # in front of your provider's LLM_MODEL line.")
         max_tokens = int(os.environ.get("NUM_PREDICT", "1024"))
         payload: dict = {"model": self.model, "messages": messages}
-        # api.openai.com attend max_completion_tokens ; les autres fournisseurs, max_tokens
+        # api.openai.com expects max_completion_tokens; other providers expect max_tokens
         payload["max_completion_tokens" if "api.openai.com" in base else "max_tokens"] = max_tokens
         if os.environ.get("LLM_SEND_TEMPERATURE", "true").lower() == "true":
             payload["temperature"] = self.temperature
@@ -139,8 +139,8 @@ class OllamaLLM:
             headers={"Authorization": f"Bearer {key}"},
             timeout=600,
         )
-        if resp.status_code >= 400:   # message d'erreur du fournisseur, sans afficher la clé
-            raise RuntimeError(f"Erreur API {resp.status_code} : {resp.text[:500]}")
+        if resp.status_code >= 400:   # provider error message, without printing the key
+            raise RuntimeError(f"API error {resp.status_code}: {resp.text[:500]}")
         return resp.json()["choices"][0]["message"].get("content") or ""
 
     # ------------------------------------------------------------------ API

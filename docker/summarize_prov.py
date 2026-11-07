@@ -1,16 +1,16 @@
 """
-summarize_prov.py — Résume la provenance Flowcept d'une campagne GAIED.
+summarize_prov.py — Summarizes the Flowcept provenance of a GAIED campaign.
 
-Affiche, dans l'ordre où Flowcept les a enregistrés :
-  - chaque nœud LangGraph (plan, tool_calling, simulate, conclude, critique, update) et sa durée ;
-  - chaque appel au LLM : durée, longueur de la réponse, nombre de molécules proposées ;
-  - chaque simulation xTB : molécule, énergie ou erreur.
-Puis un résumé : temps total passé dans le LLM, nombre de simulations, etc., et le nombre
-de calculs xTB faits EN DOUBLE (même molécule calculée plusieurs fois) : c'est la mesure
-qui compare une campagne avec et sans mémoire partagée.
+Prints, in time order:
+  - each LangGraph node (plan, tool_calling, simulate, conclude, critique, update) and its duration;
+  - each LLM call: duration, response length, number of proposed molecules;
+  - each xTB simulation: molecule, energy or error.
+Then a summary: total time spent in the LLM, number of simulations, and the number of
+DUPLICATE xTB computations (same molecule computed several times): this is the metric
+that compares a campaign with and without shared memory.
 
-Usage (depuis GAIED/docker) :
-    docker compose run --rm gaied python docker/summarize_prov.py            # fichier le plus récent
+Usage (from GAIED/docker):
+    docker compose run --rm gaied python docker/summarize_prov.py            # latest campaign
     docker compose run --rm gaied python docker/summarize_prov.py output/flowcept_buffer_XXX.jsonl
 """
 import glob
@@ -68,8 +68,8 @@ def _campaign_of(records):
 
 
 def _load(path):
-    """Flowcept écrit UN fichier par processus (orchestrateur + un par agent).
-    On rassemble tous les fichiers de la même campagne que le plus récent."""
+    """Flowcept writes ONE file per process (orchestrator + one per agent).
+    Gather all the files that belong to the same campaign as the most recent one."""
     if path is not None:
         return [path], _read(path)
     files = sorted(glob.glob("output/flowcept_buffer_*.jsonl"), key=os.path.getmtime, reverse=True)
@@ -86,16 +86,16 @@ def _load(path):
 def main(path: str | None) -> int:
     files, records = _load(path)
     if not records:
-        print("Aucune provenance trouvée dans output/flowcept_buffer_*.jsonl.")
+        print("No provenance found in output/flowcept_buffer_*.jsonl.")
         return 1
-    print(f"Campagne {_campaign_of(records)} — {len(files)} fichier(s) :")
+    print(f"Campaign {_campaign_of(records)} - {len(files)} file(s):")
     for f in files:
         print(f"  {f}")
     print()
 
     llm_total_s, llm_calls, empty_tool_calls, sims, sim_errors = 0.0, 0, 0, 0, 0
-    xtb_runs = Counter()   # molécule canonique → nombre de vrais calculs xTB
-    tool_calls = Counter()  # molécule canonique → nombre de demandes de l'outil par le LLM
+    xtb_runs = Counter()   # canonical molecule -> number of actual xTB computations
+    tool_calls = Counter()  # canonical molecule -> number of tool requests by the LLM
 
     for r in records:
         st = r.get("subtype")
@@ -106,7 +106,7 @@ def main(path: str | None) -> int:
 
         if st == "langgraph_node":
             name = (r.get("custom_metadata") or {}).get("node_name") or r.get("activity_id")
-            print(f"[nœud]  {name:<13} {'' if dur is None else f'{dur:7.1f} s'}")
+            print(f"[node]  {name:<13} {'' if dur is None else f'{dur:7.1f} s'}")
 
         elif st == "llm_call":
             llm_calls += 1
@@ -114,12 +114,12 @@ def main(path: str | None) -> int:
             llm_total_s += secs
             response = gen.get("response") or ""
             calls = gen.get("tool_calls") or []
-            line = f"[LLM]   {secs:7.1f} s  réponse de {len(response):5d} caractères"
+            line = f"[LLM]   {secs:7.1f} s  response of {len(response):5d} characters"
             if used.get("has_tools"):
-                line += f"  → {len(calls)} molécule(s) proposée(s)"
+                line += f"  -> {len(calls)} molecule(s) proposed"
                 if not calls:
                     empty_tool_calls += 1
-                    line += "  ⚠ AUCUN APPEL D'OUTIL : « " + _short(response, 60) + " »"
+                    line += "  WARNING NO TOOL CALL: \"" + _short(response, 60) + "\""
             print(line)
 
         elif st in ("tool_call", "parsl_task"):
@@ -130,27 +130,28 @@ def main(path: str | None) -> int:
             status = r.get("status")
             if status == "ERROR" or out is None:
                 sim_errors += 1
-                out = "ERREUR " + _short(r.get("stderr") or gen, 50)
-            print(f"[xTB]   {smiles:<28} → {out}  {'' if dur is None else f'({dur:.1f} s)'}")
-            if st == "parsl_task":          # un vrai calcul xTB (pas une simple réutilisation)
+                out = "ERROR " + _short(r.get("stderr") or gen, 50)
+            print(f"[{'xTB' if st == 'parsl_task' else 'tool'}]  {smiles:<28} -> {out}  {'' if dur is None else f'({dur:.1f} s)'}")
+            if st == "parsl_task":          # an actual xTB computation (not a reuse)
                 xtb_runs[_canonical(smiles)] += 1
             else:
                 tool_calls[_canonical(smiles)] += 1
 
     print("\n" + "=" * 60)
-    print(f"Appels au LLM            : {llm_calls}, au total {llm_total_s / 60:.1f} min")
+    print(f"LLM calls                : {llm_calls}, {llm_total_s / 60:.1f} min in total")
     if llm_calls:
-        print(f"Durée moyenne d'un appel : {llm_total_s / llm_calls:.0f} s")
-    print(f"Appels sans molécule     : {empty_tool_calls}  (le modèle n'a pas produit le JSON attendu)")
-    print(f"Simulations xTB          : {sims}, dont {sim_errors} en erreur")
-    if not xtb_runs and tool_calls:   # anciennes campagnes : pas de trace parsl_task
-        print("(pas de trace des calculs xTB eux-mêmes : on compte les demandes de l'outil)")
+        print(f"Mean LLM call duration   : {llm_total_s / llm_calls:.0f} s")
+    print(f"Calls without molecules  : {empty_tool_calls}  (the model did not produce the expected JSON)")
+    print(f"Tool calls (simulations) : {sum(tool_calls.values())}")
+    print(f"xTB tasks recorded       : {sum(xtb_runs.values())}, errors among all: {sim_errors}")
+    if not xtb_runs and tool_calls:   # older campaigns: no parsl_task record
+        print("(no record of the xTB computations themselves: counting tool requests instead)")
         xtb_runs = tool_calls
     if xtb_runs:
         dup = {m: n for m, n in xtb_runs.items() if n > 1}
         wasted = sum(n - 1 for n in dup.values())
-        print(f"Calculs xTB réels        : {sum(xtb_runs.values())} pour {len(xtb_runs)} molécules différentes")
-        print(f"Calculs en DOUBLE        : {wasted}" + (
+        print(f"xTB computations         : {sum(xtb_runs.values())} for {len(xtb_runs)} distinct molecules")
+        print(f"DUPLICATE computations   : {wasted}" + (
             "  (" + ", ".join(f"{m} ×{n}" for m, n in sorted(dup.items(), key=lambda x: -x[1])) + ")" if dup else ""))
     return 0
 

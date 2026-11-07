@@ -1,34 +1,34 @@
 """
-shared_memory.py — Mémoire partagée entre agents GAIED, stockée dans Redis.
+shared_memory.py — Shared memory for GAIED agents, stored in Redis.
 
-Idée (schéma d'Amal) : au lieu que chaque agent garde ses résultats dans sa RAM
-(`molecule_cache`, perdu au crash et invisible pour les autres), les agents POUSSENT
-ce qu'ils font et apprennent dans une mémoire commune, et la RELISENT avant de décider.
+Idea (Amal's diagram): instead of each agent keeping its results in its own RAM
+(`molecule_cache`, lost on crash and invisible to the others), agents PUSH what they
+do and learn into a common memory, and PULL it before deciding.
 
-Ce que contient la mémoire d'une campagne (toutes les clés commencent par mem:{campagne}:) :
+Contents of the memory of one campaign (all keys start with mem:{campaign}:):
 
-  goal                  JSON     objectif de la campagne (écrit par run-07.py ou un humain)
-  claim:{mol}           chaîne   VERROU « je simule cette molécule » (avec expiration)
-  result:{mol}          hash     résultat : energy, smiles, agent, task_id (Flowcept), status, time
-  ranking               zset     molécules réussies, classées par énergie
-  failed                set      molécules dont la simulation a échoué (SMILES invalide…)
-  lessons               stream   conclusions et leçons écrites par les agents
-  instructions          stream   consignes des agents d'analyse (travail de Nadjiba)
-  stats                 hash     compteurs : simulations faites, résultats réutilisés, attentes…
-  events                canal    notification pub/sub à chaque écriture
+  goal                  JSON     campaign objective (written by run-07.py or a human)
+  claim:{mol}           string   LOCK "I am simulating this molecule" (with expiry)
+  result:{mol}          hash     result: energy, smiles, agent, task_id (Flowcept), status, time
+  ranking               zset     successful molecules, ranked by energy
+  failed                set      molecules whose simulation failed (invalid SMILES, ...)
+  lessons               stream   conclusions and lessons written by the agents
+  instructions          stream   directives from the analysis agents (Nadjiba's work)
+  stats                 hash     counters: computations, reused results, waits, ...
+  events                channel  pub/sub notification on every write
 
-{mol} est la forme canonique du SMILES (calculée avec RDKit si disponible), pour que deux
-écritures différentes de la même molécule soient reconnues comme identiques.
+{mol} is the canonical SMILES (computed with RDKit when available), so that two
+different spellings of the same molecule are recognized as identical.
 
-Les trois opérations de base :
+The three basic kinds of operations:
   PUSH  : push_result, push_lesson, push_instruction, set_goal
   PULL  : get_result, pull_results, best, pull_lessons, pull_instructions, get_goal,
-          render_for_prompt (résumé borné à mettre dans le prompt du LLM)
-  COORDINATION : claim / release, et get_or_compute qui combine tout
+          render_for_prompt (bounded summary to put in the LLM prompt)
+  COORDINATION : claim / release, and get_or_compute which combines everything
 
-Outil en ligne de commande (pour voir la mémoire) :
-  python shared_memory.py campaigns          liste les campagnes en mémoire
-  python shared_memory.py show [campagne]    résumé d'une campagne (la plus récente par défaut)
+Command-line tool (to inspect the memory):
+  python shared_memory.py campaigns          list the campaigns in memory
+  python shared_memory.py show [campaign]    summary of one campaign (most recent by default)
 """
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
-try:  # RDKit est présent dans l'image Docker ; sans lui on garde le SMILES tel quel
+try:  # RDKit is available in the Docker image; without it the SMILES is kept as is
     from rdkit import Chem
     from rdkit import RDLogger
     RDLogger.DisableLog("rdApp.*")
@@ -52,7 +52,7 @@ except ImportError:  # pragma: no cover
 
 
 def canonical_smiles(smiles: str) -> str:
-    """Forme canonique d'un SMILES (ou le SMILES nettoyé s'il est invalide / sans RDKit)."""
+    """Canonical form of a SMILES (or the stripped SMILES if invalid / no RDKit)."""
     smiles = smiles.strip()
     if Chem is not None:
         mol = Chem.MolFromSmiles(smiles)
@@ -62,7 +62,7 @@ def canonical_smiles(smiles: str) -> str:
 
 
 class SimulationFailed(Exception):
-    """La simulation de cette molécule a déjà échoué (connu grâce à la mémoire)."""
+    """The simulation of this molecule already failed (known from the shared memory)."""
 
 
 class SharedMemory:
@@ -74,13 +74,13 @@ class SharedMemory:
         self.claim_ttl = claim_ttl
         self.p = f"{prefix}:{campaign_id}"
 
-    # ------------------------------------------------------------------ création
+    # ------------------------------------------------------------------ creation
     @classmethod
     def from_env(cls, agent_id: str = "agent") -> "SharedMemory | None":
-        """Crée la mémoire à partir des variables d'environnement, ou renvoie None si elle
-        est désactivée (SHARED_MEMORY=false) ou si Redis est injoignable."""
+        """Build the memory from environment variables, or return None if it is
+        disabled (SHARED_MEMORY=false) or Redis is unreachable."""
         if os.environ.get("SHARED_MEMORY", "true").lower() not in ("1", "true", "yes"):
-            logger.info("Mémoire partagée désactivée (SHARED_MEMORY=false).")
+            logger.info("Shared memory disabled (SHARED_MEMORY=false).")
             return None
         try:
             import redis
@@ -88,14 +88,14 @@ class SharedMemory:
                                  port=int(os.environ.get("REDIS_PORT", "6379")),
                                  decode_responses=True)
             client.ping()
-        except Exception as exc:  # Redis absent : l'agent continue sans mémoire partagée
-            logger.warning("Mémoire partagée indisponible (%s) : l'agent continue sans.", exc)
+        except Exception as exc:  # no Redis: the agent keeps running without shared memory
+            logger.warning("Shared memory unavailable (%s): continuing without it.", exc)
             return None
         campaign = (os.environ.get("MEMORY_CAMPAIGN_ID")
                     or os.environ.get("FLOWCEPT_CAMPAIGN_ID") or "default")
         ttl = int(os.environ.get("MEMORY_CLAIM_TTL", "600"))
         mem = cls(client, campaign_id=campaign, agent_id=agent_id, claim_ttl=ttl)
-        client.zadd("mem:campaigns", {campaign: time.time()})   # index des campagnes
+        client.zadd("mem:campaigns", {campaign: time.time()})   # campaign index
         return mem
 
     def k(self, *parts: str) -> str:
@@ -107,7 +107,7 @@ class SharedMemory:
     def _count(self, field: str, n: int = 1) -> None:
         self.r.hincrby(self.k("stats"), field, n)
 
-    # ------------------------------------------------------------------ objectif
+    # ------------------------------------------------------------------ goal
     def set_goal(self, goal: dict) -> None:
         self.r.set(self.k("goal"), json.dumps(goal))
         self._notify("goal")
@@ -116,9 +116,9 @@ class SharedMemory:
         raw = self.r.get(self.k("goal"))
         return json.loads(raw) if raw else None
 
-    # ------------------------------------------------------------------ verrous
+    # ------------------------------------------------------------------ locks
     def claim(self, smiles: str, ttl: int | None = None) -> bool:
-        """Prend le verrou sur une molécule. True si on l'a obtenu, False si un autre l'a."""
+        """Take the lock on a molecule. True if we got it, False if another agent holds it."""
         key = self.k("claim", canonical_smiles(smiles))
         return bool(self.r.set(key, self.agent_id, nx=True, ex=ttl or self.claim_ttl))
 
@@ -126,12 +126,12 @@ class SharedMemory:
         return self.r.get(self.k("claim", canonical_smiles(smiles)))
 
     def release(self, smiles: str) -> None:
-        """Libère le verrou, seulement s'il nous appartient."""
+        """Release the lock, only if we own it."""
         key = self.k("claim", canonical_smiles(smiles))
         if self.r.get(key) == self.agent_id:
             self.r.delete(key)
 
-    # ------------------------------------------------------------------ résultats
+    # ------------------------------------------------------------------ results
     def push_result(self, smiles: str, energy: float | None, task_id: str | None = None,
                     error: str | None = None) -> None:
         mol = canonical_smiles(smiles)
@@ -159,7 +159,7 @@ class SharedMemory:
         return rec
 
     def pull_results(self) -> dict[str, float]:
-        """Toutes les molécules simulées avec succès, par n'importe quel agent : {smiles: énergie}."""
+        """All molecules simulated successfully, by any agent: {smiles: energy}."""
         return {m: e for m, e in self.r.zrange(self.k("ranking"), 0, -1, withscores=True)}
 
     def failed_molecules(self) -> set[str]:
@@ -168,7 +168,7 @@ class SharedMemory:
     def best(self, n: int = 5) -> list[tuple[str, float]]:
         return self.r.zrevrange(self.k("ranking"), 0, n - 1, withscores=True)
 
-    # ------------------------------------------------------------------ leçons
+    # ------------------------------------------------------------------ lessons
     def push_lesson(self, text: str, kind: str = "conclusion", evidence: list[str] | None = None) -> None:
         self.r.xadd(self.k("lessons"), {
             "agent": self.agent_id, "kind": kind, "text": text,
@@ -177,7 +177,7 @@ class SharedMemory:
         self._notify("lesson", kind=kind)
 
     def pull_lessons(self, count: int = 10, exclude_own: bool = False) -> list[dict]:
-        """Les leçons les plus récentes (de la plus ancienne à la plus récente)."""
+        """Most recent lessons (oldest first)."""
         entries = self.r.xrevrange(self.k("lessons"), count=count * 3 if exclude_own else count)
         out = [dict(fields, id=eid) for eid, fields in entries
                if not (exclude_own and fields.get("agent") == self.agent_id)]
@@ -186,7 +186,7 @@ class SharedMemory:
     # ------------------------------------------------------------------ instructions
     def push_instruction(self, text: str, target: str = "all", status: str = "info",
                          evidence: list[str] | None = None, author: str = "analysis") -> None:
-        """Écrite par les agents d'analyse (Nadjiba). target = un agent_id, ou "all"."""
+        """Written by the analysis agents (Nadjiba). target = an agent_id, or "all"."""
         self.r.xadd(self.k("instructions"), {
             "author": author, "target": target, "status": status, "text": text,
             "evidence": json.dumps(evidence or []), "time": time.time(),
@@ -194,16 +194,16 @@ class SharedMemory:
         self._notify("instruction", target=target)
 
     def pull_instructions(self, count: int = 5) -> list[dict]:
-        """Instructions récentes qui concernent cet agent (ou tous les agents)."""
+        """Recent instructions addressed to this agent (or to all agents)."""
         entries = self.r.xrevrange(self.k("instructions"), count=count * 5)
         mine = [dict(f, id=eid) for eid, f in entries if f.get("target") in ("all", self.agent_id)]
         return list(reversed(mine[:count]))
 
-    # ------------------------------------------------------------------ résumé pour le LLM
+    # ------------------------------------------------------------------ summary for the LLM
     def render_for_prompt(self, max_results: int = 25, max_lessons: int = 5,
                           max_instructions: int = 5) -> str:
-        """Résumé BORNÉ de la mémoire partagée, à insérer dans le prompt du LLM
-        (même idée que l'index MEMORY.md de Claude Code : court, toujours chargé)."""
+        """BOUNDED summary of the shared memory, to insert in the LLM prompt
+        (same idea as Claude Code's MEMORY.md index: short, always loaded)."""
         lines = ["=== SHARED MEMORY (all agents of this campaign) ==="]
         goal = self.get_goal()
         if goal:
@@ -233,7 +233,7 @@ class SharedMemory:
         return "\n".join(lines)
 
     def in_progress(self) -> dict[str, str]:
-        """Molécules en cours de calcul (verrou posé) → agent qui les calcule."""
+        """Molecules currently being computed (lock held) -> agent computing them."""
         prefix = self.k("claim", "")
         out = {}
         for key in self.r.scan_iter(match=prefix + "*", count=200):
@@ -243,22 +243,22 @@ class SharedMemory:
         return out
 
     def known_molecules(self) -> list[str]:
-        """Toutes les molécules à NE PAS reproposer : réussies, échouées, en cours."""
+        """All molecules NOT to propose again: succeeded, failed, or in progress."""
         return sorted(set(self.pull_results()) | self.failed_molecules() | set(self.in_progress()))
 
-    # ------------------------------------------------------------------ tout en un
+    # ------------------------------------------------------------------ all in one
     async def get_or_compute(self, smiles: str,
                              compute: Callable[[str | None], Awaitable[float]],
                              new_task_id: Callable[[], str] | None = None,
                              poll: float = 2.0) -> float:
-        """Renvoie l'énergie d'une molécule en évitant les calculs en double :
+        """Return the energy of a molecule while avoiding duplicate computations:
 
-        1. déjà en mémoire            → on réutilise le résultat (ou l'échec) ;
-        2. un autre agent la calcule  → on attend son résultat ;
-        3. sinon on prend le verrou, on calcule, on publie le résultat, on libère.
+        1. already in memory               -> reuse the result (or the failure);
+        2. another agent is computing it   -> wait for its result;
+        3. otherwise take the lock, compute, publish the result, release the lock.
 
-        `compute(task_id)` lance le vrai calcul (xTB). Si le verrou d'un autre agent
-        expire sans résultat (agent planté), on reprend le calcul nous-mêmes.
+        `compute(task_id)` runs the actual computation (xTB). If another agent's lock
+        expires without a result (crashed agent), we take over the computation.
         """
         while True:
             known = self.get_result(smiles)
@@ -273,43 +273,43 @@ class SharedMemory:
                 try:
                     energy = await compute(task_id)
                 except Exception as exc:
-                    # l'échec est mémorisé : les autres agents ne retenteront pas cette molécule
+                    # the failure is stored: other agents will not retry this molecule
                     self.push_result(smiles, None, task_id=task_id, error=str(exc))
                     self.release(smiles)
                     self._count("computed_error")
                     raise
-                except BaseException:      # annulation : on libère sans rien mémoriser
+                except BaseException:      # cancellation: release without storing anything
                     self.release(smiles)
                     raise
-                # le résultat est publié AVANT de libérer le verrou : aucun autre agent
-                # ne peut voir « ni verrou ni résultat » et relancer le calcul
+                # the result is published BEFORE releasing the lock, so no other agent
+                # can observe "no lock and no result" and start the computation again
                 self.push_result(smiles, energy, task_id=task_id)
                 self.release(smiles)
                 self._count("computed")
                 return energy
 
-            # un autre agent tient le verrou : on attend son résultat
+            # another agent holds the lock: wait for its result
             self._count("waited")
             while self.claimed_by(smiles) is not None and self.get_result(smiles) is None:
                 await asyncio.sleep(poll)
-            # boucle : soit le résultat est là, soit le verrou a expiré → on retente
+            # loop again: either the result is there, or the lock expired and we retry
 
-    # ------------------------------------------------------------------ résumé texte
+    # ------------------------------------------------------------------ text summary
     def summary(self) -> str:
         stats = self.r.hgetall(self.k("stats"))
-        lines = [f"Mémoire partagée — campagne {self.campaign_id}",
-                 f"  molécules réussies : {self.r.zcard(self.k('ranking'))}",
-                 f"  molécules en échec : {self.r.scard(self.k('failed'))}",
-                 f"  leçons             : {self.r.xlen(self.k('lessons'))}",
-                 f"  instructions       : {self.r.xlen(self.k('instructions'))}",
-                 "  compteurs          : " + (", ".join(f"{k}={v}" for k, v in sorted(stats.items())) or "aucun")]
+        lines = [f"Shared memory - campaign {self.campaign_id}",
+                 f"  successful molecules : {self.r.zcard(self.k('ranking'))}",
+                 f"  failed molecules     : {self.r.scard(self.k('failed'))}",
+                 f"  lessons              : {self.r.xlen(self.k('lessons'))}",
+                 f"  instructions         : {self.r.xlen(self.k('instructions'))}",
+                 "  counters             : " + (", ".join(f"{k}={v}" for k, v in sorted(stats.items())) or "none")]
         best = self.best(5)
         if best:
-            lines.append("  5 meilleures       : " + ", ".join(f"{m} ({e:.3f})" for m, e in best))
+            lines.append("  top 5                : " + ", ".join(f"{m} ({e:.3f})" for m, e in best))
         return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------- ligne de commande
+# ---------------------------------------------------------------------- command line
 def _cli(argv: list[str]) -> int:
     import redis
     r = redis.Redis(host=os.environ.get("REDIS_HOST", "localhost"),
@@ -326,7 +326,7 @@ def _cli(argv: list[str]) -> int:
         elif campaigns:
             campaign = campaigns[-1][0]
         else:
-            print("Aucune campagne en mémoire.")
+            print("No campaign in memory.")
             return 1
         mem = SharedMemory(r, campaign_id=campaign, agent_id="cli")
         print(mem.summary())

@@ -1,17 +1,18 @@
 """
-apply_patches.py — Adapte GAIED pour tourner en local, dans Docker, avec Ollama.
+apply_patches.py — Adapts GAIED to run locally, in Docker, with Ollama.
+(Already applied and committed on the docker-local branch: do not run it again.)
 
-Usage (depuis le dossier GAIED) :
+Usage (from the GAIED folder):
     python docker/apply_patches.py .
 
-Modifications (chacune n'est appliquée qu'une fois ; une copie .orig est gardée) :
+Changes (each one is applied only once; an .orig copy is kept):
   run-07.py
-    - Redis : hôte lu dans REDIS_HOST (dans Docker, le service s'appelle "redis")
-    - Parsl : supprime le "conda activate" (inutile dans le conteneur, et il manquait un ";")
-    - molécules de départ lues dans SEEDS, itérations dans MAX_ITERATIONS
+    - Redis: host read from REDIS_HOST (in Docker, the service is called "redis")
+    - Parsl: removes the "conda activate" (useless in the container, and a ";" was missing)
+    - seed molecules read from SEEDS, iterations from MAX_ITERATIONS
   mol_design_agents.py
-    - si OLLAMA_MODEL est défini, utilise local_llm.OllamaLLM à la place de SomeAPILLM
-    - nombre de processus xTB par agent lu dans N_XTB_WORKERS (le code prenait tous les cœurs - 1)
+    - if OLLAMA_MODEL is set, use local_llm.OllamaLLM instead of SomeAPILLM
+    - number of xTB processes per agent read from N_XTB_WORKERS (the code used all cores - 1)
 """
 import shutil
 import sys
@@ -24,7 +25,7 @@ PATCHES = {
         ("factory=RedisExchangeFactory('localhost', 6379),",
          f"factory=RedisExchangeFactory(os.environ.get('REDIS_HOST', 'localhost'), 6379),  {MARK}"),
         ("f'cd {os.getcwd()}conda activate ./mol-design;'",
-         f"''  {MARK} conda activate inutile dans Docker"),
+         f"''  {MARK} no conda activate needed in Docker"),
         ("        seeds = [\n            'CNC(N)=O',\n            'CC1=C(O)N=C(O)N1',\n        ]",
          f"        seeds = os.environ.get('SEEDS', 'CNC(N)=O,CC1=C(O)N=C(O)N1').split(',')  {MARK}"),
         ("                        20,   # max_iterations",
@@ -48,21 +49,21 @@ def main(repo: Path) -> int:
         path = repo / name
         text = path.read_text()
         if MARK in text:
-            print(f"[=] {name} : déjà modifié, rien à faire")
+            print(f"[=] {name}: already patched, nothing to do")
             continue
         shutil.copy(path, path.with_suffix(path.suffix + ".orig"))
         for old, new in edits:
             if text.count(old) != 1:
-                print(f"[!] {name} : bloc introuvable, à modifier à la main :\n    {old.strip()[:80]}")
+                print(f"[!] {name}: block not found, edit it by hand:\n    {old.strip()[:80]}")
                 ok = False
                 continue
             text = text.replace(old, new)
         path.write_text(text)
-        print(f"[+] {name} : modifié (copie d'origine : {name}.orig)")
+        print(f"[+] {name}: patched (original copy: {name}.orig)")
     return 0 if ok else 1
 
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        sys.exit("Usage : python apply_patches.py <chemin vers GAIED>")
+        sys.exit("Usage: python apply_patches.py <path to GAIED>")
     sys.exit(main(Path(sys.argv[1])))

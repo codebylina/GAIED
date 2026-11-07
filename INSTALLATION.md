@@ -139,8 +139,8 @@ fournisseur choisi (et vérifier le nom exact du modèle sur le site du fourniss
 docker compose run --rm gaied python tests/test_shared_memory.py
 docker compose run --rm gaied python tests/test_agent_memory.py
 ```
-Résultat attendu : `9/9 tests réussis`, puis `5/5 tests réussis`. Le second test lance un vrai
-calcul xTB : deux agents demandent la même molécule en même temps, et la ligne `compteurs` doit
+Résultat attendu : `9/9 tests passed`, puis `5/5 tests passed`. Le second test lance un vrai
+calcul xTB : deux agents demandent la même molécule en même temps, et la ligne `counters` doit
 contenir `'computed': 1` (un seul calcul grâce à la mémoire partagée).
 
 ---

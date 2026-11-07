@@ -57,7 +57,9 @@ docker compose exec redis redis-cli KEYS "mem:*"                # voir la mémoi
 - Travailler sur la branche `docker-local` (ou une branche dédiée), jamais sur `main`.
 - Garder les modifications du code d'Amal minimales et marquées par un commentaire.
 - Code de la mémoire : d'abord dans `shared_memory.py` à la racine de GAIED (plus tard dans Flowcept).
-- Expliquer les changements en français ; je débute avec Docker.
+- **Tout le code est en anglais** : commentaires, docstrings, messages affichés, fichiers de config.
+  Aucun français dans le code du projet. Les explications à moi se font en français.
+- Je débute avec Docker.
 
 ## Mémoire partagée (branche `shared-memory`, première version pour la réunion du 9 nov.)
 Code : `shared_memory.py` (racine). Interrupteur : `SHARED_MEMORY` dans docker-compose (true par défaut).
@@ -81,7 +83,11 @@ docker compose run --rm gaied python tests/test_shared_memory.py   # module seul
 docker compose run --rm gaied python tests/test_agent_memory.py    # vrai code de l'agent + vrai xTB (< 1 min)
 docker compose run --rm gaied python shared_memory.py show         # contenu de la dernière campagne
 ```
-Mesure : `python docker/summarize_prov.py` affiche « Calculs en DOUBLE » ; comparer
+Provenance des calculs xTB : `_compute_energy_with_prov` essaie d'écrire la tâche `parsl_task` dans le
+processus xTB, mais aucun intercepteur n'y existe (Flowcept ne patche `ProcessPoolExecutor` que dans
+`FlowceptAcademyPlugin.start()`, que GAIED n'appelle pas). La tâche est donc écrite depuis le processus
+de l'agent (`XTBSimulationAgent._record_xtb_task`), avec le même `task_id` que le résultat en mémoire.
+Mesure : `python docker/summarize_prov.py` affiche « DUPLICATE computations » ; comparer
 `SEEDS: "CNC(N)=O,CNC(N)=O"` avec `-e SHARED_MEMORY=false` puis avec la mémoire.
 Idées suivantes : déplacer le module dans Flowcept ; agents d'analyse qui lisent `interception`
 et écrivent `instructions` ; reprise après crash (même `MEMORY_CAMPAIGN_ID`) ; copie durable dans MongoDB.

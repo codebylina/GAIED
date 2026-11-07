@@ -1,57 +1,57 @@
-# Ce fichier se trouve dans GAIED/docker/ (votre fork de GAIED).
-# Toutes les commandes se lancent depuis ce dossier docker/.
+# This file lives in GAIED/docker/.
+# All commands are run from this docker/ folder.
 #
-# Démarrer :  docker compose up -d redis ollama
-#             docker compose exec ollama ollama pull qwen3.5:4b
-#             docker compose run --rm gaied
-# Avec MongoDB : ajouter --profile mongo
+# Start:  docker compose up -d redis ollama
+#         docker compose exec ollama ollama pull qwen3.5:4b
+#         docker compose run --rm gaied
+# With MongoDB: add --profile mongo
 
 services:
   redis:
     image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes"]   # persistance sur disque (AOF)
+    command: ["redis-server", "--appendonly", "yes"]   # on-disk persistence (AOF)
     ports: ["6379:6379"]
     volumes: [redis-data:/data]
 
   mongo:
     image: mongo:7
-    profiles: ["mongo"]                                # lancé seulement avec --profile mongo
+    profiles: ["mongo"]                                # started only with --profile mongo
     ports: ["27017:27017"]
     volumes: [mongo-data:/data/db]
 
   ollama:
     image: ollama/ollama:latest
     ports: ["11434:11434"]
-    volumes: [ollama-models:/root/.ollama]             # les modèles téléchargés sont gardés
+    volumes: [ollama-models:/root/.ollama]             # downloaded models are kept
 
   gaied:
     build: .
-    user: root                                         # évite les problèmes de droits sur le dossier monté
+    user: root                                         # avoids permission issues on the mounted folder
     depends_on: [redis, ollama]
     working_dir: /app
     shm_size: 1gb
     environment:
       REDIS_HOST: redis
-      # --- Choix du LLM : "ollama" (local) ou "openai" (API en ligne, clé dans docker/.env) ---
+      # --- LLM choice: "ollama" (local) or "openai" (online API, key in docker/.env) ---
       LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
-      LLM_MODEL: ${LLM_MODEL:-}                   # vide = OLLAMA_MODEL ci-dessous
+      LLM_MODEL: ${LLM_MODEL:-}                   # empty = OLLAMA_MODEL below
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_SEND_TEMPERATURE: ${LLM_SEND_TEMPERATURE:-true}
       OLLAMA_URL: http://ollama:11434
-      OLLAMA_MODEL: qwen3.5:4b          # qwen3.5:9b si vous avez 16 Go de RAM ou plus
-      OLLAMA_THINK: "false"             # mode raisonnement désactivé : beaucoup plus rapide sur CPU
+      OLLAMA_MODEL: qwen3.5:4b          # qwen3.5:9b with 16 GB of RAM or more
+      OLLAMA_THINK: "false"             # thinking mode off: much faster on CPU
       NUM_PREDICT: "1024"
-      SEEDS: "CNC(N)=O"                 # 1 agent pour le premier essai ; "CNC(N)=O,CNC(N)=O" pour tester les doublons
+      SEEDS: "CNC(N)=O"                 # one agent per seed; "CNC(N)=O,CNC(N)=O" to test duplicates
       MAX_ITERATIONS: "3"
       N_XTB_WORKERS: "1"
-      SHARED_MEMORY: ${SHARED_MEMORY:-true}    # [shared-memory] false = agents sans mémoire partagée (référence)
-      MEMORY_CLAIM_TTL: "900"           # un verrou de molécule expire après 15 min (agent planté)
-      STABLE_REPORTS: "60"              # arrêt après 60 rapports (30 min) sans nouvelle molécule : le LLM sur CPU est lent
+      SHARED_MEMORY: ${SHARED_MEMORY:-true}    # [shared-memory] false = agents without shared memory (baseline)
+      MEMORY_CLAIM_TTL: "900"           # a molecule lock expires after 15 min (crashed agent)
+      STABLE_REPORTS: "60"              # stop after 60 reports (30 min) without a new molecule: the LLM is slow on CPU
       FLOWCEPT_SETTINGS_PATH: /app/docker/flowcept_settings.yaml
-      PYTHONPATH: /app:/app/docker                # pour trouver local_llm.py
+      PYTHONPATH: /app:/app/docker                # so that local_llm.py is found
     volumes:
-      - ..:/app                                   # le dossier GAIED entier
+      - ..:/app                                   # the whole GAIED folder
 
 volumes:
   redis-data:

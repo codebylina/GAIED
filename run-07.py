@@ -30,7 +30,7 @@ async def main() -> int:
             HighThroughputExecutor(
                 provider=LocalProvider(
                     worker_init=(
-                        ''  # [gaied-docker patch] conda activate inutile dans Docker
+                        ''  # [gaied-docker patch] no conda activate needed in Docker
                     ),
                 ),
                 max_workers_per_node=2,
@@ -45,7 +45,7 @@ async def main() -> int:
     ) as manager:
         seeds = os.environ.get('SEEDS', 'CNC(N)=O,CC1=C(O)N=C(O)N1').split(',')  # [gaied-docker patch]
 
-        # [shared-memory] le Goal est écrit dans la mémoire partagée AVANT le lancement des agents
+        # [shared-memory] the Goal is written to the shared memory BEFORE the agents start
         memory = SharedMemory.from_env(agent_id='orchestrator')
         if memory is not None:
             if memory.get_goal() is None:
@@ -103,7 +103,7 @@ async def main() -> int:
             print('All agents completed.')
         except (KeyboardInterrupt, asyncio.CancelledError):
             print('\nShutting down agents...')
-        if memory is not None:  # [shared-memory] bilan : réutilisations, doublons évités
+        if memory is not None:  # [shared-memory] summary: reuses and avoided duplicates
             print(memory.summary())
 
     return 0
