@@ -115,10 +115,18 @@ class OllamaLLM:
         return resp.json().get("message", {}).get("content", "")
 
     def _post_openai(self, messages: list[dict]) -> str:
-        base = os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-        key = os.environ.get("LLM_API_KEY", "")
+        base = (os.environ.get("LLM_BASE_URL") or "").strip().rstrip("/")
+        key = os.environ.get("LLM_API_KEY", "").strip()
         if not key:
             raise RuntimeError("LLM_PROVIDER=openai mais LLM_API_KEY est vide (voir docker/.env).")
+        if not base.startswith("http"):
+            raise RuntimeError(
+                "LLM_PROVIDER=openai mais LLM_BASE_URL est vide ou invalide : dans docker/.env, "
+                "retirez le # devant les lignes LLM_BASE_URL et LLM_MODEL de votre fournisseur.")
+        if not os.environ.get("LLM_MODEL"):
+            raise RuntimeError(
+                "LLM_PROVIDER=openai mais LLM_MODEL est vide : dans docker/.env, "
+                "retirez le # devant la ligne LLM_MODEL de votre fournisseur.")
         max_tokens = int(os.environ.get("NUM_PREDICT", "1024"))
         payload: dict = {"model": self.model, "messages": messages}
         # api.openai.com attend max_completion_tokens ; les autres fournisseurs, max_tokens
