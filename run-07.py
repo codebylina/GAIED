@@ -34,6 +34,9 @@ async def main() -> int:
                     ),
                 ),
                 max_workers_per_node=2,
+                # [gaied-docker patch] a local LLM on CPU can starve the Parsl manager
+                # for minutes; the default (120 s) made Parsl drop both agents (ManagerLost)
+                heartbeat_threshold=int(os.environ.get('PARSL_HEARTBEAT_THRESHOLD', '1200')),
             ),
         ],
     )
