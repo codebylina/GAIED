@@ -49,18 +49,53 @@ def _as_dict(value):
     return {}
 
 
-def main(path: str | None) -> int:
-    if path is None:
-        files = glob.glob("output/flowcept_buffer_*.jsonl")
-        if not files:
-            print("Aucun fichier output/flowcept_buffer_*.jsonl trouvé.")
-            return 1
-        path = max(files, key=os.path.getmtime)
-    print(f"Fichier : {path}\n")
+def _read(path):
+    records = []
+    for line in open(path, encoding="utf-8"):
+        if line.strip():
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    return records
 
-    records = [json.loads(line) for line in open(path) if line.strip()]
+
+def _campaign_of(records):
+    for r in records:
+        if r.get("campaign_id"):
+            return r["campaign_id"]
+    return None
+
+
+def _load(path):
+    """Flowcept écrit UN fichier par processus (orchestrateur + un par agent).
+    On rassemble tous les fichiers de la même campagne que le plus récent."""
+    if path is not None:
+        return [path], _read(path)
+    files = sorted(glob.glob("output/flowcept_buffer_*.jsonl"), key=os.path.getmtime, reverse=True)
+    by_file = {f: _read(f) for f in files}
+    campaign = next((c for c in (_campaign_of(by_file[f]) for f in files) if c), None)
+    if campaign is None:
+        return [], []
+    chosen = [f for f in files if _campaign_of(by_file[f]) == campaign]
+    records = [r for f in chosen for r in by_file[f]]
+    records.sort(key=lambda r: r.get("started_at") or r.get("utc_timestamp") or 0)
+    return chosen, records
+
+
+def main(path: str | None) -> int:
+    files, records = _load(path)
+    if not records:
+        print("Aucune provenance trouvée dans output/flowcept_buffer_*.jsonl.")
+        return 1
+    print(f"Campagne {_campaign_of(records)} — {len(files)} fichier(s) :")
+    for f in files:
+        print(f"  {f}")
+    print()
+
     llm_total_s, llm_calls, empty_tool_calls, sims, sim_errors = 0.0, 0, 0, 0, 0
     xtb_runs = Counter()   # molécule canonique → nombre de vrais calculs xTB
+    tool_calls = Counter()  # molécule canonique → nombre de demandes de l'outil par le LLM
 
     for r in records:
         st = r.get("subtype")
@@ -99,6 +134,8 @@ def main(path: str | None) -> int:
             print(f"[xTB]   {smiles:<28} → {out}  {'' if dur is None else f'({dur:.1f} s)'}")
             if st == "parsl_task":          # un vrai calcul xTB (pas une simple réutilisation)
                 xtb_runs[_canonical(smiles)] += 1
+            else:
+                tool_calls[_canonical(smiles)] += 1
 
     print("\n" + "=" * 60)
     print(f"Appels au LLM            : {llm_calls}, au total {llm_total_s / 60:.1f} min")
@@ -106,6 +143,9 @@ def main(path: str | None) -> int:
         print(f"Durée moyenne d'un appel : {llm_total_s / llm_calls:.0f} s")
     print(f"Appels sans molécule     : {empty_tool_calls}  (le modèle n'a pas produit le JSON attendu)")
     print(f"Simulations xTB          : {sims}, dont {sim_errors} en erreur")
+    if not xtb_runs and tool_calls:   # anciennes campagnes : pas de trace parsl_task
+        print("(pas de trace des calculs xTB eux-mêmes : on compte les demandes de l'outil)")
+        xtb_runs = tool_calls
     if xtb_runs:
         dup = {m: n for m, n in xtb_runs.items() if n > 1}
         wasted = sum(n - 1 for n in dup.values())
