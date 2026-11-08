@@ -818,6 +818,7 @@ class XTBSimulationAgent(Agent):
                             f'{results_str}\n\n'
                             'Conclusions:\n'
                             f'\t{conclusions}'
+                            + _memory_block()  # [shared-memory] team knowledge and current Goal
                         ),
                     ),
                 ],
@@ -867,6 +868,7 @@ class XTBSimulationAgent(Agent):
                             f'\t{conclusions}\n\n'
                             'Critique:\n'
                             f'\t{state.critique}'
+                            + _memory_block()  # [shared-memory] the new plan must follow the current Goal
                         ),
                     ),
                 ],

@@ -109,8 +109,17 @@ class SharedMemory:
 
     # ------------------------------------------------------------------ goal
     def set_goal(self, goal: dict) -> None:
-        self.r.set(self.k("goal"), json.dumps(goal))
-        self._notify("goal")
+        """Write (or replace) the Goal. Each change increments the Goal version, so that
+        agents reading the memory can tell that the Goal changed during the campaign."""
+        pipe = self.r.pipeline()
+        pipe.set(self.k("goal"), json.dumps(goal))
+        pipe.incr(self.k("goal_version"))
+        pipe.set(self.k("goal_updated_at"), time.time())
+        version = pipe.execute()[1]
+        self._notify("goal", version=version)
+
+    def goal_version(self) -> int:
+        return int(self.r.get(self.k("goal_version")) or 0)
 
     def get_goal(self) -> dict | None:
         raw = self.r.get(self.k("goal"))
@@ -209,7 +218,13 @@ class SharedMemory:
         lines = ["=== SHARED MEMORY (all agents of this campaign) ==="]
         goal = self.get_goal()
         if goal:
-            lines.append(f"Goal: {json.dumps(goal)}")
+            version = self.goal_version()
+            if version > 1:
+                updated = time.strftime("%H:%M", time.localtime(float(self.r.get(self.k("goal_updated_at")) or 0)))
+                lines.append(f"CURRENT GOAL (version {version}, CHANGED at {updated}; "
+                             f"follow it, not any earlier goal): {json.dumps(goal)}")
+            else:
+                lines.append(f"Goal: {json.dumps(goal)}")
         results = self.r.zrevrange(self.k("ranking"), 0, max_results - 1, withscores=True)
         total = self.r.zcard(self.k("ranking"))
         if results:
