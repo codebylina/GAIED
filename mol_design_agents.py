@@ -487,10 +487,12 @@ class XTBSimulationAgent(Agent):
                 raise
             finally:
                 # [shared-memory] Record the xTB task from the agent process.
-                # _compute_energy_with_prov tries to record it inside the pool
-                # worker, but no interceptor exists there: Flowcept only patches
-                # ProcessPoolExecutor in FlowceptAcademyPlugin.start(), which GAIED
-                # does not call, so that record is silently skipped.
+                # _compute_energy_with_prov also records it inside the pool worker,
+                # but that worker was forked from the agent: its _ACTIVE_INTERCEPTOR
+                # is a COPY whose in-memory buffer is never flushed to disk (only the
+                # agent's interceptor is stopped), so that record is lost. Flowcept's
+                # _worker_init would give each worker its own flushed interceptor, but
+                # it is only injected by FlowceptAcademyPlugin.start(), not used here.
                 self._record_xtb_task(
                     task_id, smiles, started_at, _time.time(), result, error,
                     parent_task_id, workflow_id, campaign_id,

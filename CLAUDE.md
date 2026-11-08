@@ -83,10 +83,12 @@ docker compose run --rm gaied python tests/test_shared_memory.py   # module seul
 docker compose run --rm gaied python tests/test_agent_memory.py    # vrai code de l'agent + vrai xTB (< 1 min)
 docker compose run --rm gaied python shared_memory.py show         # contenu de la dernière campagne
 ```
-Provenance des calculs xTB : `_compute_energy_with_prov` essaie d'écrire la tâche `parsl_task` dans le
-processus xTB, mais aucun intercepteur n'y existe (Flowcept ne patche `ProcessPoolExecutor` que dans
-`FlowceptAcademyPlugin.start()`, que GAIED n'appelle pas). La tâche est donc écrite depuis le processus
-de l'agent (`XTBSimulationAgent._record_xtb_task`), avec le même `task_id` que le résultat en mémoire.
+Provenance des calculs xTB : `_compute_energy_with_prov` écrit la tâche `parsl_task` dans le processus
+xTB, mais ce processus est un fork de l'agent : son `_ACTIVE_INTERCEPTOR` est une COPIE dont le tampon
+en mémoire n'est jamais écrit sur disque (seul l'intercepteur de l'agent est arrêté) → trace perdue
+(vérifié par expérience). `_worker_init` de Flowcept donnerait à chaque processus son propre intercepteur,
+mais il n'est injecté que par `FlowceptAcademyPlugin.start()`, que GAIED n'utilise pas. La tâche est donc
+écrite depuis le processus de l'agent (`XTBSimulationAgent._record_xtb_task`), même `task_id` que la mémoire.
 Mesure : `python docker/summarize_prov.py` affiche « DUPLICATE computations » ; comparer
 `SEEDS: "CNC(N)=O,CNC(N)=O"` avec `-e SHARED_MEMORY=false` puis avec la mémoire.
 Idées suivantes : déplacer le module dans Flowcept ; agents d'analyse qui lisent `interception`
