@@ -163,6 +163,17 @@ def test_in_progress_visible():
     assert canonical_smiles("CC#N") not in b.known_molecules()
 
 
+def test_lesson_evidence_with_task_ids():
+    a = mem("A")
+    a.push_result("CCCC", 11.0, task_id="t-butane")
+    evidence = [{"smiles": "CCCC", "result": 11.0, "task_id": a.get_result("CCCC")["task_id"]},
+                {"smiles": "C1CC((", "result": "Parse failure", "task_id": None}]
+    a.push_lesson("Butane is low.", evidence=evidence)
+    import json
+    stored = json.loads(CLIENT.xrevrange(f"mem:{CAMPAIGN}:lessons", count=1)[0][1]["evidence"])
+    assert stored[0]["task_id"] == "t-butane" and stored[1]["task_id"] is None, stored
+
+
 def cleanup():
     for key in CLIENT.scan_iter(f"mem:{CAMPAIGN}:*"):
         CLIENT.delete(key)

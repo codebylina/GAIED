@@ -764,9 +764,20 @@ class XTBSimulationAgent(Agent):
             logger.info(f'Conclusions: {response}')
             if self.memory is not None:  # [shared-memory] PUSH conclusions for the other agents
                 try:
+                    # Evidence = exactly the results shown to the LLM in this prompt
+                    # (all of state.simulated_molecules), each with the Flowcept
+                    # task_id of its computation when the shared memory knows it.
+                    # Which of them really drove the conclusion cannot be known here.
+                    evidence = []
+                    for molecule, energy in state.simulated_molecules.items():
+                        known = self.memory.get_result(molecule)
+                        evidence.append({
+                            'smiles': molecule,
+                            'result': energy,
+                            'task_id': known.get('task_id') if known else None,
+                        })
                     self.memory.push_lesson(
-                        response.content, kind='conclusion',
-                        evidence=list(state.simulated_molecules)[-10:],
+                        response.content, kind='conclusion', evidence=evidence,
                     )
                 except Exception as exc:
                     logger.warning('Shared memory write failed: %s', exc)

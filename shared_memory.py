@@ -169,10 +169,12 @@ class SharedMemory:
         return self.r.zrevrange(self.k("ranking"), 0, n - 1, withscores=True)
 
     # ------------------------------------------------------------------ lessons
-    def push_lesson(self, text: str, kind: str = "conclusion", evidence: list[str] | None = None) -> None:
+    def push_lesson(self, text: str, kind: str = "conclusion", evidence: list | None = None) -> None:
+        """evidence: what the lesson is based on, e.g. a list of
+        {"smiles", "result", "task_id"} dicts (or plain SMILES strings)."""
         self.r.xadd(self.k("lessons"), {
             "agent": self.agent_id, "kind": kind, "text": text,
-            "evidence": json.dumps(evidence or []), "time": time.time(),
+            "evidence": json.dumps(evidence or [], default=str), "time": time.time(),
         }, maxlen=2000, approximate=True)
         self._notify("lesson", kind=kind)
 
