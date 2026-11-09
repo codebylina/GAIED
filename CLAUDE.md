@@ -75,7 +75,7 @@ Branchements dans `mol_design_agents.py` (marqués `[shared-memory]`) :
 - `agent_on_startup` : `self.memory = SharedMemory.from_env(agent_id=...)`
 - `compute_ionization_energy` : `memory.get_or_compute` = pull → claim → xTB → push → release ;
   le `task_id` mis dans la mémoire est celui de la tâche Flowcept (`_compute_energy_with_prov(..., task_id)`)
-- `plan`, `tool_calling`, `critique`, `update` : `render_for_prompt()` (résumé borné : Goal versionné,
+- `plan`, `tool_calling`, `critique`, `update` : `render_for_prompt()` (résumé borné : Goal,
   leçons des autres, instructions) ; `tool_calling` reçoit aussi les molécules connues de toute l'équipe
 - `conclude` : pas de mémoire dans le prompt (il synthétise les résultats de l'agent)
 - `conclude` : `push_lesson(conclusion)`

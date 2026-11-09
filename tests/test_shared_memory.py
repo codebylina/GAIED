@@ -174,16 +174,6 @@ def test_lesson_evidence_with_task_ids():
     assert stored[0]["task_id"] == "t-butane" and stored[1]["task_id"] is None, stored
 
 
-def test_goal_change_is_visible():
-    a, b = mem("A"), mem("B")
-    a.set_goal({"objective": "maximize ionization energy"})
-    first = a.goal_version()
-    a.set_goal({"objective": "maximize ionization energy, molecules with at most 6 heavy atoms"})
-    assert a.goal_version() == first + 1
-    text = b.render_for_prompt()
-    assert "CHANGED" in text and "at most 6 heavy atoms" in text, text
-
-
 def cleanup():
     for key in CLIENT.scan_iter(f"mem:{CAMPAIGN}:*"):
         CLIENT.delete(key)
