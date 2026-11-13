@@ -1,0 +1,15 @@
+{
+  "name": "pilot",
+  "description": "Short check of the whole matrix with the real LLM and xTB before the long runs.",
+  "seeds": ["CNC(N)=O", "CC1=C(O)N=C(O)N1"],
+  "max_iterations": 3,
+  "repetitions": 1,
+  "timeout_min": 60,
+  "conditions": ["none", "coord", "naive", "evident", "evident+monitor", "naive+inject", "evident+inject"],
+  "env": {
+    "NO_IMPROVEMENT_TOLERANCE": "0",
+    "STABLE_REPORTS": "100000",
+    "GOAL_MAX_HEAVY_ATOMS": "12",
+    "GOAL_ALLOWED_ELEMENTS": "C,H,N,O,F"
+  }
+}

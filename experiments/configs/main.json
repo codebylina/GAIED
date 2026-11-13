@@ -1,0 +1,16 @@
+{
+  "name": "main",
+  "description": "Workshop experiment: 4 agents (two pairs share a seed, so their search spaces overlap), fixed budget of 10 iterations per agent, 5 repetitions of 7 conditions.",
+  "seeds": ["CNC(N)=O", "CNC(N)=O", "CC1=C(O)N=C(O)N1", "CC1=C(O)N=C(O)N1"],
+  "max_iterations": 10,
+  "repetitions": 5,
+  "timeout_min": 180,
+  "conditions": ["none", "coord", "naive", "evident", "evident+monitor", "naive+inject", "evident+inject"],
+  "env": {
+    "NO_IMPROVEMENT_TOLERANCE": "0",
+    "STABLE_REPORTS": "100000",
+    "GOAL_MAX_HEAVY_ATOMS": "12",
+    "GOAL_ALLOWED_ELEMENTS": "C,H,N,O,F",
+    "N_XTB_WORKERS": "2"
+  }
+}

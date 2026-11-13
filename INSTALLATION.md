@@ -136,12 +136,12 @@ fournisseur choisi (et vérifier le nom exact du modèle sur le site du fourniss
 ## Étape 5 — Vérifier que tout marche (sans modèle de langage, moins d'une minute)
 
 ```powershell
-docker compose run --rm gaied python tests/test_shared_memory.py
-docker compose run --rm gaied python tests/test_agent_memory.py
+docker compose run --rm gaied python tests/test_evident.py
+docker compose run --rm gaied python experiments/run_matrix.py experiments/configs/dryrun.json
 ```
-Résultat attendu : `9/9 tests passed`, puis `5/5 tests passed`. Le second test lance un vrai
-calcul xTB : deux agents demandent la même molécule en même temps, et la ligne `counters` doit
-contenir `'computed': 1` (un seul calcul grâce à la mémoire partagée).
+Résultat attendu : `13/13 tests passed` (la mémoire EVIDENT seule, quelques secondes), puis deux
+campagnes complètes (Academy, Parsl, vrai xTB, Flowcept) avec un **LLM simulé** : `-> ok` pour
+chacune, en quelques minutes. Rien n'est un résultat scientifique : on vérifie l'installation.
 
 ---
 
@@ -160,7 +160,8 @@ Réglages utiles, sans modifier aucun fichier (ajouter `-e NOM=valeur` avant `ga
 |---------|-------|
 | `-e "SEEDS=CNC(N)=O,CNC(N)=O"` | molécules de départ, une par agent (ici : 2 agents, même départ) |
 | `-e MAX_ITERATIONS=1` | nombre de tours de la boucle de chaque agent (moins = plus court) |
-| `-e SHARED_MEMORY=false` | désactive la mémoire partagée (campagne de référence) |
+| `-e MEMORY_MODE=none` | agents isolés (référence) ; aussi `coord`, `naive`, `evident` (défaut) |
+| `-e MONITOR=true` | agent d'analyse en temps réel (arrête les calculs hors objectif) |
 
 Exemple :
 ```powershell
@@ -171,15 +172,20 @@ docker compose run --rm -e "SEEDS=CNC(N)=O,CNC(N)=O" -e MAX_ITERATIONS=1 gaied
 
 ```powershell
 docker compose run --rm gaied python docker/summarize_prov.py     # déroulé de la dernière campagne
-docker compose run --rm gaied python shared_memory.py show        # contenu de la mémoire partagée
-docker compose exec redis redis-cli KEYS "mem:*"                  # les clés brutes dans Redis
+docker compose run --rm gaied python -m evident show              # mémoire EVIDENT de la dernière campagne
+docker compose exec redis redis-cli KEYS "ev:*"                   # les clés brutes dans Redis
 ```
 `summarize_prov.py` lit la provenance enregistrée par Flowcept (`output/flowcept_buffer_*.jsonl`)
 et affiche chaque appel au modèle, chaque simulation xTB, et le nombre de **calculs en double**.
 
-Pour voir la mémoire se remplir **en direct**, dans une deuxième fenêtre PowerShell (même dossier) :
+### Expériences du papier (machine distante avec GPU)
+
+Voir `docs/EVIDENT.md`, section « Protocole expérimental ». En résumé :
 ```powershell
-docker compose exec redis redis-cli PSUBSCRIBE "mem:*:events"
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d redis ollama
+docker compose run --rm gaied python experiments/run_matrix.py experiments/configs/pilot.json
+docker compose run --rm gaied python experiments/run_matrix.py experiments/configs/main.json
+docker compose run --rm gaied python experiments/analyze.py experiments/results/main
 ```
 
 ---
@@ -202,7 +208,7 @@ docker compose exec redis redis-cli PSUBSCRIBE "mem:*:events"
   Puis, sur GitHub, ouvrir une *Pull Request* vers `docker-local` pour que l'autre relise avant de
   fusionner.
 - Se mettre d'accord avant de modifier le même fichier en même temps (surtout `mol_design_agents.py`
-  et `shared_memory.py`), pour éviter les conflits.
+  et `evident/`), pour éviter les conflits.
 - **Ne jamais committer** `docker/.env` ni un jeton ou une clé.
 - Les fichiers `runinfo/` et `output/` produits par vos campagnes ne sont pas envoyés sur GitHub
   (déjà dans le `.gitignore`).
@@ -215,13 +221,15 @@ docker compose exec redis redis-cli PSUBSCRIBE "mem:*:events"
 |---------|---------|
 | `mol_design_agents.py` | l'agent (`XTBSimulationAgent`) et sa boucle LangGraph : plan → tool_calling → simulate → conclude → critique → update |
 | `run-07.py` | lance les agents et l'orchestration de la campagne |
-| `shared_memory.py` | **la mémoire partagée** dans Redis (résultats, verrous, leçons, goal, instructions) |
+| `evident/` | **la mémoire EVIDENT** (faits, coordination, affirmations vérifiées, directives, télémétrie) et l'agent d'analyse temps réel (`monitor.py`) |
+| `experiments/` | matrice d'expériences, campagnes synthétiques, analyse statistique et figures |
+| `docs/EVIDENT.md` | la méthode détaillée et les travaux connexes |
 | `tests/` | tests de la mémoire, sans modèle de langage |
 | `docker/` | toute la configuration Docker ; `local_llm.py` branche le modèle local ou la clé API |
 | `CLAUDE.md` | description détaillée du projet et de la mémoire (aussi lue par Claude Code) |
 
 Les modifications faites au code d'origine d'Amal sont repérables par les commentaires
-`[gaied-docker ...]` (configuration) et `[shared-memory]` (mémoire partagée).
+`[gaied-docker ...]` (configuration) et `[evident]` (mémoire et contrôle).
 
 ---
 

@@ -5,6 +5,7 @@
 #         docker compose exec ollama ollama pull qwen3.5:4b
 #         docker compose run --rm gaied
 # With MongoDB: add --profile mongo
+# On a machine with an NVIDIA GPU: add  -f docker-compose.yml -f docker-compose.gpu.yml
 
 services:
   redis:
@@ -23,6 +24,8 @@ services:
     image: ollama/ollama:latest
     ports: ["11434:11434"]
     volumes: [ollama-models:/root/.ollama]             # downloaded models are kept
+    environment:
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-4}   # answer several agents at the same time
 
   gaied:
     build: .
@@ -39,15 +42,21 @@ services:
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_SEND_TEMPERATURE: ${LLM_SEND_TEMPERATURE:-true}
       OLLAMA_URL: http://ollama:11434
-      OLLAMA_MODEL: qwen3.5:4b          # qwen3.5:9b with 16 GB of RAM or more
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3.5:4b}   # a larger model on a GPU machine
       OLLAMA_THINK: "false"             # thinking mode off: much faster on CPU
-      NUM_PREDICT: "1024"
+      NUM_PREDICT: ${NUM_PREDICT:-1024}
       SEEDS: "CNC(N)=O"                 # one agent per seed; "CNC(N)=O,CNC(N)=O" to test duplicates
       MAX_ITERATIONS: "3"
-      N_XTB_WORKERS: "1"
-      SHARED_MEMORY: ${SHARED_MEMORY:-true}    # [shared-memory] false = agents without shared memory (baseline)
-      MEMORY_CLAIM_TTL: "900"           # a molecule lock expires after 15 min (crashed agent)
+      N_XTB_WORKERS: ${N_XTB_WORKERS:-1}
       STABLE_REPORTS: "60"              # stop after 60 reports (30 min) without a new molecule: the LLM is slow on CPU
+      # --- EVIDENT memory (see docs/EVIDENT.md) ---
+      MEMORY_MODE: ${MEMORY_MODE:-evident}       # none | coord | naive | evident
+      MONITOR: ${MONITOR:-false}                 # true = real-time analysis agent (STOP / advice)
+      INJECT_FALSE_CLAIMS: ${INJECT_FALSE_CLAIMS:-false}   # true = one agent shares a false claim (robustness test)
+      NO_IMPROVEMENT_TOLERANCE: ${NO_IMPROVEMENT_TOLERANCE:-3}   # 0 = fixed budget (experiments)
+      GOAL_MAX_HEAVY_ATOMS: "12"        # hard Goal constraints, checked by code
+      GOAL_ALLOWED_ELEMENTS: "C,H,N,O,F"
+      EVIDENT_CLAIM_TTL: "900"          # a molecule lock expires after 15 min (crashed agent)
       FLOWCEPT_SETTINGS_PATH: /app/docker/flowcept_settings.yaml
       PYTHONPATH: /app:/app/docker                # so that local_llm.py is found
     volumes:

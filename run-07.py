@@ -17,13 +17,15 @@ from academy.logging import init_logging
 from academy.manager import Manager
 
 from flowcept import Flowcept
-from shared_memory import SharedMemory  # [shared-memory]
+from evident import EvidentMemory  # [evident]
+from evident.monitor import start_in_background as start_monitor  # [evident]
 
 logger = logging.getLogger(__name__)
 
 
 async def main() -> int:
     init_logging(logging.INFO)
+    seeds = os.environ.get('SEEDS', 'CNC(N)=O,CC1=C(O)N=C(O)N1').split(',')  # [gaied-docker patch]
 
     config = Config(
         executors=[
@@ -33,7 +35,8 @@ async def main() -> int:
                         ''  # [gaied-docker patch] no conda activate needed in Docker
                     ),
                 ),
-                max_workers_per_node=2,
+                # [evident] one Parsl worker per agent (was 2: a third agent never started)
+                max_workers_per_node=int(os.environ.get('PARSL_MAX_WORKERS', max(2, len(seeds)))),
                 # [gaied-docker patch] a local LLM on CPU can starve the Parsl manager
                 # for minutes; the default (120 s) made Parsl drop both agents (ManagerLost)
                 heartbeat_threshold=int(os.environ.get('PARSL_HEARTBEAT_THRESHOLD', '1200')),
@@ -46,20 +49,33 @@ async def main() -> int:
         factory=RedisExchangeFactory(os.environ.get('REDIS_HOST', 'localhost'), 6379),  # [gaied-docker patch]
         executors=executor,
     ) as manager:
-        seeds = os.environ.get('SEEDS', 'CNC(N)=O,CC1=C(O)N=C(O)N1').split(',')  # [gaied-docker patch]
-
-        # [shared-memory] the Goal is written to the shared memory BEFORE the agents start
-        memory = SharedMemory.from_env(agent_id='orchestrator')
+        # [evident] Goal and run configuration are written BEFORE the agents start
+        memory = EvidentMemory.from_env(agent_id='orchestrator')
+        tolerance = int(os.environ.get('NO_IMPROVEMENT_TOLERANCE', '3')) or None
         if memory is not None:
             if memory.get_goal() is None:
                 memory.set_goal({
                     'objective': 'find molecules with the highest ionization energy (xTB)',
                     'seeds': seeds,
-                    'constraints': ['valid SMILES', 'synthesizable', 'low cost'],
+                    'constraints': {
+                        'max_heavy_atoms': int(os.environ.get('GOAL_MAX_HEAVY_ATOMS', '12')),
+                        'allowed_elements': os.environ.get('GOAL_ALLOWED_ELEMENTS', 'C,H,N,O,F').split(','),
+                    },
+                    'guidelines': ['valid SMILES', 'synthesizable', 'low cost'],
                 })
-            print(f'Shared memory ENABLED, campaign {memory.campaign_id}')
+            memory.set_meta(
+                mode=memory.mode, seeds=seeds,
+                monitor=os.environ.get('MONITOR', 'false').lower() == 'true',
+                inject=os.environ.get('INJECT_FALSE_CLAIMS', 'false').lower() == 'true',
+                max_iterations=int(os.environ.get('MAX_ITERATIONS', '20')),
+                tolerance=tolerance, llm=os.environ.get('LLM_MODEL') or os.environ.get('OLLAMA_MODEL'),
+                condition=os.environ.get('EXPERIMENT_CONDITION', ''),
+            )
+            print(f'EVIDENT memory: mode {memory.mode}, campaign {memory.campaign_id}')
         else:
-            print('Shared memory disabled (SHARED_MEMORY=false or Redis unreachable)')
+            print('EVIDENT memory unavailable (Redis unreachable): agents run without memory')
+        monitor_stop = asyncio.Event()
+        monitor_task = start_monitor(monitor_stop)  # [evident] real-time analysis agent (MONITOR=true)
 
         agents = []
         for molecule in seeds:
@@ -70,7 +86,7 @@ async def main() -> int:
                         XTBConfig(),
                         molecule,
                         int(os.environ.get('MAX_ITERATIONS', '20')),   # max_iterations  # [gaied-docker patch]
-                        3,   # no_improvement_tolerance
+                        tolerance,   # no_improvement_tolerance  # [evident] NO_IMPROVEMENT_TOLERANCE, 0 = off
                     ),
                 ),
             )
@@ -106,8 +122,18 @@ async def main() -> int:
             print('All agents completed.')
         except (KeyboardInterrupt, asyncio.CancelledError):
             print('\nShutting down agents...')
-        if memory is not None:  # [shared-memory] summary: reuses and avoided duplicates
+        monitor_stop.set()
+        if monitor_task is not None:
+            await asyncio.wait({monitor_task}, timeout=5)
+        if memory is not None:  # [evident] summary, and export for the analysis
             print(memory.summary())
+            export_path = os.environ.get('EVIDENT_EXPORT')
+            if export_path:
+                import json
+                os.makedirs(os.path.dirname(os.path.abspath(export_path)), exist_ok=True)
+                with open(export_path, 'w') as fh:
+                    json.dump(memory.export(), fh)
+                print(f'Campaign exported to {export_path}')
 
     return 0
 

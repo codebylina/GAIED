@@ -23,7 +23,8 @@
     ou une API au format OpenAI (`LLM_PROVIDER=openai`, clé dans `docker/.env`).
   - `apply_patches.py`, `patch_stop_rule.py` : correctifs déjà appliqués (ne pas relancer).
   - `summarize_prov.py` : résume la provenance de la dernière campagne.
-- `shared_memory.py` : la mémoire partagée Redis (voir plus bas) ; `tests/` : tests sans LLM.
+- `evident/` : la mémoire EVIDENT (voir plus bas) ; `experiments/` : expériences et analyse ;
+  `tests/` : tests sans LLM ; `docs/EVIDENT.md` : la méthode et les travaux connexes.
 - `output/flowcept_buffer_*.jsonl` : provenance de chaque campagne.
 
 ## Modifications déjà faites au code d'Amal (marquées `[gaied-docker ...]`)
@@ -56,42 +57,32 @@ docker compose exec redis redis-cli KEYS "mem:*"                # voir la mémoi
 - Ne jamais committer `docker/.env` (clé API). Vérifier avec `git check-ignore docker/.env`.
 - Travailler sur la branche `docker-local` (ou une branche dédiée), jamais sur `main`.
 - Garder les modifications du code d'Amal minimales et marquées par un commentaire.
-- Code de la mémoire : d'abord dans `shared_memory.py` à la racine de GAIED (plus tard dans Flowcept).
+- Code de la mémoire : dans le paquet `evident/` à la racine de GAIED (plus tard dans Flowcept).
 - **Tout le code est en anglais** : commentaires, docstrings, messages affichés, fichiers de config.
   Aucun français dans le code du projet. Les explications à moi se font en français.
 - Je débute avec Docker.
 
-## Mémoire partagée (branche `shared-memory`, première version pour la réunion du 9 nov.)
-Code : `shared_memory.py` (racine). Interrupteur : `SHARED_MEMORY` dans docker-compose (true par défaut).
-Clés Redis, préfixées par la campagne (`campaign_id` de Flowcept, ou `MEMORY_CAMPAIGN_ID` pour la forcer) :
-- `mem:{c}:goal` (JSON : objectif, contraintes), écrit par `run-07.py` avant le lancement des agents
-- `mem:{c}:claim:{smiles}` (verrou `SET NX EX`, valeur = agent, expire après `MEMORY_CLAIM_TTL` s)
-- `mem:{c}:result:{smiles}` (hash : energy, agent, task_id Flowcept, status, time)
-- `mem:{c}:ranking` (zset par énergie), `mem:{c}:failed` (set des échecs)
-- `mem:{c}:lessons` (stream : conclusions des agents), `mem:{c}:instructions` (stream, agents d'analyse de Nadjiba)
-- `mem:{c}:stats` (compteurs computed / reused / waited / computed_error / reused_error), `mem:{c}:events` (pub/sub)
-`{smiles}` = SMILES canonique RDKit (CCO et OCC sont la même clé).
-Branchements dans `mol_design_agents.py` (marqués `[shared-memory]`) :
-- `agent_on_startup` : `self.memory = SharedMemory.from_env(agent_id=...)`
-- `compute_ionization_energy` : `memory.get_or_compute` = pull → claim → xTB → push → release ;
-  le `task_id` mis dans la mémoire est celui de la tâche Flowcept (`_compute_energy_with_prov(..., task_id)`)
-- `plan`, `tool_calling`, `critique`, `update` : `render_for_prompt()` (résumé borné : Goal,
-  leçons des autres, instructions) ; `tool_calling` reçoit aussi les molécules connues de toute l'équipe
-- `conclude` : pas de mémoire dans le prompt (il synthétise les résultats de l'agent)
-- `conclude` : `push_lesson(conclusion)`
-Tests sans LLM :
-```powershell
-docker compose run --rm gaied python tests/test_shared_memory.py   # module seul (secondes)
-docker compose run --rm gaied python tests/test_agent_memory.py    # vrai code de l'agent + vrai xTB (< 1 min)
-docker compose run --rm gaied python shared_memory.py show         # contenu de la dernière campagne
-```
+## Mémoire EVIDENT (branche `evident-memory`, remplace l'ancienne `shared_memory.py`)
+Méthode complète : `docs/EVIDENT.md`. Paquet `evident/` :
+- `features.py` : vocabulaire fermé de ~22 caractéristiques chimiques (SMARTS), contraintes du Goal
+- `claims.py` : affirmations structurées (bloc `CLAIMS:` demandé dans `conclude`, sinon mots-clés)
+- `verifier.py` : vérification par le code (effet marginal + effet ajusté par régression, Welch t,
+  réplication par agent) et cycle de vie proposed → supported → established → contested / rejected
+- `memory.py` : `EvidentMemory` (Redis, clés `ev:{campagne}:...`) : faits, verrous, affirmations
+  versionnées, leçons brutes (mode naive), directives, télémétrie, briefing par nœud, export JSON
+- `monitor.py` : agent d'analyse temps réel à règles (STOP si propositions hors Goal, conseils)
+Modes (`MEMORY_MODE`) : `none` (référence), `coord`, `naive`, `evident`. `MONITOR=true`,
+`INJECT_FALSE_CLAIMS=true` (un agent ment, test de robustesse).
+Branchements dans `mol_design_agents.py` (marqués `[evident]`) : `evaluate_molecule` dans
+`compute_ionization_energy` ; `briefing(node)` dans plan / tool_calling / critique / update ;
+`record_proposals` après tool_calling ; `record_decision` ; `record_conclusion` dans conclude ;
+appels LLM de plan / critique / update annulables (`watched`) ; durée des nœuds (`_timed`).
+`run-07.py` : Goal avec contraintes vérifiables, métadonnées, moniteur, export (`EVIDENT_EXPORT`),
+`NO_IMPROVEMENT_TOLERANCE`, `PARSL_MAX_WORKERS` (un worker par agent).
+Expériences : `experiments/run_matrix.py <config>` (configs `dryrun`, `pilot`, `main`),
+`experiments/synthetic.py` (LLM et xTB simulés, vérité connue), `experiments/analyze.py <dossier>`.
+Tests : `python tests/test_evident.py` (Redis requis). `LLM_PROVIDER=scripted` = LLM simulé.
 Provenance des calculs xTB : `_compute_energy_with_prov` écrit la tâche `parsl_task` dans le processus
 xTB, mais ce processus est un fork de l'agent : son `_ACTIVE_INTERCEPTOR` est une COPIE dont le tampon
-en mémoire n'est jamais écrit sur disque (seul l'intercepteur de l'agent est arrêté) → trace perdue
-(vérifié par expérience). `_worker_init` de Flowcept donnerait à chaque processus son propre intercepteur,
-mais il n'est injecté que par `FlowceptAcademyPlugin.start()`, que GAIED n'utilise pas. La tâche est donc
-écrite depuis le processus de l'agent (`XTBSimulationAgent._record_xtb_task`), même `task_id` que la mémoire.
-Mesure : `python docker/summarize_prov.py` affiche « DUPLICATE computations » ; comparer
-`SEEDS: "CNC(N)=O,CNC(N)=O"` avec `-e SHARED_MEMORY=false` puis avec la mémoire.
-Idées suivantes : déplacer le module dans Flowcept ; agents d'analyse qui lisent `interception`
-et écrivent `instructions` ; reprise après crash (même `MEMORY_CAMPAIGN_ID`) ; copie durable dans MongoDB.
+n'est jamais écrit sur disque → trace perdue. La tâche est donc écrite depuis le processus de l'agent
+(`XTBSimulationAgent._record_xtb_task`), avec le même `task_id` que le fait dans la mémoire.

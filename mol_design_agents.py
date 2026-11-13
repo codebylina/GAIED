@@ -27,7 +27,7 @@ from rdkit.Chem import AllChem
 from xtb.ase.calculator import XTB
 
 from academy.agent import action
-from shared_memory import SharedMemory  # [shared-memory]
+from evident import EvidentMemory, StoppedByDirective, claims_instruction  # [evident]
 from academy.agent import Agent
 from academy.agent import loop
 
@@ -199,7 +199,7 @@ def _compute_energy_with_prov(
     parent_task_id: str | None,
     workflow_id: str | None,
     campaign_id: str | None,
-    task_id: str | None = None,  # [shared-memory] same id in shared memory and in Flowcept
+    task_id: str | None = None,  # [evident] same id in the memory facts and in Flowcept
 ) -> float:
     """Wrapper around _compute_energy_sync that records provenance in the XTB worker.
 
@@ -243,7 +243,7 @@ def _compute_energy_with_prov(
                     task['workflow_id'] = workflow_id
                 if campaign_id:
                     task['campaign_id'] = campaign_id
-                if task_id:  # [shared-memory]
+                if task_id:  # [evident]
                     task['task_id'] = task_id
                 interceptor.intercept_task(task)
         except Exception:
@@ -409,12 +409,12 @@ class XTBSimulationAgent(Agent):
         self.tools_by_name = {tool.name: tool for tool in tools}
         self.llm_with_tools = self.generation_llm.bind_tools(tools)
 
-        # [shared-memory] Redis shared memory (None if SHARED_MEMORY=false or Redis is unreachable)
+        # [evident] team memory (mode from MEMORY_MODE; None only if Redis is unreachable)
         import uuid as _uuid
         self.agent_name = f'{self.search_state.seed}#{_uuid.uuid4().hex[:6]}'
-        self.memory = SharedMemory.from_env(agent_id=self.agent_name)
-        logger.warning('Shared memory %s for agent %s',
-                       'ENABLED' if self.memory else 'disabled', self.agent_name)
+        self.memory = EvidentMemory.from_env(agent_id=self.agent_name)
+        logger.info('EVIDENT memory mode %s for agent %s',
+                    self.memory.mode if self.memory else 'unavailable', self.agent_name)
 
     async def agent_on_shutdown(self) -> None:
         if self._lg_interceptor is not None:
@@ -485,8 +485,11 @@ class XTBSimulationAgent(Agent):
             except Exception as exc:
                 error = exc
                 raise
+            except asyncio.CancelledError:  # [evident] stopped by a directive
+                error = 'cancelled by a STOP directive'
+                raise
             finally:
-                # [shared-memory] Record the xTB task from the agent process.
+                # [evident] Record the xTB task from the agent process.
                 # _compute_energy_with_prov also records it inside the pool worker,
                 # but that worker was forked from the agent: its _ACTIVE_INTERCEPTOR
                 # is a COPY whose in-memory buffer is never flushed to disk (only the
@@ -498,10 +501,10 @@ class XTBSimulationAgent(Agent):
                     parent_task_id, workflow_id, campaign_id,
                 )
 
-        # [shared-memory] PULL (known? being computed elsewhere?) -> CLAIM -> compute -> PUSH
+        # [evident] PULL the fact -> or CLAIM, compute, PUSH the fact (cancellable by a STOP)
         if getattr(self, 'memory', None) is not None:
             import uuid as _uuid
-            ionization_energy = await self.memory.get_or_compute(
+            ionization_energy = await self.memory.evaluate_molecule(
                 smiles, _run_xtb, new_task_id=lambda: str(_uuid.uuid4()),
             )
         else:
@@ -509,7 +512,7 @@ class XTBSimulationAgent(Agent):
         self.molecule_cache[smiles] = ionization_energy
         return ionization_energy
 
-    def _record_xtb_task(  # [shared-memory]
+    def _record_xtb_task(  # [evident]
         self,
         task_id: str,
         smiles: str,
@@ -562,17 +565,48 @@ class XTBSimulationAgent(Agent):
         search space.
         """
 
-        def _memory_block() -> str:  # [shared-memory] bounded summary of the shared memory for the prompt
+        import time as _time
+
+        class _Interrupted:  # [evident] stands for an LLM answer cancelled by a STOP directive
+            def __init__(self, reason: str) -> None:
+                self.content = f'[Interrupted by the analysis agent: {reason}]'
+                self.tool_calls: list = []
+
+        _interrupted: set[str] = set()
+
+        def _memory_block(node: str) -> str:  # [evident] bounded briefing for the prompt
             if self.memory is None:
                 return ''
             try:
-                return '\n\n' + self.memory.render_for_prompt()
+                text = self.memory.briefing(node)
+                return '\n\n' + text if text else ''
             except Exception as exc:
-                logger.warning('Shared memory read failed: %s', exc)
+                logger.warning('EVIDENT briefing failed: %s', exc)
                 return ''
 
+        async def _ask(node: str, llm, messages: list):  # [evident] cancellable LLM call
+            if self.memory is None:
+                return await llm.ainvoke(messages)
+            try:
+                return await self.memory.watched(llm.ainvoke(messages))
+            except StoppedByDirective as stop:
+                _interrupted.add(node)
+                return _Interrupted(stop.directive.get('reason', ''))
+
+        def _timed(name: str, fn):  # [evident] node duration and interruption in telemetry
+            async def wrapper(state):
+                t0 = _time.perf_counter()
+                try:
+                    return await fn(state)
+                finally:
+                    if self.memory is not None:
+                        self.memory.end_node(name, _time.perf_counter() - t0,
+                                             interrupted=name in _interrupted)
+                    _interrupted.discard(name)
+            return wrapper
+
         async def plan(state: SearchState) -> SearchState:
-            response = await self.reasoning_llm.ainvoke(
+            response = await _ask('plan', self.reasoning_llm,  # [evident]
                 [
                     SystemMessage(
                         content=(
@@ -599,13 +633,15 @@ class XTBSimulationAgent(Agent):
                         content=(
                             'Look for molecules with high ionization energy '
                             f'starting with the molecule {state.seed}'
-                            + _memory_block()  # [shared-memory]
+                            + _memory_block('plan')  # [evident]
                         ),
                     ),
                 ],
             )
 
             logger.info(f'Planner: {response}')
+            if self.memory is not None:  # [evident] intent, for drift analysis
+                self.memory.record_decision('plan', response.content)
 
             return SearchState(
                 seed=state.seed,
@@ -620,9 +656,9 @@ class XTBSimulationAgent(Agent):
             previously_simulated = ' '.join(
                 state.simulated_molecules.keys(),
             )
-            if self.memory is not None:  # [shared-memory] molecules of the WHOLE team
+            if self.memory is not None:  # [evident] own molecules, plus the team's in shared modes
                 previously_simulated = ' '.join(
-                    sorted(set(state.simulated_molecules) | set(self.memory.known_molecules())),
+                    self.memory.exclusion_list(list(state.simulated_molecules)),
                 )
             response = await self.llm_with_tools.ainvoke(
                 [
@@ -642,7 +678,7 @@ class XTBSimulationAgent(Agent):
                             f'Plan: {state.plan}\n\n'
                             f'Simulated Molecules: {previously_simulated} '
                             'Do not repeat those molecules in the tool calls.'
-                            + _memory_block()  # [shared-memory]
+                            + _memory_block('tool_calling')  # [evident]
                         ),
                     ),
                 ],
@@ -684,6 +720,12 @@ class XTBSimulationAgent(Agent):
                     ],
                 )
 
+            if self.memory is not None:  # [evident] decisions are visible BEFORE computing
+                self.memory.record_proposals(
+                    [str(tc.get('args', {}).get('smiles', '')) for tc in response.tool_calls],
+                    own_previous=list(state.simulated_molecules),
+                )
+
             return SearchState(
                 seed=state.seed,
                 plan=state.plan,
@@ -717,6 +759,8 @@ class XTBSimulationAgent(Agent):
                     results[smiles] = await task
                 except Exception as e:
                     results[smiles] = str(e)
+                    if 'Stopped by the analysis agent' in str(e):  # [evident]
+                        _interrupted.add('simulate')
 
             new_results = state.simulated_molecules | results
 
@@ -757,30 +801,26 @@ class XTBSimulationAgent(Agent):
                             'Simulation Results:\n'
                             'Molecule\t\tEnergy\n'
                             f'{results_str}'
+                            # [evident] structured claims, same request in every memory mode
+                            + (claims_instruction() if self.memory is not None else '')
                         ),
                     ),
                 ],
             )
             logger.info(f'Conclusions: {response}')
-            if self.memory is not None:  # [shared-memory] PUSH conclusions for the other agents
+            if self.memory is not None:  # [evident] conclusion -> lesson (naive) or claims (evident)
                 try:
-                    # Evidence = exactly the results shown to the LLM in this prompt
-                    # (all of state.simulated_molecules), each with the Flowcept
-                    # task_id of its computation when the shared memory knows it.
-                    # Which of them really drove the conclusion cannot be known here.
                     evidence = []
                     for molecule, energy in state.simulated_molecules.items():
-                        known = self.memory.get_result(molecule)
+                        fact = self.memory.get_fact(molecule)
                         evidence.append({
                             'smiles': molecule,
                             'result': energy,
-                            'task_id': known.get('task_id') if known else None,
+                            'task_id': fact.get('task_id') if fact else None,
                         })
-                    self.memory.push_lesson(
-                        response.content, kind='conclusion', evidence=evidence,
-                    )
+                    self.memory.record_conclusion(response.content, evidence=evidence)
                 except Exception as exc:
-                    logger.warning('Shared memory write failed: %s', exc)
+                    logger.warning('EVIDENT write failed: %s', exc)
             new_state = SearchState(
                 seed=state.seed,
                 plan=response.content,
@@ -798,7 +838,7 @@ class XTBSimulationAgent(Agent):
                 for molecule, energy in state.simulated_molecules.items()
             )
             conclusions = '\n\t'.join(state.conclusions)
-            response = await self.generation_llm.ainvoke(
+            response = await _ask('critique', self.generation_llm,  # [evident]
                 [
                     SystemMessage(
                         content=(
@@ -818,7 +858,7 @@ class XTBSimulationAgent(Agent):
                             f'{results_str}\n\n'
                             'Conclusions:\n'
                             f'\t{conclusions}'
-                            + _memory_block()  # [shared-memory] team knowledge and current Goal
+                            + _memory_block('critique')  # [evident]
                         ),
                     ),
                 ],
@@ -839,7 +879,7 @@ class XTBSimulationAgent(Agent):
                 for molecule, energy in state.simulated_molecules.items()
             )
             conclusions = '\n\t'.join(state.conclusions)
-            response = await self.reasoning_llm.ainvoke(
+            response = await _ask('update', self.reasoning_llm,  # [evident]
                 [
                     SystemMessage(
                         content=(
@@ -868,12 +908,14 @@ class XTBSimulationAgent(Agent):
                             f'\t{conclusions}\n\n'
                             'Critique:\n'
                             f'\t{state.critique}'
-                            + _memory_block()  # [shared-memory] the new plan must follow the current Goal
+                            + _memory_block('update')  # [evident]
                         ),
                     ),
                 ],
             )
             logger.info(f'Update: {response}')
+            if self.memory is not None:  # [evident]
+                self.memory.record_decision('update', response.content)
 
             return SearchState(
                 seed=state.seed,
@@ -908,6 +950,12 @@ class XTBSimulationAgent(Agent):
                 else:
                     _no_improve_count += 1
 
+            if self.memory is not None:  # [evident] iteration boundary in telemetry
+                self.memory.end_iteration(
+                    _best_energy if numeric else None, _no_improve_count,
+                )
+                self.memory.begin_iteration(_iteration)
+
             if shutdown.is_set():
                 return END
             if self.max_iterations is not None and _iteration >= self.max_iterations:
@@ -933,12 +981,12 @@ class XTBSimulationAgent(Agent):
         agent_builder = StateGraph(SearchState)
 
         # Add nodes
-        agent_builder.add_node('plan', plan)
-        agent_builder.add_node('tool_calling', tool_calling)
-        agent_builder.add_node('simulate', simulate)
-        agent_builder.add_node('conclude', conclude)
-        agent_builder.add_node('critique', critique)
-        agent_builder.add_node('update', update)
+        agent_builder.add_node('plan', _timed('plan', plan))  # [evident]
+        agent_builder.add_node('tool_calling', _timed('tool_calling', tool_calling))  # [evident]
+        agent_builder.add_node('simulate', _timed('simulate', simulate))  # [evident]
+        agent_builder.add_node('conclude', _timed('conclude', conclude))  # [evident]
+        agent_builder.add_node('critique', _timed('critique', critique))  # [evident]
+        agent_builder.add_node('update', _timed('update', update))  # [evident]
 
         # Add edges to connect nodes
         agent_builder.add_edge(START, 'plan')

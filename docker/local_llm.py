@@ -13,7 +13,8 @@ As in the original, tool calls go through a JSON object requested in the prompt
 ({"tool_calls": [{"name": ..., "args": {"smiles": ...}}]}), which works with any model.
 
 Environment variables:
-  LLM_PROVIDER   "ollama" (default) or "openai"
+  LLM_PROVIDER   "ollama" (default), "openai", or "scripted" (deterministic stand-in used
+                 to dry-run the whole pipeline in minutes, see experiments/synthetic.py)
   LLM_MODEL      model name (fallback: OLLAMA_MODEL); replaces the "gpt54" requested by GAIED
   --- Ollama ---
   OLLAMA_URL     (default http://localhost:11434)
@@ -145,6 +146,11 @@ class OllamaLLM:
 
     # ------------------------------------------------------------------ API
     async def ainvoke(self, messages: list) -> _LLMResponse:
+        if self.provider == "scripted":   # dry run of the full pipeline without any LLM
+            from experiments.synthetic import ScriptedLLM
+            llm = ScriptedLLM(self.model, self.temperature)
+            llm._tools = self._tools
+            return await llm.ainvoke(messages)
         chat = self._to_chat_messages(messages)
         post = self._post_openai if self.provider == "openai" else self._post_ollama
         content = await asyncio.to_thread(post, chat)
