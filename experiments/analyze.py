@@ -42,6 +42,8 @@ KEY_METRICS = [
     ("unique_valid", "distinct valid molecules measured", "higher"),
     ("scaffolds", "distinct Murcko scaffolds", "higher"),
     ("diversity", "mean pairwise Tanimoto distance", "higher"),
+    ("anchoring", "similarity of each proposal to the team's 10 best molecules known at that time", "lower"),
+    ("near_top_rate", "proposals very similar (Tanimoto >= 0.7) to one of the team's 10 best", "lower"),
     ("assertion_accuracy", "claims asserted by agents that are true", "higher"),
     ("exposure_precision", "knowledge SHOWN to agents that is true", "higher"),
     ("false_exposures", "false knowledge items shown to agents", "lower"),
@@ -64,6 +66,49 @@ KEY_METRICS = [
 
 
 # ------------------------------------------------------------------ helpers
+def _fp(smiles, _cache={}):
+    """Morgan fingerprint (radius 2, 2048 bits), None for an invalid SMILES (cached)."""
+    if smiles not in _cache:
+        from rdkit import Chem
+        from rdkit.Chem import rdFingerprintGenerator
+        gen = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
+        m = Chem.MolFromSmiles(smiles or "")
+        _cache[smiles] = gen.GetFingerprint(m) if m is not None else None
+    return _cache[smiles]
+
+
+def anchoring(props, facts, top=10, near=0.7):
+    """How much proposals stick to the best molecules the team knew when they were made.
+
+    For each valid proposal, the team's `top` best measured molecules at that moment are
+    rebuilt from the facts (in every mode, so that isolated agents give the reference:
+    what they WOULD have been shown); the score is the highest Tanimoto similarity to one
+    of them. Exact repeats of measured molecules are left out (they are counted by the
+    redundant-proposal rate). Returns (mean score, share of proposals with a score >= near)."""
+    from rdkit import DataStructs
+    ok = sorted((f for f in facts if f["status"] == "ok"), key=lambda f: f["t"])
+    scores = []
+    for _, t, p in props:
+        if not p.get("valid"):
+            continue
+        known = {}
+        for f in ok:
+            if f["t"] >= t:
+                break
+            known.setdefault(f["smiles"], f["energy"])
+        if p["smiles"] in known:         # an exact repeat is counted as redundant, not here
+            continue
+        best = sorted(known, key=known.get, reverse=True)[:top]
+        fp = _fp(p["smiles"])
+        fps = [x for x in (_fp(s) for s in best) if x is not None]
+        if fp is None or not fps:
+            continue
+        scores.append(max(DataStructs.BulkTanimotoSimilarity(fp, fps)))
+    if not scores:
+        return None, None
+    return float(np.mean(scores)), float(np.mean([s >= near for s in scores]))
+
+
 def _fingerprints(smiles):
     from rdkit import Chem, DataStructs
     from rdkit.Chem import rdFingerprintGenerator
@@ -158,6 +203,7 @@ def run_metrics(d, truth, budget):
     m["redundant_proposal_rate"] = sum(p["team_known"] in ("computed", "in_progress", "failed")
                                        or p["own_repeat"] for _, _, p in props) / n
     m["violation_rate"] = sum(bool(p["violations"]) for _, _, p in props) / n
+    m["anchoring"], m["near_top_rate"] = anchoring(props, facts)
 
     # claims asserted, and knowledge shown
     asserted = [c for e in tel if e["e"] == "conclusion" and not e.get("liar") for c in e["claims"]]
@@ -327,8 +373,10 @@ def figures(by_cond, out):
     inj = [c for c in conds if "inject" in c]
     fig, axes = plt.subplots(1, 2 if inj else 1, figsize=(8 if inj else 4.5, 3.2), squeeze=False)
     ax = axes[0][0]
-    vals = [np.nanmean([r.get("exposure_precision") if r.get("exposure_precision") is not None
-                        else np.nan for r in by_cond[c]]) for c in kc]
+    vals = []
+    for c in kc:                         # nan when nothing was shown to the agents
+        xs = [r["exposure_precision"] for r in by_cond[c] if r.get("exposure_precision") is not None]
+        vals.append(float(np.mean(xs)) if xs else np.nan)
     ax.bar(range(len(kc)), vals, color=[COLORS[c] for c in kc], width=0.7, edgecolor="#fcfcfb", linewidth=2)
     for i, v in enumerate(vals):
         if not np.isnan(v):

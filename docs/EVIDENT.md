@@ -300,6 +300,7 @@ l'affirmation est montrée aux autres comme connaissance et si leurs proposition
 | Qualité scientifique | `best_at_budget` | meilleure énergie parmi les B premiers calculs (B = budget commun à toutes les campagnes) |
 | | `best_energy`, `top5_mean` | meilleure valeur, moyenne des 5 meilleures |
 | | `unique_valid`, `scaffolds`, `diversity` | molécules valides distinctes, squelettes de Murcko, distance de Tanimoto moyenne |
+| | `anchoring`, `near_top_rate` | pour chaque nouvelle proposition, ressemblance maximale (Tanimoto) avec les 10 meilleures molécules connues de l'équipe à ce moment ; part des propositions très proches (≥ 0,7). Mesure la **convergence** des agents vers les meilleurs résultats partagés (calculée aussi en mode `none`, comme référence) |
 | Gaspillage | `duplicate_rate` | calculs d'une molécule déjà calculée / calculs |
 | | `redundant_proposal_rate` | propositions déjà connues de l'équipe ou de l'agent |
 | | `invalid_repeat` | calculs de molécules déjà connues comme invalides |
