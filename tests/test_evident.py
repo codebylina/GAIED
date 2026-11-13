@@ -232,17 +232,58 @@ def test_stop_directive_cancels_running_computation():
     print(f"    stop latency {latency * 1000:.0f} ms")
 
 
-def test_monitor_stops_off_goal_batch():
+def test_monitor_stops_only_off_goal_molecules():
+    """The off-goal STOP cancels the molecules that break the Goal, not the valid ones,
+    and does not interrupt LLM calls."""
     c = campaign()
     a, mon_mem = mem(c, "A"), mem(c, "monitor")
     a.set_goal(GOAL)
     mon = RuleMonitor(mon_mem, violations_for_stop=2)
     a.record_proposals(["CCO", "ClCCl", "CCCCCCCCCCCC"], own_previous=[])
     mon.poll_once(block=False)
-    assert a.check_stop() is not None and a.check_stop()["rule"] == "off_goal"
-    assert "STOP" in a.briefing("update")
+    bad = canonical_smiles("ClCCl")
+    assert a.check_stop(bad) is not None and a.check_stop(bad)["rule"] == "off_goal"
+    assert a.check_stop(canonical_smiles("CCO")) is None, "a valid molecule goes on"
+    assert a.check_stop() is None, "LLM calls are not interrupted by a molecule STOP"
+    text = a.briefing("tool_calling")
+    assert text.startswith("DIRECTIVES FROM THE ANALYSIS AGENT") and "NOT computed" in text
+    assert "at most 8 heavy" in text
+
+    async def compute(task_id):
+        await asyncio.sleep(0.2)
+        return 10.0
+
+    async def batch():
+        return await asyncio.gather(a.evaluate_molecule("CCO", compute),
+                                    a.evaluate_molecule("ClCCl", compute),
+                                    return_exceptions=True)
+
+    ok, stopped = asyncio.run(batch())
+    assert ok == 10.0 and isinstance(stopped, StoppedByDirective)
     a.record_proposals(["CCN"], own_previous=[])     # the next batch: the stop is handled
-    assert a.check_stop() is None
+    assert a.check_stop(bad) is None
+
+
+def test_global_stop_interrupts_llm_call():
+    """A STOP without scope (e.g. from a provenance analysis agent) stops everything."""
+    c = campaign()
+    a, ctrl = mem(c, "A"), mem(c, "analysis")
+
+    async def slow_llm():
+        await asyncio.sleep(5)
+        return "answer"
+
+    async def main():
+        task = asyncio.create_task(a.watched(slow_llm()))
+        await asyncio.sleep(0.2)
+        ctrl.send_directive("A", "stop", "the agent deviates from the Goal", rule="drift")
+        try:
+            await task
+        except StoppedByDirective:
+            return True
+        return False
+
+    assert asyncio.run(main())
 
 
 def test_export():

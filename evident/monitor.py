@@ -3,8 +3,9 @@ Real-time rule-based analysis agent (reference implementation of the control loo
 
 It reads the telemetry stream as events happen (XREAD BLOCK) and sends directives:
   off_goal        an agent's current batch contains >= MONITOR_VIOLATIONS proposals that
-                  break a hard Goal constraint -> STOP: the agent's running computations
-                  (and LLM call, if any) are cancelled, and it replans with the reason.
+                  break a hard Goal constraint -> STOP limited to those molecules (scope
+                  "molecules"): they are not computed, the valid ones go on, and the
+                  reason is shown first in the agent's next prompts.
   invalid_repeat  an agent proposes a molecule already known to be invalid -> advice
   rejected_claim  an agent asserts a claim that the data already rejects -> advice
   stagnation      no improvement of the agent's best for MONITOR_STAGNATION iterations
@@ -44,12 +45,12 @@ class RuleMonitor:
             bad = [p for p in ev["items"] if p["violations"]]
             if len(bad) >= self.violations_for_stop and (agent, it) not in self._stopped:
                 self._stopped.add((agent, it))
-                details = "; ".join(f"{p['smiles']} ({', '.join(p['violations'])})" for p in bad[:5])
+                details = "; ".join(f"{p['smiles']} ({', '.join(p['violations'])})" for p in bad[:8])
                 self._send(agent, "stop", "off_goal", t,
-                           f"{len(bad)} of your current proposals break the Goal's hard "
-                           f"constraints: {details}. Their computations were stopped. "
-                           "Propose molecules that respect the constraints.",
-                           smiles=[p["smiles"] for p in bad], iteration=it)
+                           f"{len(bad)} of your proposals break the Goal's hard constraints "
+                           f"and were NOT computed: {details}. Every new proposal must have "
+                           f"{self._constraints_text()}.",
+                           smiles=[p["smiles"] for p in bad], scope="molecules", iteration=it)
             for p in ev["items"]:
                 if p["team_known"] == "failed" and (agent, "inv", p["smiles"]) not in self._advised:
                     self._advised.add((agent, "inv", p["smiles"]))
@@ -76,6 +77,15 @@ class RuleMonitor:
                                f"Your best value has not improved for {ev['no_improve']} "
                                f"iterations (team best {ev.get('team_best')}). Change chemical "
                                "family" + (f"; verified trends: {', '.join(known)}." if known else "."))
+
+    def _constraints_text(self) -> str:
+        c = self.m.constraints()
+        parts = []
+        if c.get("max_heavy_atoms"):
+            parts.append(f"at most {c['max_heavy_atoms']} heavy (non-hydrogen) atoms")
+        if c.get("allowed_elements"):
+            parts.append(f"only the elements {', '.join(c['allowed_elements'])}")
+        return " and ".join(parts) or "a valid structure"
 
     def _send(self, agent, kind, rule, trigger_t, reason, **data) -> None:
         self.m.send_directive(agent, kind, reason, rule=rule, trigger_t=trigger_t, **data)

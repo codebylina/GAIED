@@ -684,7 +684,19 @@ class XTBSimulationAgent(Agent):
                 ],
             )
             logger.info(f'Tool Calling: {response}')
+            # [evident] bounded retries: the original loop never ended when the LLM kept
+            # answering without a parsable tool call (an agent stayed blocked forever)
+            _max_retries = int(os.environ.get('TOOL_CALL_RETRIES', '3'))
+            _retries, _failed_answers = 0, []
             while len(response.tool_calls) == 0:
+                _failed_answers.append(str(response.content))
+                if _retries >= _max_retries:
+                    logger.warning('No parsable tool call after %d retries: '
+                                   'this iteration runs no simulation', _retries)
+                    if self.memory is not None:
+                        self.memory.record_tool_call_failure(_retries + 1, _failed_answers)
+                    break
+                _retries += 1
                 logger.warning('Tool calling agent did not call tools!')
                 logger.warning(response)
                 response = await self.llm_with_tools.ainvoke(
@@ -724,6 +736,7 @@ class XTBSimulationAgent(Agent):
                 self.memory.record_proposals(
                     [str(tc.get('args', {}).get('smiles', '')) for tc in response.tool_calls],
                     own_previous=list(state.simulated_molecules),
+                    retries=_retries,
                 )
 
             return SearchState(

@@ -65,7 +65,8 @@ class StoppedByDirective(Exception):
 
     def __init__(self, directive: dict):
         self.directive = directive
-        super().__init__(f"Stopped by the analysis agent: {directive.get('reason', '')}")
+        super().__init__(f"Stopped by the analysis agent ({directive.get('rule') or 'stop'}): "
+                         "not computed")
 
 
 def _env_bool(name: str, default: str = "false") -> bool:
@@ -90,7 +91,9 @@ class EvidentMemory:
         self.is_liar = False
         self._cursors = {self.k("directives", agent_id): "0-0", self.k("directives", "*"): "0-0"}
         self._last_poll = 0.0
-        self._active_stop: dict | None = None
+        # STOP directives in force. A directive with scope "molecules" only stops the
+        # listed molecules; any other STOP stops every activity of the agent.
+        self._active_stops: list[dict] = []
         self._recent_directives: deque = deque(maxlen=3)
         self._has_lua = True
 
@@ -247,11 +250,11 @@ class EvidentMemory:
         can = canonical_smiles(smiles)
         t0 = time.time()
         if self.mode == "none":
-            self._raise_if_stopped(can, t0)
+            self._raise_if_stopped(can)
             return await self._compute_and_store(can, compute, new_task_id, t0)
         waited = False
         while True:
-            self._raise_if_stopped(can, t0)
+            self._raise_if_stopped(can)
             fact = self.get_fact(can)
             if fact is not None:
                 outcome = ("reused_error" if fact["status"] == "error"
@@ -274,7 +277,7 @@ class EvidentMemory:
         task_id = new_task_id() if new_task_id else str(uuid.uuid4())
         started = time.time()
         try:
-            energy = await self.watched(compute(task_id))
+            energy = await self.watched(compute(task_id), smiles=can)
         except StoppedByDirective as stop:
             self._count("cancelled")
             self._emit("compute", smiles=can, outcome="cancelled", task_id=task_id,
@@ -299,12 +302,11 @@ class EvidentMemory:
         return energy
 
     # ------------------------------------------------------------------ proposals and decisions
-    def record_proposals(self, smiles_list: list[str], own_previous: list[str]) -> list[dict]:
+    def record_proposals(self, smiles_list: list[str], own_previous: list[str],
+                         retries: int = 0) -> list[dict]:
         """Log what the agent decided to compute, BEFORE computing (analysis agents
-        see it in real time). Starts a new batch: a previous STOP is now handled."""
-        if self._active_stop is not None:
-            self._emit("stop_cleared", directive=self._active_stop.get("id"))
-            self._active_stop = None
+        see it in real time). Starts a new batch: previous STOPs are now handled."""
+        self._clear_stops()
         constraints = self.constraints()
         own_prev = {canonical_smiles(s) for s in own_previous}
         team_known = set(self.r.hkeys(self.k("facts:by_smiles")))
@@ -322,8 +324,15 @@ class EvidentMemory:
                                   else "computed" if fact else
                                   "in_progress" if can in inprog else "new")}
             out.append(rec)
-        self._emit("proposals", items=out)
+        self._emit("proposals", items=out, retries=retries)
         return out
+
+    def record_tool_call_failure(self, attempts: int, responses: list[str]) -> None:
+        """The LLM gave no parsable tool call after all attempts: the iteration goes on
+        without computation. The beginning of each answer is kept to see why."""
+        self._count("tool_call_failed")
+        self._emit("tool_call_failed", attempts=attempts,
+                   responses=[(r or "")[:600] for r in responses])
 
     def record_decision(self, node: str, text: str) -> None:
         """The agent's intent (plan or updated plan), kept for drift analysis."""
@@ -449,32 +458,44 @@ class EvidentMemory:
                 self._emit("directive_received", id=d["id"], kind=d["kind"], rule=d.get("rule"),
                            delivery=round(now - d["sent_at"], 4))
                 stale = d.get("iteration") is not None and d["iteration"] < self.iteration
-                if d["kind"] == "stop" and self._active_stop is None and not stale:
-                    self._active_stop = d
+                if d["kind"] == "stop" and not stale:
+                    self._active_stops.append(d)
         return new
 
-    def check_stop(self) -> dict | None:
-        self.poll_directives()
-        return self._active_stop
+    @staticmethod
+    def _applies(stop: dict, smiles: str | None) -> bool:
+        if stop.get("scope") == "molecules":
+            return smiles is not None and smiles in (stop.get("smiles") or [])
+        return True
 
-    def _raise_if_stopped(self, can: str, t0: float) -> None:
-        stop = self.check_stop()
+    def check_stop(self, smiles: str | None = None) -> dict | None:
+        """The STOP in force for this activity (a molecule, or None for an LLM call)."""
+        self.poll_directives()
+        return next((d for d in self._active_stops if self._applies(d, smiles)), None)
+
+    def _clear_stops(self) -> None:
+        for d in self._active_stops:
+            self._emit("stop_cleared", directive=d.get("id"))
+        self._active_stops = []
+
+    def _raise_if_stopped(self, can: str) -> None:
+        stop = self.check_stop(can)
         if stop is not None:
             self._count("cancelled_before_start")
             self._emit("compute", smiles=can, outcome="cancelled_before_start",
                        directive=stop.get("id"))
             raise StoppedByDirective(stop)
 
-    async def watched(self, coro):
-        """Run an activity (xTB computation, LLM call) and cancel it as soon as a STOP
-        directive arrives. Raises StoppedByDirective."""
+    async def watched(self, coro, smiles: str | None = None):
+        """Run an activity (xTB computation of `smiles`, or an LLM call) and cancel it as
+        soon as a STOP directive that applies to it arrives. Raises StoppedByDirective."""
         task = asyncio.ensure_future(coro)
         try:
             while True:
                 done, _ = await asyncio.wait({task}, timeout=self.control_poll)
                 if done:
                     return task.result()
-                stop = self.check_stop()
+                stop = self.check_stop(smiles)
                 if stop is not None:
                     task.cancel()
                     self._emit("stop_applied", directive=stop.get("id"),
@@ -487,8 +508,8 @@ class EvidentMemory:
     def end_node(self, node: str, duration: float, interrupted: bool = False) -> None:
         """Node boundary: a STOP that interrupted this node has been handled."""
         self._emit("node", node=node, duration=round(duration, 4), interrupted=interrupted)
-        if interrupted and self._active_stop is not None:
-            self._active_stop = None
+        if interrupted:
+            self._clear_stops()
 
     # ------------------------------------------------------------------ iterations
     def begin_iteration(self, i: int) -> None:
@@ -520,7 +541,7 @@ class EvidentMemory:
     def _directives_text(self) -> str:
         if not self._recent_directives:
             return ""
-        lines = ["DIRECTIVES FROM THE ANALYSIS AGENT (most recent last; follow them):"]
+        lines = ["DIRECTIVES FROM THE ANALYSIS AGENT (most recent last; you MUST follow them):"]
         for d in self._recent_directives:
             tag = "STOP" if d["kind"] == "stop" else "ADVICE"
             lines.append(f"- [{tag}] {d['reason']}")
@@ -530,7 +551,7 @@ class EvidentMemory:
         """Bounded text added to the prompt of a node. Content depends on the mode."""
         t0 = time.perf_counter()
         self.poll_directives(force=True)
-        parts = [self._goal_text()]
+        parts = [self._directives_text(), self._goal_text()]   # directives first: hard to miss
         shown_claims: list[dict] = []
         lesson_claims: list[dict] = []
         if self.mode != "none":
@@ -568,9 +589,6 @@ class EvidentMemory:
                 parts.append("DO NOT RELY ON (contradicted or no longer supported by data):\n"
                              + "\n".join(self._claim_line(c) for c in warn))
             shown_claims = [{"id": c["id"], "status": c["status"]} for c in known + warn]
-        directives = self._directives_text()
-        if directives:
-            parts.append(directives)
         if self.mode != "none":
             parts.append("Do NOT propose molecules that were already measured or are being computed.")
         text = "\n\n".join(p for p in parts if p)

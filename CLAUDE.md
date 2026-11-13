@@ -81,7 +81,10 @@ appels LLM de plan / critique / update annulables (`watched`) ; durée des nœud
 `NO_IMPROVEMENT_TOLERANCE`, `PARSL_MAX_WORKERS` (un worker par agent).
 Expériences : `experiments/run_matrix.py <config>` (configs `dryrun`, `pilot`, `main`),
 `experiments/synthetic.py` (LLM et xTB simulés, vérité connue), `experiments/analyze.py <dossier>`.
-Tests : `python tests/test_evident.py` (Redis requis). `LLM_PROVIDER=scripted` = LLM simulé.
+Tests : `python tests/test_evident.py` (Redis requis), `python tests/test_agent_loop.py`
+(graphe réel, LLM sans appel d'outil : l'agent ne doit plus se bloquer).
+Sur le PC distant (AMD, Ollama Windows) : toujours `--no-deps`, jamais le conteneur `ollama`, jamais
+`docker-compose.gpu.yml`, `-e OLLAMA_URL=http://host.docker.internal:11434 -e OLLAMA_MODEL=qwen3.5:9b`. `LLM_PROVIDER=scripted` = LLM simulé.
 Provenance des calculs xTB : `_compute_energy_with_prov` écrit la tâche `parsl_task` dans le processus
 xTB, mais ce processus est un fork de l'agent : son `_ACTIVE_INTERCEPTOR` est une COPIE dont le tampon
 n'est jamais écrit sur disque → trace perdue. La tâche est donc écrite depuis le processus de l'agent

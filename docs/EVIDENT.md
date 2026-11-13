@@ -206,8 +206,13 @@ chaque agent a lues**.
    0,5 s), l'activité est annulée et l'agent reçoit `StoppedByDirective` :
    - un calcul annulé libère son verrou et **n'est pas** enregistré comme un échec ;
    - un appel au LLM annulé est remplacé par « [Interrupted by the analysis agent: raison] » ;
-   - tout le lot en cours est arrêté (« arrêter ce qu'il fait, pas seulement la simulation »).
-4. L'agent **replanifie** : la directive apparaît dans ses briefings suivants (option B discutée
+   - un STOP général (sans portée) arrête toute l'activité de l'agent (« arrêter ce qu'il fait,
+     pas seulement la simulation ») ; un STOP de portée « molecules » n'arrête que les molécules
+     listées, et ne coupe pas les appels au LLM. Le pilote avec Qwen 9b a montré qu'arrêter tout
+     le lot pour quelques molécules hors Goal faisait perdre le travail valide (28 calculs
+     annulés, meilleure valeur 16,2 contre 18,6) : le moniteur utilise donc la portée « molecules ».
+4. L'agent **replanifie** : la directive apparaît **en tête** de ses briefings suivants, avec les
+   molécules refusées et les contraintes à respecter (option B discutée
    avec Amal : annuler l'étape et replanifier, plutôt qu'arrêter l'agent ou le mettre en pause).
    Un STOP est rattaché à une itération : un STOP arrivé en retard n'annule pas le lot suivant.
 
@@ -217,7 +222,7 @@ en entrée, directives en sortie) :
 
 | Règle | Déclencheur | Action |
 |---|---|---|
-| `off_goal` | ≥ 2 propositions du lot en cours violent une contrainte dure du Goal | **STOP** |
+| `off_goal` | ≥ 2 propositions du lot en cours violent une contrainte dure du Goal | **STOP limité à ces molécules** : elles ne sont pas calculées, les molécules valides continuent |
 | `invalid_repeat` | proposition d'une molécule déjà connue comme invalide | conseil |
 | `rejected_claim` | l'agent affirme ce que les données ont déjà rejeté | conseil |
 | `stagnation` | pas d'amélioration depuis 3 itérations | conseil + tendances vérifiées |
@@ -242,6 +247,9 @@ l'affirmation est montrée aux autres comme connaissance et si leurs proposition
 - `compute_ionization_energy` : `evaluate_molecule` (et l'annulation est tracée dans Flowcept) ;
 - `plan`, `tool_calling`, `critique`, `update` : `briefing(node)` ; `record_decision` ;
 - après `tool_calling` : `record_proposals` ; `conclude` : demande `CLAIMS` + `record_conclusion` ;
+- `tool_calling` : au plus `TOOL_CALL_RETRIES` (3) nouvelles demandes si le LLM ne donne pas d'appel
+  d'outil lisible ; la boucle d'origine était sans fin et a bloqué un agent pendant le pilote.
+  L'échec et le début des réponses sont enregistrés (`tool_call_failed`) ;
 - `should_continue` : bornes d'itération ; chaque nœud est chronométré (`_timed`) ;
 - `run-07.py` : Goal à contraintes vérifiables, métadonnées, moniteur (`MONITOR=true`), export
   JSON (`EVIDENT_EXPORT`), budget fixe (`NO_IMPROVEMENT_TOLERANCE=0`), un worker Parsl par agent
@@ -299,7 +307,8 @@ l'affirmation est montrée aux autres comme connaissance et si leurs proposition
 | Mémoire | `assertion_accuracy` | affirmations des agents conformes à la vérité de référence |
 | | `exposure_precision`, `false_exposures` | parmi les connaissances **montrées**, part vraie ; nombre de fausses montrées |
 | Robustesse | `injected_exposures`, `injection_adoption_delta` | fois où l'affirmation injectée est montrée comme connaissance ; variation de la part des propositions contenant la caractéristique injectée |
-| Contrôle | `stops`, `cancelled`, `detection_s`, `stop_reaction_s` | STOP appliqués, calculs annulés, délais |
+| Contrôle | `stops`, `cancelled`, `cancelled_valid`, `detection_s`, `stop_delivery_s`, `stop_reaction_s` | STOP reçus, calculs annulés (dont molécules valides), délais |
+| Format du LLM | `tool_call_failures`, `tool_call_retries` | itérations sans appel d'outil lisible, demandes supplémentaires |
 | Coût | `briefing_ms`, `briefing_chars`, `memory_overhead`, `wall_time_s` | temps et taille du briefing, part du temps passé dans la mémoire |
 
 **Vérité de référence** pour juger les affirmations : dans les campagnes réelles, l'effet ajusté
@@ -317,7 +326,7 @@ d'effet et intervalles plutôt que les valeurs p.
 cd GAIED/docker
 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d redis ollama
 docker compose exec ollama ollama pull <modèle>          # puis OLLAMA_MODEL=<modèle> dans l'environnement
-docker compose run --rm gaied python tests/test_evident.py                                   # 13/13
+docker compose run --rm gaied python tests/test_evident.py                                   # 14/14
 docker compose run --rm gaied python experiments/run_matrix.py experiments/configs/dryrun.json  # installation
 docker compose run --rm gaied python experiments/run_matrix.py experiments/configs/pilot.json   # 7 campagnes courtes
 docker compose run --rm gaied python experiments/run_matrix.py experiments/configs/main.json    # 35 campagnes

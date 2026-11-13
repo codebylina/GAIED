@@ -139,7 +139,7 @@ fournisseur choisi (et vérifier le nom exact du modèle sur le site du fourniss
 docker compose run --rm gaied python tests/test_evident.py
 docker compose run --rm gaied python experiments/run_matrix.py experiments/configs/dryrun.json
 ```
-Résultat attendu : `13/13 tests passed` (la mémoire EVIDENT seule, quelques secondes), puis deux
+Résultat attendu : `14/14 tests passed` (la mémoire EVIDENT seule, quelques secondes), puis deux
 campagnes complètes (Academy, Parsl, vrai xTB, Flowcept) avec un **LLM simulé** : `-> ok` pour
 chacune, en quelques minutes. Rien n'est un résultat scientifique : on vérifie l'installation.
 
