@@ -40,7 +40,14 @@ reste celle d'origine (les molécules de l'agent seulement).
    toutes les 30 s (`FALDA_L1_EVERY_N`, `FALDA_L2_INTERVAL_S`, `FALDA_L3_INTERVAL_S`,
    `FALDA_POLL_S`). Sans cela, T2 et T3 ne seraient jamais produits pendant une campagne.
 2. **Un pool par campagne** : chaque campagne part d'une mémoire vide, ce qui rend les campagnes comparables entre elles.
-3. **Le LLM du distillateur** est le même Qwen que les agents (Ollama, interface OpenAI).
+3. **Le LLM du distillateur** est le même Qwen que les agents, **appelé de la même façon**
+   (`falda_memory/ollama_relay.py`). Le distillateur parle à une interface OpenAI ; celle d'Ollama
+   ne permet pas de couper la réflexion de Qwen 3.5, qui dépassait alors le délai fixe de 180 s du
+   distillateur à chaque appel (première campagne : 0 atome, `L1 argo error: timed out`). Le relais
+   transmet la requête à `/api/chat` avec les réglages des agents (`think=false`, `num_ctx`), garde
+   `max_tokens` et la température du distillateur, et envoie des espaces pendant l'attente (Ollama
+   sert aussi les agents) pour que la connexion ne soit pas coupée. Ni FALDA ni son délai ne sont
+   modifiés.
 
 Correctifs de GAIED communs à toutes les branches (`[gaied-fix]`) : au plus 3 nouvelles demandes
 quand le LLM ne donne pas d'appel d'outil lisible ; un worker Parsl par agent ;

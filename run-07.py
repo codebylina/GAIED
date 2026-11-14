@@ -40,6 +40,13 @@ def goal_text(goal: dict) -> str:
             f"Also consider: {', '.join(goal['guidelines'])}.")
 
 
+def relay_url() -> str:
+    """[falda] Ollama behind an OpenAI-compatible relay that calls Qwen like the agents do
+    (think=false); see falda_memory/ollama_relay.py."""
+    from falda_memory import ollama_relay
+    return ollama_relay.start(int(os.environ.get('FALDA_RELAY_PORT', '8098')))
+
+
 def start_distiller(pool: str):
     """[falda] FALDA's own distillation sidecar (T0 -> T1 -> T2 -> T3), one per campaign.
     Its cadence is scaled to a campaign of tens of minutes (defaults: 1 h and 6 h)."""
@@ -52,8 +59,7 @@ def start_distiller(pool: str):
         'HOME': home,
         'FALDA_URL': os.environ.get('FALDA_URL', 'http://falda:8077'),
         'FALDA_TENANT': 'distiller', 'FALDA_POOL': pool,
-        'LLM_BASE_URL': os.environ.get('FALDA_DISTILLER_BASE_URL',
-                                       os.environ.get('OLLAMA_URL', 'http://localhost:11434') + '/v1'),
+        'LLM_BASE_URL': os.environ.get('FALDA_DISTILLER_BASE_URL') or relay_url(),
         'LLM_API_KEY': os.environ.get('FALDA_DISTILLER_API_KEY', 'ollama'),
         'DISTILLER_MODEL': os.environ.get('FALDA_DISTILLER_MODEL', os.environ.get('OLLAMA_MODEL', '')),
         'L1_EVERY_N': os.environ.get('FALDA_L1_EVERY_N', '6'),
