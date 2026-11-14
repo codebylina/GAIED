@@ -16,3 +16,5 @@ runinfo/
 run-07.py.before-stop-rule
 # personal VS Code settings
 .vscode/
+# experiment outputs from other branches (large, machine-specific)
+experiments/results/
