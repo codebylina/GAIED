@@ -72,8 +72,8 @@ docker compose run --rm --no-deps -e OLLAMA_URL=http://host.docker.internal:1143
 ```
 Puis l'analyse :
 ```powershell
-docker compose run --rm --no-deps gaied python experiments/analyze_falda.py experiments/results/falda
+docker compose run --rm --no-deps gaied python experiments/analyze_falda.py experiments/results/falda_v2
 ```
-Résultats : `experiments\results\falda\report.md` et `metrics_runs.csv`. Pour une campagne
+Résultats : `experiments\results\falda_v2\report.md` et `metrics_runs.csv`. Pour une campagne
 sans mémoire avec les mêmes réglages, ajouter `"none"` à la liste `conditions` de
 `experiments/configs/falda.json` (attention : sans FALDA, les agents ne voient pas le Goal).
