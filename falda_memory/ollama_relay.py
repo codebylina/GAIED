@@ -82,8 +82,12 @@ class _Handler(BaseHTTPRequestHandler):
                 self.wfile.write(f"relay error: {result.get('err')}".encode())
         except (BrokenPipeError, ConnectionResetError):
             pass
+        preview = ""
+        if "ok" in result:
+            preview = result["ok"]["choices"][0]["message"]["content"][:160].replace("\n", " ")
         print(f"[falda-relay] distiller LLM call: {time.time() - t0:.1f} s, "
-              f"{'ok' if 'ok' in result else 'error: ' + str(result.get('err'))}", flush=True)
+              f"{'ok: ' + repr(preview) if 'ok' in result else 'error: ' + str(result.get('err'))}",
+              flush=True)
 
 
 def start(port: int) -> str:
