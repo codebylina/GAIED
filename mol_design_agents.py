@@ -27,7 +27,6 @@ from rdkit.Chem import AllChem
 from xtb.ase.calculator import XTB
 
 from academy.agent import action
-from shared_memory import SharedMemory  # [shared-memory]
 from academy.agent import Agent
 from academy.agent import loop
 
@@ -199,7 +198,7 @@ def _compute_energy_with_prov(
     parent_task_id: str | None,
     workflow_id: str | None,
     campaign_id: str | None,
-    task_id: str | None = None,  # [shared-memory] same id in shared memory and in Flowcept
+    task_id: str | None = None,  # [provenance-fix] same id as the record written by the agent
 ) -> float:
     """Wrapper around _compute_energy_sync that records provenance in the XTB worker.
 
@@ -243,7 +242,7 @@ def _compute_energy_with_prov(
                     task['workflow_id'] = workflow_id
                 if campaign_id:
                     task['campaign_id'] = campaign_id
-                if task_id:  # [shared-memory]
+                if task_id:  # [provenance-fix]
                     task['task_id'] = task_id
                 interceptor.intercept_task(task)
         except Exception:
@@ -409,12 +408,9 @@ class XTBSimulationAgent(Agent):
         self.tools_by_name = {tool.name: tool for tool in tools}
         self.llm_with_tools = self.generation_llm.bind_tools(tools)
 
-        # [shared-memory] Redis shared memory (None if SHARED_MEMORY=false or Redis is unreachable)
+        # [provenance-fix] agent name written in the provenance of its xTB tasks
         import uuid as _uuid
         self.agent_name = f'{self.search_state.seed}#{_uuid.uuid4().hex[:6]}'
-        self.memory = SharedMemory.from_env(agent_id=self.agent_name)
-        logger.warning('Shared memory %s for agent %s',
-                       'ENABLED' if self.memory else 'disabled', self.agent_name)
 
     async def agent_on_shutdown(self) -> None:
         if self._lg_interceptor is not None:
@@ -486,7 +482,7 @@ class XTBSimulationAgent(Agent):
                 error = exc
                 raise
             finally:
-                # [shared-memory] Record the xTB task from the agent process.
+                # [provenance-fix] Record the xTB task from the agent process.
                 # _compute_energy_with_prov also records it inside the pool worker,
                 # but that worker was forked from the agent: its _ACTIVE_INTERCEPTOR
                 # is a COPY whose in-memory buffer is never flushed to disk (only the
@@ -498,18 +494,11 @@ class XTBSimulationAgent(Agent):
                     parent_task_id, workflow_id, campaign_id,
                 )
 
-        # [shared-memory] PULL (known? being computed elsewhere?) -> CLAIM -> compute -> PUSH
-        if getattr(self, 'memory', None) is not None:
-            import uuid as _uuid
-            ionization_energy = await self.memory.get_or_compute(
-                smiles, _run_xtb, new_task_id=lambda: str(_uuid.uuid4()),
-            )
-        else:
-            ionization_energy = await _run_xtb()
+        ionization_energy = await _run_xtb()
         self.molecule_cache[smiles] = ionization_energy
         return ionization_energy
 
-    def _record_xtb_task(  # [shared-memory]
+    def _record_xtb_task(  # [provenance-fix]
         self,
         task_id: str,
         smiles: str,
@@ -562,15 +551,6 @@ class XTBSimulationAgent(Agent):
         search space.
         """
 
-        def _memory_block() -> str:  # [shared-memory] bounded summary of the shared memory for the prompt
-            if self.memory is None:
-                return ''
-            try:
-                return '\n\n' + self.memory.render_for_prompt()
-            except Exception as exc:
-                logger.warning('Shared memory read failed: %s', exc)
-                return ''
-
         async def plan(state: SearchState) -> SearchState:
             response = await self.reasoning_llm.ainvoke(
                 [
@@ -599,7 +579,6 @@ class XTBSimulationAgent(Agent):
                         content=(
                             'Look for molecules with high ionization energy '
                             f'starting with the molecule {state.seed}'
-                            + _memory_block()  # [shared-memory]
                         ),
                     ),
                 ],
@@ -620,10 +599,6 @@ class XTBSimulationAgent(Agent):
             previously_simulated = ' '.join(
                 state.simulated_molecules.keys(),
             )
-            if self.memory is not None:  # [shared-memory] molecules of the WHOLE team
-                previously_simulated = ' '.join(
-                    sorted(set(state.simulated_molecules) | set(self.memory.known_molecules())),
-                )
             response = await self.llm_with_tools.ainvoke(
                 [
                     SystemMessage(
@@ -642,7 +617,6 @@ class XTBSimulationAgent(Agent):
                             f'Plan: {state.plan}\n\n'
                             f'Simulated Molecules: {previously_simulated} '
                             'Do not repeat those molecules in the tool calls.'
-                            + _memory_block()  # [shared-memory]
                         ),
                     ),
                 ],
@@ -762,25 +736,6 @@ class XTBSimulationAgent(Agent):
                 ],
             )
             logger.info(f'Conclusions: {response}')
-            if self.memory is not None:  # [shared-memory] PUSH conclusions for the other agents
-                try:
-                    # Evidence = exactly the results shown to the LLM in this prompt
-                    # (all of state.simulated_molecules), each with the Flowcept
-                    # task_id of its computation when the shared memory knows it.
-                    # Which of them really drove the conclusion cannot be known here.
-                    evidence = []
-                    for molecule, energy in state.simulated_molecules.items():
-                        known = self.memory.get_result(molecule)
-                        evidence.append({
-                            'smiles': molecule,
-                            'result': energy,
-                            'task_id': known.get('task_id') if known else None,
-                        })
-                    self.memory.push_lesson(
-                        response.content, kind='conclusion', evidence=evidence,
-                    )
-                except Exception as exc:
-                    logger.warning('Shared memory write failed: %s', exc)
             new_state = SearchState(
                 seed=state.seed,
                 plan=response.content,
@@ -818,7 +773,6 @@ class XTBSimulationAgent(Agent):
                             f'{results_str}\n\n'
                             'Conclusions:\n'
                             f'\t{conclusions}'
-                            + _memory_block()  # [shared-memory] team knowledge and current Goal
                         ),
                     ),
                 ],
@@ -868,7 +822,6 @@ class XTBSimulationAgent(Agent):
                             f'\t{conclusions}\n\n'
                             'Critique:\n'
                             f'\t{state.critique}'
-                            + _memory_block()  # [shared-memory] the new plan must follow the current Goal
                         ),
                     ),
                 ],

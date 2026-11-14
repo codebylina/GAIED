@@ -6,8 +6,8 @@ Prints, in time order:
   - each LLM call: duration, response length, number of proposed molecules;
   - each xTB simulation: molecule, energy or error.
 Then a summary: total time spent in the LLM, number of simulations, and the number of
-DUPLICATE xTB computations (same molecule computed several times): this is the metric
-that compares a campaign with and without shared memory.
+DUPLICATE xTB computations (same molecule computed several times), the metric to use
+to compare a campaign with and without a shared memory between agents.
 
 Usage (from GAIED/docker):
     docker compose run --rm gaied python docker/summarize_prov.py            # latest campaign

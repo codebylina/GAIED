@@ -17,7 +17,6 @@ from academy.logging import init_logging
 from academy.manager import Manager
 
 from flowcept import Flowcept
-from shared_memory import SharedMemory  # [shared-memory]
 
 logger = logging.getLogger(__name__)
 
@@ -47,19 +46,6 @@ async def main() -> int:
         executors=executor,
     ) as manager:
         seeds = os.environ.get('SEEDS', 'CNC(N)=O,CC1=C(O)N=C(O)N1').split(',')  # [gaied-docker patch]
-
-        # [shared-memory] the Goal is written to the shared memory BEFORE the agents start
-        memory = SharedMemory.from_env(agent_id='orchestrator')
-        if memory is not None:
-            if memory.get_goal() is None:
-                memory.set_goal({
-                    'objective': 'find molecules with the highest ionization energy (xTB)',
-                    'seeds': seeds,
-                    'constraints': ['valid SMILES', 'synthesizable', 'low cost'],
-                })
-            print(f'Shared memory ENABLED, campaign {memory.campaign_id}')
-        else:
-            print('Shared memory disabled (SHARED_MEMORY=false or Redis unreachable)')
 
         agents = []
         for molecule in seeds:
@@ -106,8 +92,6 @@ async def main() -> int:
             print('All agents completed.')
         except (KeyboardInterrupt, asyncio.CancelledError):
             print('\nShutting down agents...')
-        if memory is not None:  # [shared-memory] summary: reuses and avoided duplicates
-            print(memory.summary())
 
     return 0
 

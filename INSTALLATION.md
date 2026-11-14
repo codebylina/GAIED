@@ -1,4 +1,4 @@
-# Installer et lancer le projet (GAIED + mémoire partagée)
+# Installer et lancer le projet (GAIED)
 
 Guide pour toute personne qui rejoint le projet. Il est écrit pour **Windows** et ne suppose
 aucune connaissance de Docker. Sur Mac ou Linux, les commandes sont les mêmes ; seule
@@ -18,7 +18,7 @@ partie du code ne fonctionnent que sous Linux).
 
 | Conteneur | Rôle |
 |-----------|------|
-| `redis`   | la base Redis : échanges entre agents et **mémoire partagée** |
+| `redis`   | la base Redis : échanges entre agents (Academy) |
 | `ollama`  | le modèle de langage local (Qwen 3.5), sans clé API |
 | `gaied`   | le code du projet (agents, xTB, Flowcept) |
 
@@ -68,8 +68,8 @@ git clone https://github.com/codebylina/gaied.git GAIED
 cd GAIED
 git switch docker-local
 ```
-`docker-local` est la branche de travail : elle contient la configuration Docker et la mémoire
-partagée. **Ne pas travailler sur `main`** (c'est le code d'origine d'Amal).
+`docker-local` est la branche de travail : elle contient la configuration Docker. **Ne pas
+travailler sur `main`** (c'est le code d'origine d'Amal).
 
 **Première connexion GitHub depuis Git** : si Git demande un mot de passe, le mot de passe du
 compte GitHub est refusé. Une fenêtre de connexion GitHub s'ouvre normalement (gestionnaire
@@ -133,15 +133,12 @@ fournisseur choisi (et vérifier le nom exact du modèle sur le site du fourniss
 
 ---
 
-## Étape 5 — Vérifier que tout marche (sans modèle de langage, moins d'une minute)
+## Étape 5 — Vérifier que l'image fonctionne (sans modèle de langage, quelques secondes)
 
 ```powershell
-docker compose run --rm gaied python tests/test_shared_memory.py
-docker compose run --rm gaied python tests/test_agent_memory.py
+docker compose run --rm --no-deps gaied python -c "import mol_design_agents, flowcept, academy; print('OK')"
 ```
-Résultat attendu : `9/9 tests passed`, puis `5/5 tests passed`. Le second test lance un vrai
-calcul xTB : deux agents demandent la même molécule en même temps, et la ligne `counters` doit
-contenir `'computed': 1` (un seul calcul grâce à la mémoire partagée).
+Résultat attendu : `OK` (les bibliothèques du projet et xTB sont bien installées dans l'image).
 
 ---
 
@@ -160,7 +157,6 @@ Réglages utiles, sans modifier aucun fichier (ajouter `-e NOM=valeur` avant `ga
 |---------|-------|
 | `-e "SEEDS=CNC(N)=O,CNC(N)=O"` | molécules de départ, une par agent (ici : 2 agents, même départ) |
 | `-e MAX_ITERATIONS=1` | nombre de tours de la boucle de chaque agent (moins = plus court) |
-| `-e SHARED_MEMORY=false` | désactive la mémoire partagée (campagne de référence) |
 
 Exemple :
 ```powershell
@@ -171,16 +167,9 @@ docker compose run --rm -e "SEEDS=CNC(N)=O,CNC(N)=O" -e MAX_ITERATIONS=1 gaied
 
 ```powershell
 docker compose run --rm gaied python docker/summarize_prov.py     # déroulé de la dernière campagne
-docker compose run --rm gaied python shared_memory.py show        # contenu de la mémoire partagée
-docker compose exec redis redis-cli KEYS "mem:*"                  # les clés brutes dans Redis
 ```
 `summarize_prov.py` lit la provenance enregistrée par Flowcept (`output/flowcept_buffer_*.jsonl`)
 et affiche chaque appel au modèle, chaque simulation xTB, et le nombre de **calculs en double**.
-
-Pour voir la mémoire se remplir **en direct**, dans une deuxième fenêtre PowerShell (même dossier) :
-```powershell
-docker compose exec redis redis-cli PSUBSCRIBE "mem:*:events"
-```
 
 ---
 
@@ -202,7 +191,7 @@ docker compose exec redis redis-cli PSUBSCRIBE "mem:*:events"
   Puis, sur GitHub, ouvrir une *Pull Request* vers `docker-local` pour que l'autre relise avant de
   fusionner.
 - Se mettre d'accord avant de modifier le même fichier en même temps (surtout `mol_design_agents.py`
-  et `shared_memory.py`), pour éviter les conflits.
+  et les fichiers de la mémoire), pour éviter les conflits.
 - **Ne jamais committer** `docker/.env` ni un jeton ou une clé.
 - Les fichiers `runinfo/` et `output/` produits par vos campagnes ne sont pas envoyés sur GitHub
   (déjà dans le `.gitignore`).
@@ -215,13 +204,11 @@ docker compose exec redis redis-cli PSUBSCRIBE "mem:*:events"
 |---------|---------|
 | `mol_design_agents.py` | l'agent (`XTBSimulationAgent`) et sa boucle LangGraph : plan → tool_calling → simulate → conclude → critique → update |
 | `run-07.py` | lance les agents et l'orchestration de la campagne |
-| `shared_memory.py` | **la mémoire partagée** dans Redis (résultats, verrous, leçons, goal, instructions) |
-| `tests/` | tests de la mémoire, sans modèle de langage |
 | `docker/` | toute la configuration Docker ; `local_llm.py` branche le modèle local ou la clé API |
-| `CLAUDE.md` | description détaillée du projet et de la mémoire (aussi lue par Claude Code) |
+| `CLAUDE.md` | description détaillée du projet (aussi lue par Claude Code) |
 
 Les modifications faites au code d'origine d'Amal sont repérables par les commentaires
-`[gaied-docker ...]` (configuration) et `[shared-memory]` (mémoire partagée).
+`[gaied-docker ...]` (configuration) et `[provenance-fix]` (provenance des calculs xTB).
 
 ---
 
