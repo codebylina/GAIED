@@ -27,6 +27,7 @@ from rdkit.Chem import AllChem
 from xtb.ase.calculator import XTB
 
 from academy.agent import action
+from falda_memory import FaldaMemory, Recorder  # [falda]
 from academy.agent import Agent
 from academy.agent import loop
 
@@ -411,6 +412,10 @@ class XTBSimulationAgent(Agent):
         # [provenance-fix] agent name written in the provenance of its xTB tasks
         import uuid as _uuid
         self.agent_name = f'{self.search_state.seed}#{_uuid.uuid4().hex[:6]}'
+        # [falda] FALDA shared memory (None unless MEMORY_MODE=falda) and the measurement
+        # recorder (same telemetry format as EVIDENT; never shown to the agent)
+        self.memory = FaldaMemory.from_env(self.agent_name)
+        self.recorder = Recorder.from_env(self.agent_name)
 
     async def agent_on_shutdown(self) -> None:
         if self._lg_interceptor is not None:
@@ -482,6 +487,9 @@ class XTBSimulationAgent(Agent):
                 error = exc
                 raise
             finally:
+                if getattr(self, 'recorder', None) is not None:  # [falda] measurement only
+                    self.recorder.fact(smiles, result, str(error)[:300] if error else None,
+                                       task_id, _time.time() - started_at)
                 # [provenance-fix] Record the xTB task from the agent process.
                 # _compute_energy_with_prov also records it inside the pool worker,
                 # but that worker was forked from the agent: its _ACTIVE_INTERCEPTOR
@@ -550,6 +558,31 @@ class XTBSimulationAgent(Agent):
         ionizationenergy, using the starting molecule as a seed for the
         search space.
         """
+        import time as _time
+
+        def _memory_block(node: str, query: str) -> str:  # [falda] recall for the prompt
+            if self.memory is None:
+                return ''
+            text = self.memory.recall(query)
+            if self.recorder is not None:
+                self.recorder.briefing(node, len(text), self.memory.last_recall_ms, text)
+            return '\n\n' + text if text else ''
+
+        def _remember(role: str, content: str, node: str) -> None:  # [falda] T0 stream
+            if self.memory is not None:
+                self.memory.write(role, str(content), node)
+
+        def _timed(name: str, fn):  # [falda] node durations (measurement only)
+            async def wrapper(state):
+                if self.recorder is not None:
+                    self.recorder.activity = name
+                t0 = _time.perf_counter()
+                try:
+                    return await fn(state)
+                finally:
+                    if self.recorder is not None:
+                        self.recorder.node(name, _time.perf_counter() - t0)
+            return wrapper
 
         async def plan(state: SearchState) -> SearchState:
             response = await self.reasoning_llm.ainvoke(
@@ -579,12 +612,15 @@ class XTBSimulationAgent(Agent):
                         content=(
                             'Look for molecules with high ionization energy '
                             f'starting with the molecule {state.seed}'
+                            + _memory_block('plan', f'plan molecules with high ionization '
+                                                    f'energy starting from {state.seed}')  # [falda]
                         ),
                     ),
                 ],
             )
 
             logger.info(f'Planner: {response}')
+            _remember('assistant', response.content, 'plan')  # [falda]
 
             return SearchState(
                 seed=state.seed,
@@ -617,12 +653,25 @@ class XTBSimulationAgent(Agent):
                             f'Plan: {state.plan}\n\n'
                             f'Simulated Molecules: {previously_simulated} '
                             'Do not repeat those molecules in the tool calls.'
+                            + _memory_block('tool_calling', str(state.plan)[:500])  # [falda]
                         ),
                     ),
                 ],
             )
             logger.info(f'Tool Calling: {response}')
+            # [gaied-fix] bounded retries: the original loop never ended when the LLM kept
+            # answering without a parsable tool call (an agent stayed blocked forever)
+            _max_retries = int(os.environ.get('TOOL_CALL_RETRIES', '3'))
+            _retries, _failed_answers = 0, []
             while len(response.tool_calls) == 0:
+                _failed_answers.append(str(response.content))
+                if _retries >= _max_retries:
+                    logger.warning('No parsable tool call after %d retries: '
+                                   'this iteration runs no simulation', _retries)
+                    if self.recorder is not None:
+                        self.recorder.tool_call_failed(_retries + 1, _failed_answers)
+                    break
+                _retries += 1
                 logger.warning('Tool calling agent did not call tools!')
                 logger.warning(response)
                 response = await self.llm_with_tools.ainvoke(
@@ -656,6 +705,12 @@ class XTBSimulationAgent(Agent):
                             ),
                         ),
                     ],
+                )
+
+            if self.recorder is not None:  # [falda] measurement only
+                self.recorder.proposals(
+                    [str(tc.get('args', {}).get('smiles', '')) for tc in response.tool_calls],
+                    own_previous=list(state.simulated_molecules), retries=_retries,
                 )
 
             return SearchState(
@@ -693,6 +748,8 @@ class XTBSimulationAgent(Agent):
                     results[smiles] = str(e)
 
             new_results = state.simulated_molecules | results
+            _remember('tool', 'Simulation results (ionization energy): ' + '; '.join(  # [falda]
+                f'{m}: {v}' for m, v in results.items()), 'simulate')
 
             return SearchState(
                 seed=state.seed,
@@ -736,6 +793,9 @@ class XTBSimulationAgent(Agent):
                 ],
             )
             logger.info(f'Conclusions: {response}')
+            _remember('assistant', response.content, 'conclude')  # [falda]
+            if self.recorder is not None:
+                self.recorder.conclusion(str(response.content))
             new_state = SearchState(
                 seed=state.seed,
                 plan=response.content,
@@ -773,6 +833,7 @@ class XTBSimulationAgent(Agent):
                             f'{results_str}\n\n'
                             'Conclusions:\n'
                             f'\t{conclusions}'
+                            + _memory_block('critique', str(state.plan)[:500])  # [falda]
                         ),
                     ),
                 ],
@@ -822,11 +883,13 @@ class XTBSimulationAgent(Agent):
                             f'\t{conclusions}\n\n'
                             'Critique:\n'
                             f'\t{state.critique}'
+                            + _memory_block('update', str(state.critique)[:500])  # [falda]
                         ),
                     ),
                 ],
             )
             logger.info(f'Update: {response}')
+            _remember('assistant', response.content, 'update')  # [falda]
 
             return SearchState(
                 seed=state.seed,
@@ -861,6 +924,10 @@ class XTBSimulationAgent(Agent):
                 else:
                     _no_improve_count += 1
 
+            if self.recorder is not None:  # [falda] measurement only
+                self.recorder.end_iteration(_best_energy if numeric else None,
+                                            _no_improve_count, _iteration)
+
             if shutdown.is_set():
                 return END
             if self.max_iterations is not None and _iteration >= self.max_iterations:
@@ -886,12 +953,12 @@ class XTBSimulationAgent(Agent):
         agent_builder = StateGraph(SearchState)
 
         # Add nodes
-        agent_builder.add_node('plan', plan)
-        agent_builder.add_node('tool_calling', tool_calling)
-        agent_builder.add_node('simulate', simulate)
-        agent_builder.add_node('conclude', conclude)
-        agent_builder.add_node('critique', critique)
-        agent_builder.add_node('update', update)
+        agent_builder.add_node('plan', _timed('plan', plan))  # [falda]
+        agent_builder.add_node('tool_calling', _timed('tool_calling', tool_calling))  # [falda]
+        agent_builder.add_node('simulate', _timed('simulate', simulate))  # [falda]
+        agent_builder.add_node('conclude', _timed('conclude', conclude))  # [falda]
+        agent_builder.add_node('critique', _timed('critique', critique))  # [falda]
+        agent_builder.add_node('update', _timed('update', update))  # [falda]
 
         # Add edges to connect nodes
         agent_builder.add_edge(START, 'plan')

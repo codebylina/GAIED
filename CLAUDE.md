@@ -23,8 +23,12 @@
     ou une API au format OpenAI (`LLM_PROVIDER=openai`, clé dans `docker/.env`).
   - `apply_patches.py`, `patch_stop_rule.py` : correctifs déjà appliqués (ne pas relancer).
   - `summarize_prov.py` : résume la provenance de la dernière campagne.
-- Mémoire : **pas encore de mémoire sur cette branche** (version naïve retirée le 14 nov., gardée sur
-  la branche `archive/naive-memory-v1` ; la version EVIDENT est sur la branche `evident-memory`).
+- Mémoire (branche `falda-baseline`) : **FALDA** comme mémoire partagée, référence de comparaison pour
+  EVIDENT. Méthode et écarts : `docs/FALDA_BASELINE.md`. `falda_memory/client.py` (appels HTTP à la
+  passerelle FALDA, un pool par campagne), `falda_memory/falda_distiller.py` (copié tel quel de FALDA),
+  `falda_memory/recorder.py` (mesure seulement, format de télémétrie EVIDENT), `docker/falda/Dockerfile`
+  (passerelle construite depuis le commit `ff6d83b`), `experiments/run_falda.py` + `experiments/configs/`.
+  `MEMORY_MODE=none|falda`. Branchements marqués `[falda]` ; correctifs communs `[gaied-fix]`.
 - `output/flowcept_buffer_*.jsonl` : provenance de chaque campagne.
 
 ## Modifications déjà faites au code d'Amal (marquées `[gaied-docker ...]`)

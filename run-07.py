@@ -17,12 +17,87 @@ from academy.logging import init_logging
 from academy.manager import Manager
 
 from flowcept import Flowcept
+from falda_memory import FaldaMemory, Recorder  # [falda]
 
 logger = logging.getLogger(__name__)
 
 
+GOAL = {  # [falda] same Goal and hard constraints as the EVIDENT experiments
+    'objective': 'find molecules with the highest ionization energy (xTB)',
+    'constraints': {
+        'max_heavy_atoms': int(os.environ.get('GOAL_MAX_HEAVY_ATOMS', '12')),
+        'allowed_elements': os.environ.get('GOAL_ALLOWED_ELEMENTS', 'C,H,N,O,F').split(','),
+    },
+    'guidelines': ['valid SMILES', 'synthesizable', 'low cost'],
+}
+
+
+def goal_text(goal: dict) -> str:
+    c = goal['constraints']
+    return (f"GOAL of the team: {goal['objective']}.\n"
+            f"Hard constraints: at most {c['max_heavy_atoms']} heavy (non-hydrogen) atoms; "
+            f"only the elements {', '.join(c['allowed_elements'])}.\n"
+            f"Also consider: {', '.join(goal['guidelines'])}.")
+
+
+def start_distiller(pool: str):
+    """[falda] FALDA's own distillation sidecar (T0 -> T1 -> T2 -> T3), one per campaign.
+    Its cadence is scaled to a campaign of tens of minutes (defaults: 1 h and 6 h)."""
+    import subprocess
+    import sys
+    home = f'/tmp/falda-distiller-{pool}'
+    os.makedirs(os.path.join(home, '.falda'), exist_ok=True)
+    env = dict(os.environ)
+    env.update({
+        'HOME': home,
+        'FALDA_URL': os.environ.get('FALDA_URL', 'http://falda:8077'),
+        'FALDA_TENANT': 'distiller', 'FALDA_POOL': pool,
+        'LLM_BASE_URL': os.environ.get('FALDA_DISTILLER_BASE_URL',
+                                       os.environ.get('OLLAMA_URL', 'http://localhost:11434') + '/v1'),
+        'LLM_API_KEY': os.environ.get('FALDA_DISTILLER_API_KEY', 'ollama'),
+        'DISTILLER_MODEL': os.environ.get('FALDA_DISTILLER_MODEL', os.environ.get('OLLAMA_MODEL', '')),
+        'L1_EVERY_N': os.environ.get('FALDA_L1_EVERY_N', '6'),
+        'L2_INTERVAL_S': os.environ.get('FALDA_L2_INTERVAL_S', '300'),
+        'L3_INTERVAL_S': os.environ.get('FALDA_L3_INTERVAL_S', '900'),
+        'DISTILLER_POLL_S': os.environ.get('FALDA_POLL_S', '30'),
+    })
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'falda_memory', 'falda_distiller.py')
+    return subprocess.Popen([sys.executable, script], env=env)
+
+
+def falda_stats(url: str, pool: str) -> dict:
+    """[falda] Size of each tier of the campaign pool at the end."""
+    m = FaldaMemory(url, 'orchestrator', pool)
+    try:
+        return {'stream': m.call('/stream/query', {'limit': 1}).get('total'),
+                'atoms': m.call('/atoms/query', {'limit': 1}).get('total'),
+                'scenes': m.call('/scenes/ls', {'prefix': ''}).get('total'),
+                'core_chars': len(m.call('/core/read', {}).get('content') or '')}
+    except Exception as exc:
+        return {'error': str(exc)}
+
+
 async def main() -> int:
     init_logging(logging.INFO)
+    seeds = os.environ.get('SEEDS', 'CNC(N)=O,CC1=C(O)N=C(O)N1').split(',')  # [gaied-docker patch]
+    mode = os.environ.get('MEMORY_MODE', 'none').strip().lower()  # [falda] none | falda
+
+    # [falda] measurement recorder (Goal, run metadata), then the FALDA campaign pool
+    recorder = Recorder.from_env('orchestrator')
+    if recorder is not None:
+        recorder.set_goal({**GOAL, 'seeds': seeds})
+        recorder.set_meta(mode=mode, seeds=seeds, condition=os.environ.get('EXPERIMENT_CONDITION', mode),
+                          max_iterations=int(os.environ.get('MAX_ITERATIONS', '20')),
+                          llm=os.environ.get('LLM_MODEL') or os.environ.get('OLLAMA_MODEL'))
+    pool, distiller = None, None
+    falda_url = os.environ.get('FALDA_URL', 'http://falda:8077')
+    if mode == 'falda':
+        pool = FaldaMemory.declare_campaign_pool(falda_url, goal_text(GOAL))
+        print(f'FALDA memory: pool {pool} at {falda_url}')
+        if os.environ.get('FALDA_DISTILL', 'true').lower() == 'true':
+            distiller = start_distiller(pool)
+    else:
+        print('No shared memory (MEMORY_MODE=none)')
 
     config = Config(
         executors=[
@@ -32,7 +107,8 @@ async def main() -> int:
                         ''  # [gaied-docker patch] no conda activate needed in Docker
                     ),
                 ),
-                max_workers_per_node=2,
+                # [gaied-fix] one Parsl worker per agent (was 2: a third agent never started)
+                max_workers_per_node=int(os.environ.get('PARSL_MAX_WORKERS', max(2, len(seeds)))),
                 # [gaied-docker patch] a local LLM on CPU can starve the Parsl manager
                 # for minutes; the default (120 s) made Parsl drop both agents (ManagerLost)
                 heartbeat_threshold=int(os.environ.get('PARSL_HEARTBEAT_THRESHOLD', '1200')),
@@ -45,8 +121,6 @@ async def main() -> int:
         factory=RedisExchangeFactory(os.environ.get('REDIS_HOST', 'localhost'), 6379),  # [gaied-docker patch]
         executors=executor,
     ) as manager:
-        seeds = os.environ.get('SEEDS', 'CNC(N)=O,CC1=C(O)N=C(O)N1').split(',')  # [gaied-docker patch]
-
         agents = []
         for molecule in seeds:
             agents.append(
@@ -56,7 +130,7 @@ async def main() -> int:
                         XTBConfig(),
                         molecule,
                         int(os.environ.get('MAX_ITERATIONS', '20')),   # max_iterations  # [gaied-docker patch]
-                        3,   # no_improvement_tolerance
+                        int(os.environ.get('NO_IMPROVEMENT_TOLERANCE', '3')) or None,   # [gaied-fix] 0 = off
                     ),
                 ),
             )
@@ -93,6 +167,20 @@ async def main() -> int:
         except (KeyboardInterrupt, asyncio.CancelledError):
             print('\nShutting down agents...')
 
+    if distiller is not None:  # [falda]
+        distiller.terminate()
+    if recorder is not None:
+        if pool:
+            stats = falda_stats(falda_url, pool)
+            recorder.set_meta(falda=stats)
+            print(f'FALDA pool {pool}: {stats}')
+        export_path = os.environ.get('BENCH_EXPORT')
+        if export_path:
+            import json
+            os.makedirs(os.path.dirname(os.path.abspath(export_path)), exist_ok=True)
+            with open(export_path, 'w') as fh:
+                json.dump(recorder.export(), fh)
+            print(f'Campaign exported to {export_path}')
     return 0
 
 

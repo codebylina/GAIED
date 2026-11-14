@@ -1,0 +1,16 @@
+{
+  "name": "falda_dryrun",
+  "description": "Installation check: 2 agents, 2 iterations, with the FALDA gateway and distiller. Not a result.",
+  "seeds": ["CNC(N)=O", "CNC(N)=O"],
+  "max_iterations": 2,
+  "repetitions": 1,
+  "timeout_min": 40,
+  "conditions": ["falda"],
+  "env": {
+    "NO_IMPROVEMENT_TOLERANCE": "0",
+    "STABLE_REPORTS": "100000",
+    "FALDA_POLL_S": "10",
+    "FALDA_L1_EVERY_N": "2",
+    "FALDA_L2_INTERVAL_S": "60"
+  }
+}

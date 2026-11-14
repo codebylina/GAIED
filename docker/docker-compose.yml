@@ -19,6 +19,18 @@ services:
     ports: ["27017:27017"]
     volumes: [mongo-data:/data/db]
 
+  falda:                                             # FALDA baseline memory (MEMORY_MODE=falda)
+    build: ./falda
+    profiles: ["falda"]                                # started only with --profile falda
+    ports: ["8077:8077"]
+    volumes: [falda-data:/data]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    environment:
+      # embeddings: an OpenAI-compatible /v1/embeddings endpoint (Ollama: ollama pull nomic-embed-text)
+      FALDA_EMBED_BASE_URL: ${FALDA_EMBED_BASE_URL:-http://host.docker.internal:11434/v1}
+      FALDA_EMBED_MODEL: ${FALDA_EMBED_MODEL:-nomic-embed-text}
+      FALDA_DIM: ${FALDA_DIM:-768}
+
   ollama:
     image: ollama/ollama:latest
     ports: ["11434:11434"]
@@ -46,12 +58,17 @@ services:
       MAX_ITERATIONS: "3"
       N_XTB_WORKERS: "1"
       STABLE_REPORTS: "60"              # stop after 60 reports (30 min) without a new molecule: the LLM is slow on CPU
+      # --- memory: none (agents alone) or falda (FALDA baseline, needs --profile falda) ---
+      MEMORY_MODE: ${MEMORY_MODE:-none}
+      FALDA_URL: http://falda:8077
+      FALDA_DISTILL: ${FALDA_DISTILL:-true}       # run FALDA's distiller (T0 -> T1 -> T2 -> T3)
       FLOWCEPT_SETTINGS_PATH: /app/docker/flowcept_settings.yaml
       PYTHONPATH: /app:/app/docker                # so that local_llm.py is found
     volumes:
       - ..:/app                                   # the whole GAIED folder
 
 volumes:
+  falda-data:
   redis-data:
   mongo-data:
   ollama-models:
