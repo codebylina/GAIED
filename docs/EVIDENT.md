@@ -132,11 +132,27 @@ S'y ajoutent `goal` (objectif + **contraintes vérifiables** : nombre maximal d'
 
 `compute_ionization_energy` appelle `memory.evaluate_molecule(smiles, compute)` :
 
-1. **PULL** : le fait existe-t-il (SMILES canonique RDKit : `CCO` = `OCC`) ? → réutilisé, y compris
+1. **LECTURE** : le fait existe-t-il (SMILES canonique RDKit : `CCO` = `OCC`) ? → réutilisé, y compris
    un **échec** (une molécule invalide n'est essayée qu'une fois par l'équipe) ;
-2. sinon **CLAIM** (`SET NX EX`) : un seul agent calcule ; les autres attendent le fait ;
+2. sinon **VERROU** (`SET NX EX`, atomique) : un seul agent calcule ; les autres attendent le fait ;
 3. **calcul** xTB, *surveillé* (annulable par STOP, §4.5) ;
-4. **PUSH** du fait avec le `task_id` de la tâche Flowcept ; **RELEASE**.
+4. **ÉCRITURE** du fait avec le `task_id` de la tâche Flowcept ; **libération** du verrou.
+
+**Push ou pull ?** Au sens des systèmes distribués (*push* : le système notifie les intéressés dès
+qu'une information change ; *pull* : chacun la demande, éventuellement en redemandant
+régulièrement), la version actuelle d'EVIDENT fonctionne **par pull** :
+
+| Situation | Mécanisme actuel |
+|---|---|
+| conflit sur une molécule | détecté **instantanément** : le verrou `SET NX` est atomique |
+| un agent apprend ce que l'équipe sait | il lit la mémoire au moment de son **briefing** (pull) : une molécule prise ou calculée entre-temps n'est connue qu'au briefing suivant |
+| un agent attend une molécule en cours chez un autre | il redemande toutes les secondes (pull par *polling*) |
+| une directive STOP | l'agent vérifie toutes les 0,5 s (polling) |
+| l'agent d'analyse | réveillé dès qu'un événement arrive (`XREAD BLOCK`) : quasi-push |
+
+Suite prévue : un écouteur par agent abonné au flux d'événements (réveil immédiat des agents en
+attente, mise à jour de la vue locale quand un statut change, directives reçues sans attendre),
+et une mesure du délai de propagation en pull et en push.
 
 Le `task_id` est le même dans la mémoire et dans la trace Flowcept (`_record_xtb_task`) : depuis
 n'importe quel fait — donc n'importe quelle affirmation — on remonte à l'exécution qui l'a produit.
