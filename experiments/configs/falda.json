@@ -1,9 +1,9 @@
 {
   "name": "falda",
-  "description": "FALDA baseline: same agents, seeds, budget and Goal as the EVIDENT main experiment (4 agents, two pairs share a seed, 10 iterations per agent).",
+  "description": "FALDA baseline: same agents, seeds, budget and Goal as the EVIDENT main experiment (4 agents, two pairs share a seed, 10 iterations per agent), one repetition.",
   "seeds": ["CNC(N)=O", "CNC(N)=O", "CC1=C(O)N=C(O)N1", "CC1=C(O)N=C(O)N1"],
   "max_iterations": 10,
-  "repetitions": 2,
+  "repetitions": 1,
   "timeout_min": 180,
   "conditions": ["falda"],
   "env": {
