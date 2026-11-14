@@ -26,9 +26,9 @@ import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-from evident.features import FEATURE_NAMES, canonical_smiles  # noqa: E402
+from evident.features import FEATURE_NAMES, canonical_smiles, mol_info  # noqa: E402
 from evident.verifier import SHOWN_AS_KNOWLEDGE, VerifierParams, ok_facts, reference_effects  # noqa: E402
-from experiments.conditions import COLORS, CONDITIONS, QUESTIONS  # noqa: E402
+from experiments.conditions import COLORS, CONDITIONS, EXTERNAL_CONDITIONS, QUESTIONS  # noqa: E402
 
 KEY_METRICS = [
     ("best_at_budget", "best IE within the common budget of xTB runs", "higher"),
@@ -140,9 +140,28 @@ def load_runs(directory):
         with open(path) as fh:
             d = json.load(fh)
         d["_file"] = os.path.basename(path)
+        _fill_features(d)
         d["_condition"] = d.get("meta", {}).get("condition") or d["_file"].rsplit("_r", 1)[0]
         runs.append(d)
     return runs
+
+
+def _fill_features(d):
+    """Runs recorded outside EVIDENT (e.g. the FALDA baseline) store no chemical features:
+    compute them here with the same vocabulary, so every metric is computed identically."""
+    for f in d.get("facts_log", []):
+        if not f.get("features"):
+            info = mol_info(f["smiles"])
+            f["features"], f["heavy_atoms"] = info["features"], info["heavy_atoms"]
+    for e in d.get("telemetry", []):
+        if e.get("e") == "proposals":
+            for p in e["items"]:
+                if not p.get("features"):
+                    p["features"] = mol_info(p["smiles"])["features"]
+        if e.get("e") == "briefing" and e.get("text") and not e.get("lesson_claims"):
+            # free-text memory (FALDA): claims found by the conservative keyword parser
+            from evident.claims import parse_claims_keywords
+            e["lesson_claims"] = parse_claims_keywords(e["text"])
 
 
 def ground_truth(runs):
@@ -334,7 +353,7 @@ def figures(by_cond, out):
     import matplotlib.pyplot as plt
     plt.rcParams.update({"font.size": 9, "axes.titlesize": 10, "axes.labelcolor": "#52514e",
                          "figure.facecolor": "#fcfcfb", "axes.facecolor": "#fcfcfb"})
-    conds = [c for c in CONDITIONS if c in by_cond]
+    conds = [c for c in list(CONDITIONS) + list(EXTERNAL_CONDITIONS) if c in by_cond]
     files = []
 
     # 1. best value found vs cost
@@ -384,7 +403,7 @@ def figures(by_cond, out):
     plt.close(fig)
 
     # 3. quality of shared knowledge, and robustness to an injected false claim
-    kc = [c for c in conds if c.startswith(("naive", "evident"))]
+    kc = [c for c in conds if c.startswith(("naive", "evident", "falda"))]
     inj = [c for c in conds if "inject" in c]
     fig, axes = plt.subplots(1, 2 if inj else 1, figsize=(8 if inj else 4.5, 3.2), squeeze=False)
     ax = axes[0][0]
@@ -438,7 +457,8 @@ def main(directory):
     by_cond = defaultdict(list)
     for r in rows:
         by_cond[r["condition"]].append(r)
-    conds = [c for c in CONDITIONS if c in by_cond] + [c for c in by_cond if c not in CONDITIONS]
+    order = list(CONDITIONS) + list(EXTERNAL_CONDITIONS)
+    conds = [c for c in order if c in by_cond] + [c for c in by_cond if c not in order]
 
     cols = sorted({k for r in rows for k in r if not k.startswith("_")})
     with open(os.path.join(directory, "metrics_runs.csv"), "w", newline="") as fh:

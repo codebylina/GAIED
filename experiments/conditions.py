@@ -17,10 +17,16 @@ QUESTIONS = {
     "Q2 verified vs raw knowledge": ("naive", "evident"),
     "Q3 robustness to a false claim": ("naive+inject", "evident+inject"),
     "Q4 real-time control": ("evident", "evident+monitor"),
+    "Q5 FALDA baseline vs EVIDENT": ("falda", "evident"),
 }
+
+# Conditions run on other branches (no environment here), analysed with the same metrics:
+#   falda  FALDA shared memory (branch falda-baseline, experiments/run_falda.py)
+EXTERNAL_CONDITIONS = ("falda",)
 
 # Fixed color per condition (color follows the entity), reference categorical palette
 COLORS = {
     "none": "#2a78d6", "coord": "#eb6834", "naive": "#1baf7a", "evident": "#eda100",
     "evident+monitor": "#e87ba4", "naive+inject": "#008300", "evident+inject": "#6250d6",
+    "falda": "#e34948",
 }
