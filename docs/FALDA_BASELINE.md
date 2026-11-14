@@ -39,7 +39,7 @@ reste celle d'origine (les molécules de l'agent seulement).
    Ici : atomes tous les 6 messages, scène toutes les 5 min, Core toutes les 15 min, vérification
    toutes les 30 s (`FALDA_L1_EVERY_N`, `FALDA_L2_INTERVAL_S`, `FALDA_L3_INTERVAL_S`,
    `FALDA_POLL_S`). Sans cela, T2 et T3 ne seraient jamais produits pendant une campagne.
-2. **Un pool par campagne** : chaque campagne part d'une mémoire vide, comme les conditions EVIDENT.
+2. **Un pool par campagne** : chaque campagne part d'une mémoire vide, ce qui rend les campagnes comparables entre elles.
 3. **Le LLM du distillateur** est le même Qwen que les agents (Ollama, interface OpenAI).
 
 Correctifs de GAIED communs à toutes les branches (`[gaied-fix]`) : au plus 3 nouvelles demandes
