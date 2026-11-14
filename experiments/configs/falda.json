@@ -4,7 +4,7 @@
   "seeds": ["CNC(N)=O", "CNC(N)=O", "CC1=C(O)N=C(O)N1", "CC1=C(O)N=C(O)N1"],
   "max_iterations": 10,
   "repetitions": 1,
-  "timeout_min": 180,
+  "timeout_min": 210,
   "conditions": ["falda"],
   "env": {
     "NO_IMPROVEMENT_TOLERANCE": "0",

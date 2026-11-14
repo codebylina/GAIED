@@ -40,11 +40,9 @@ def goal_text(goal: dict) -> str:
             f"Also consider: {', '.join(goal['guidelines'])}.")
 
 
-def start_distiller(pool: str):
-    """[falda] FALDA's own distillation sidecar (T0 -> T1 -> T2 -> T3), one per campaign.
+def distiller_env(pool: str) -> dict:
+    """[falda] Environment of FALDA's distiller (T0 -> T1 -> T2 -> T3), one per campaign.
     Its cadence is scaled to a campaign of tens of minutes (defaults: 1 h and 6 h)."""
-    import subprocess
-    import sys
     home = f'/tmp/falda-distiller-{pool}'
     os.makedirs(os.path.join(home, '.falda'), exist_ok=True)
     env = dict(os.environ)
@@ -61,8 +59,35 @@ def start_distiller(pool: str):
         'L3_INTERVAL_S': os.environ.get('FALDA_L3_INTERVAL_S', '900'),
         'DISTILLER_POLL_S': os.environ.get('FALDA_POLL_S', '30'),
     })
-    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'falda_memory', 'falda_distiller.py')
-    return subprocess.Popen([sys.executable, script], env=env)
+    return env
+
+
+DISTILLER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'falda_memory', 'falda_distiller.py')
+
+
+def start_distiller(pool: str):
+    """[falda] FALDA's distiller in its normal loop mode, running beside the agents."""
+    import subprocess
+    import sys
+    return subprocess.Popen([sys.executable, DISTILLER_SCRIPT], env=distiller_env(pool))
+
+
+def final_distillation(pool: str) -> dict:
+    """[falda] One last pass with FALDA's own `--once` mode (L1, L2, L3) after the agents stop,
+    so the turns written after the last loop cycle are distilled too. Bounded by
+    FALDA_FINAL_TIMEOUT_S (default 1800 s); its duration is recorded apart from the campaign."""
+    import subprocess
+    import sys
+    import time as _time
+    t0 = _time.time()
+    timeout = float(os.environ.get('FALDA_FINAL_TIMEOUT_S', '1800'))
+    try:
+        rc = subprocess.run([sys.executable, DISTILLER_SCRIPT, '--once'], env=distiller_env(pool),
+                            timeout=timeout).returncode
+        status = 'ok' if rc == 0 else f'exit {rc}'
+    except subprocess.TimeoutExpired:
+        status = 'timeout'
+    return {'status': status, 'duration_s': round(_time.time() - t0, 1)}
 
 
 def falda_stats(url: str, pool: str) -> dict:
@@ -167,12 +192,20 @@ async def main() -> int:
         except (KeyboardInterrupt, asyncio.CancelledError):
             print('\nShutting down agents...')
 
+    final, during = None, None
     if distiller is not None:  # [falda]
         distiller.terminate()
+        distiller.wait()
+        during = falda_stats(falda_url, pool)  # what the agents could use during the campaign
+        print(f'FALDA pool {pool} when the agents stopped: {during}')
+        if os.environ.get('FALDA_FINAL_PASS', 'true').lower() == 'true':
+            print('FALDA: final distillation pass (agents stopped)...')
+            final = final_distillation(pool)
+            print(f'FALDA: final distillation {final}')
     if recorder is not None:
         if pool:
             stats = falda_stats(falda_url, pool)
-            recorder.set_meta(falda=stats)
+            recorder.set_meta(falda=stats, falda_during=during, falda_final_pass=final)
             print(f'FALDA pool {pool}: {stats}')
         export_path = os.environ.get('BENCH_EXPORT')
         if export_path:

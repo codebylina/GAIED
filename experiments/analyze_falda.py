@@ -45,6 +45,9 @@ METRICS = [
     ("falda_atoms", "FALDA T1 atoms at the end"),
     ("falda_scenes", "FALDA T2 scenes at the end"),
     ("falda_core_chars", "FALDA T3 core size at the end (characters)"),
+    ("falda_during_atoms", "FALDA T1 atoms when the agents stopped (usable by them)"),
+    ("falda_during_scenes", "FALDA T2 scenes when the agents stopped"),
+    ("final_pass_s", "final distillation pass after the agents stopped (s)"),
     ("wall_time_s", "campaign wall time (s)"),
 ]
 
@@ -110,6 +113,9 @@ def run_metrics(d):
     m["recall_ms"] = st.mean(e.get("ms", 0) for e in br) if br else 0
     for k, v in (d.get("meta", {}).get("falda") or {}).items():
         m[f"falda_{k}"] = v
+    for k, v in (d.get("meta", {}).get("falda_during") or {}).items():
+        m[f"falda_during_{k}"] = v
+    m["final_pass_s"] = (d.get("meta", {}).get("falda_final_pass") or {}).get("duration_s")
     m["wall_time_s"] = (max(e["t"] for e in tel) - min(e["t"] for e in tel)) if tel else 0
     return m
 
