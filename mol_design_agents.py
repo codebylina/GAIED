@@ -413,7 +413,7 @@ class XTBSimulationAgent(Agent):
         import uuid as _uuid
         self.agent_name = f'{self.search_state.seed}#{_uuid.uuid4().hex[:6]}'
         # [falda] FALDA shared memory (None unless MEMORY_MODE=falda) and the measurement
-        # recorder (same telemetry format as EVIDENT; never shown to the agent)
+        # recorder (experiments/analyze_falda.py; never shown to the agent)
         self.memory = FaldaMemory.from_env(self.agent_name)
         self.recorder = Recorder.from_env(self.agent_name)
 

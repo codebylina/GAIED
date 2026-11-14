@@ -1,7 +1,6 @@
 """
-Run the FALDA baseline campaigns (repetitions x conditions) and export each one in the
-EVIDENT export format, so that experiments/analyze.py of the evident-memory branch can
-compare them with the EVIDENT conditions.
+Run the FALDA baseline campaigns (repetitions x conditions) and export each one as JSON,
+for experiments/analyze_falda.py.
 
 From GAIED/docker (Redis, the FALDA gateway and the LLM must be up):
     docker compose --profile falda up -d redis falda
@@ -76,7 +75,7 @@ def main(config_path: str) -> None:
             json.dump({"campaign": campaign, "condition": cond, "rep": rep, "status": status,
                        "seconds": round(time.time() - t0, 1)}, fh)
         print(f"    -> {status} in {(time.time() - t0) / 60:.1f} min", flush=True)
-    print(f"\nDone. Copy {out}/runs/*.json next to the EVIDENT runs to analyse them together.")
+    print(f"\nDone. Analyse with:  python experiments/analyze_falda.py {out}")
 
 
 if __name__ == "__main__":

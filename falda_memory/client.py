@@ -43,14 +43,15 @@ def campaign_pool() -> str:
 
 
 class FaldaMemory:
-    def __init__(self, url: str, tenant: str, pool: str, k_atoms: int = 8, k_stream: int = 5,
-                 max_chars: int = 3000, timeout: float = 60.0):
+    def __init__(self, url: str, tenant: str, pool: str, k_atoms: int = 10, k_stream: int = 10,
+                 timeout: float = 60.0):
+        # 10 / 10 = FALDA's own defaults (searchAtoms / searchStream, src/falda.ts);
+        # nothing is truncated: FALDA defines no prompt budget, the recalled text is used as is
         self.url = url.rstrip("/")
         self.tenant = tenant
         self.pool = pool
         self.k_atoms = k_atoms
         self.k_stream = k_stream
-        self.max_chars = max_chars
         self.timeout = timeout
         self.last_recall_ms: float | None = None
 
@@ -61,9 +62,8 @@ class FaldaMemory:
             return None
         mem = cls(os.environ.get("FALDA_URL", "http://falda:8077"),
                   falda_name(agent_id.split("#")[-1], "agent"), campaign_pool(),
-                  k_atoms=int(os.environ.get("FALDA_K_ATOMS", "8")),
-                  k_stream=int(os.environ.get("FALDA_K_STREAM", "5")),
-                  max_chars=int(os.environ.get("FALDA_MAX_CHARS", "3000")))
+                  k_atoms=int(os.environ.get("FALDA_K_ATOMS", "10")),
+                  k_stream=int(os.environ.get("FALDA_K_STREAM", "10")))
         try:
             mem.call("/pools/grant", {"name": mem.pool, "tenant": mem.tenant, "access": "readwrite"},
                      scoped=False)
@@ -118,23 +118,22 @@ class FaldaMemory:
 
     # ------------------------------------------------------------------ recall
     def recall(self, query: str) -> str:
-        """Bounded memory block for a prompt: Core + top atoms + top past turns."""
+        """Memory block for a prompt: Core + top atoms + top past turns (hybrid search)."""
         t0 = time.perf_counter()
         parts = []
         try:
             core = self.call("/core/read", {}).get("content") or ""
             if core.strip():
-                parts.append("PROJECT CORE (shared memory):\n" + core.strip()[:1500])
+                parts.append("PROJECT CORE (shared memory):\n" + core.strip())
             atoms = self.call("/atoms/search", {"query": query, "limit": self.k_atoms}).get("items", [])
             if atoms:
                 parts.append("RELEVANT MEMORIES (shared memory):\n" + "\n".join(
-                    f"- ({a.get('type', 'fact')}) {a.get('content', '')[:400]}" for a in atoms))
+                    f"- ({a.get('type', 'fact')}) {a.get('content', '')}" for a in atoms))
             turns = self.call("/stream/search", {"query": query, "limit": self.k_stream}).get("messages", [])
             if turns:
                 parts.append("RELEVANT PAST MESSAGES OF THE TEAM (shared memory):\n" + "\n".join(
-                    f"- {m.get('content', '')[:400]}" for m in turns))
+                    f"- {m.get('content', '')}" for m in turns))
         except Exception as exc:
             logger.warning("FALDA recall failed: %s", exc)
         self.last_recall_ms = (time.perf_counter() - t0) * 1000
-        text = "\n\n".join(parts)
-        return text[:self.max_chars]
+        return "\n\n".join(parts)

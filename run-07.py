@@ -22,7 +22,7 @@ from falda_memory import FaldaMemory, Recorder  # [falda]
 logger = logging.getLogger(__name__)
 
 
-GOAL = {  # [falda] same Goal and hard constraints as the EVIDENT experiments
+GOAL = {  # [falda] Goal and hard constraints, written as the Core of the FALDA pool
     'objective': 'find molecules with the highest ionization energy (xTB)',
     'constraints': {
         'max_heavy_atoms': int(os.environ.get('GOAL_MAX_HEAVY_ATOMS', '12')),

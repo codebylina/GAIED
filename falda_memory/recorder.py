@@ -1,8 +1,8 @@
 """
-Measurement only (not memory): records what the agents propose and compute, in the same
-format as the EVIDENT telemetry (Redis keys ev:{campaign}:telemetry and ev:{campaign}:facts),
-so that experiments/analyze.py of the evident-memory branch analyses FALDA campaigns with
-exactly the same metrics. Nothing recorded here is ever shown to the agents.
+Measurement only (not memory): records what the agents propose and compute, what the
+memory put in their prompts, and how long each step took (Redis keys bench:{campaign}:...),
+then exports one JSON file per campaign for experiments/analyze_falda.py.
+Nothing recorded here is ever shown to the agents.
 """
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ class Recorder:
         return rec
 
     def k(self, *parts) -> str:
-        return ":".join(["ev", self.campaign, *map(str, parts)])
+        return ":".join(["bench", self.campaign, *map(str, parts)])
 
     def emit(self, event: str, **data) -> None:
         try:
@@ -111,7 +111,7 @@ class Recorder:
             valid = mol_info(can)[0]
             fact = self.r.hget(self.k("facts:by_smiles"), can) if can in known else None
             status = json.loads(fact)["status"] if fact else None
-            items.append({"smiles": can, "raw": s, "valid": valid, "features": [],
+            items.append({"smiles": can, "raw": s, "valid": valid,
                           "violations": self.violations(can), "own_repeat": can in own,
                           "team_known": "failed" if status == "error" else "computed" if fact else "new"})
         self.emit("proposals", items=items, retries=retries)
@@ -128,7 +128,7 @@ class Recorder:
         valid, heavy, _ = mol_info(can)
         f = {"smiles": can, "energy": energy, "status": "error" if error else "ok", "error": error,
              "agent": self.agent, "task_id": task_id, "iteration": self.iteration, "t": time.time(),
-             "duration": duration, "features": [], "heavy_atoms": heavy}
+             "duration": duration, "heavy_atoms": heavy}
         payload = json.dumps(f)
         pipe = self.r.pipeline()
         pipe.xadd(self.k("facts"), {"fact": payload})
@@ -144,16 +144,14 @@ class Recorder:
         self.emit("tool_call_failed", attempts=attempts, responses=[(r or "")[:600] for r in responses])
 
     def conclusion(self, text: str) -> None:
-        self.emit("conclusion", claims=[], text=(text or "")[:2000], evidence=[], liar=False)
+        self.emit("conclusion", text=text or "")
 
     def briefing(self, node: str, chars: int, ms: float | None, text: str = "") -> None:
-        """What the memory put in a prompt. The text is kept so that the analysis can find
-        the structure-property claims it contains (keyword parser of the EVIDENT branch)."""
-        self.emit("briefing", node=node, chars=chars, shown_claims=[], lesson_claims=[],
-                  ms=round(ms or 0.0, 3), text=(text or "")[:4000])
+        """What the memory put in a prompt (kept for later inspection)."""
+        self.emit("briefing", node=node, chars=chars, ms=round(ms or 0.0, 3), text=text or "")
 
     def node(self, node: str, duration: float) -> None:
-        self.emit("node", node=node, duration=round(duration, 4), interrupted=False)
+        self.emit("node", node=node, duration=round(duration, 4))
 
     def end_iteration(self, own_best: float | None, no_improve: int, iteration: int) -> None:
         try:
@@ -172,9 +170,9 @@ class Recorder:
                         "t": float(f["t"]), **json.loads(f["d"])})
         meta = {k: json.loads(v) for k, v in self.r.hgetall(self.k("meta")).items()}
         goal = self.r.get(self.k("goal"))
-        return {"campaign": self.campaign, "mode": meta.get("mode", "falda"), "meta": meta,
+        return {"campaign": self.campaign, "mode": meta.get("mode", "none"), "meta": meta,
                 "goal": json.loads(goal) if goal else None,
-                "agents": sorted(self.r.smembers(self.k("agents"))), "liar": None,
+                "agents": sorted(self.r.smembers(self.k("agents"))),
                 "stats": self.r.hgetall(self.k("stats")),
                 "facts_log": [json.loads(f["fact"]) for _, f in self.r.xrange(self.k("facts"))],
-                "claims": {}, "claims_log": [], "lessons": [], "telemetry": tel}
+                "telemetry": tel}
