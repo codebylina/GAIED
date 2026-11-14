@@ -23,8 +23,8 @@
     ou une API au format OpenAI (`LLM_PROVIDER=openai`, clé dans `docker/.env`).
   - `apply_patches.py`, `patch_stop_rule.py` : correctifs déjà appliqués (ne pas relancer).
   - `summarize_prov.py` : résume la provenance de la dernière campagne.
-- Mémoire : **pas encore de mémoire sur cette branche** (version naïve retirée le 14 nov., gardée sous
-  l'étiquette Git `naive-memory-v1` ; la version EVIDENT est sur la branche `evident-memory`).
+- Mémoire : **pas encore de mémoire sur cette branche** (version naïve retirée le 14 nov., gardée sur
+  la branche `archive/naive-memory-v1` ; la version EVIDENT est sur la branche `evident-memory`).
 - `output/flowcept_buffer_*.jsonl` : provenance de chaque campagne.
 
 ## Modifications déjà faites au code d'Amal (marquées `[gaied-docker ...]`)
