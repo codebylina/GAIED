@@ -38,6 +38,9 @@ KEY_METRICS = [
     ("duplicate_rate", "duplicate computations / runs", "lower"),
     ("redundant_proposal_rate", "proposals of already known molecules", "lower"),
     ("invalid_repeat", "computations of already failed molecules", "lower"),
+    ("taken_at_proposal_rate", "proposals of molecules already reserved by another agent", "lower"),
+    ("wait_s", "time an agent waited for a molecule computed by another (s)", "lower"),
+    ("notify_ms", "fact published -> received by the other agents (ms)", "lower"),
     ("violation_rate", "proposals breaking a Goal constraint", "lower"),
     ("unique_valid", "distinct valid molecules measured", "higher"),
     ("scaffolds", "distinct Murcko scaffolds", "higher"),
@@ -261,6 +264,18 @@ def run_metrics(d, truth, budget):
     if stops_sent:
         after = [bool(p["violations"]) for a, t, p in props if a in stops_sent and t > stops_sent[a]]
         m["violation_rate_after_stop"] = float(np.mean(after)) if after else None
+
+    # coordination: reservations at proposal time, waits, notification latency
+    reserved = [p for _, _, p in props if "reservation" in p]
+    if reserved:
+        m["taken_at_proposal_rate"] = sum(p["reservation"] == "taken" for p in reserved) / len(reserved)
+    waits = [e["wait"] for e in tel if e["e"] == "compute" and e["outcome"] == "waited"]
+    if waits:
+        m["wait_s"] = float(np.mean(waits))
+    lat = [(e["notify_ms_mean"], e["notify_n"]) for e in tel
+           if e["e"] == "iteration_end" and e.get("notify_ms_mean") is not None]
+    if lat:
+        m["notify_ms"] = sum(x * n for x, n in lat) / sum(n for _, n in lat)
 
     # LLM output format
     m["tool_call_failures"] = sum(1 for e in tel if e["e"] == "tool_call_failed")

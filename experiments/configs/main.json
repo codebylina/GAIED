@@ -1,5 +1,5 @@
 {
-  "name": "main",
+  "name": "main_v2",
   "description": "Workshop experiment: 4 agents (two pairs share a seed, so their search spaces overlap), fixed budget of 10 iterations per agent, 5 repetitions of 7 conditions.",
   "seeds": ["CNC(N)=O", "CNC(N)=O", "CC1=C(O)N=C(O)N1", "CC1=C(O)N=C(O)N1"],
   "max_iterations": 10,

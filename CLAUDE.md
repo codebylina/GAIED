@@ -71,6 +71,10 @@ Méthode complète : `docs/EVIDENT.md`. Paquet `evident/` :
 - `memory.py` : `EvidentMemory` (Redis, clés `ev:{campagne}:...`) : faits, verrous, affirmations
   versionnées, leçons brutes (mode naive), directives, télémétrie, briefing par nœud, export JSON
 - `monitor.py` : agent d'analyse temps réel à règles (STOP si propositions hors Goal, conseils)
+- `bus.py` : topics typés (Redis Streams `ev:{c}:topic:{reservations|facts|claims|decisions}`, enveloppe
+  commune avec `activity` et `task_id`) et écouteur par agent (push). Coordination : réservation
+  par bail dès la proposition (`EVIDENT_LEASE_TTL`, 30 s, renouvelé), réveil des agents en attente
+  par push ; `EVIDENT_NOTIFY=push|poll` pour comparer (`experiments/bench_coordination.py`).
 Modes (`MEMORY_MODE`) : `none` (référence), `coord`, `naive`, `evident`. `MONITOR=true`,
 `INJECT_FALSE_CLAIMS=true` (un agent ment, test de robustesse).
 Branchements dans `mol_design_agents.py` (marqués `[evident]`) : `evaluate_molecule` dans
@@ -79,7 +83,9 @@ Branchements dans `mol_design_agents.py` (marqués `[evident]`) : `evaluate_mole
 appels LLM de plan / critique / update annulables (`watched`) ; durée des nœuds (`_timed`).
 `run-07.py` : Goal avec contraintes vérifiables, métadonnées, moniteur, export (`EVIDENT_EXPORT`),
 `NO_IMPROVEMENT_TOLERANCE`, `PARSL_MAX_WORKERS` (un worker par agent).
-Expériences : `experiments/run_matrix.py <config>` (configs `dryrun`, `pilot`, `main`),
+Expériences : `experiments/run_matrix.py <config>` (configs `dryrun`, `pilot`, `main` → dossier
+`results/main_v2` ; `results/main` = répétition 1 de la première version, en poll) ; une campagne
+n'est sautée que si son `.meta.json` dit `ok`,
 `experiments/synthetic.py` (LLM et xTB simulés, vérité connue), `experiments/analyze.py <dossier>`.
 Tests : `python tests/test_evident.py` (Redis requis), `python tests/test_agent_loop.py`
 (graphe réel, LLM sans appel d'outil : l'agent ne doit plus se bloquer).

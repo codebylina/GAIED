@@ -501,7 +501,7 @@ class XTBSimulationAgent(Agent):
                     parent_task_id, workflow_id, campaign_id,
                 )
 
-        # [evident] PULL the fact -> or CLAIM, compute, PUSH the fact (cancellable by a STOP)
+        # [evident] read the fact, or compute under a lease and publish it, or wait for its publication
         if getattr(self, 'memory', None) is not None:
             import uuid as _uuid
             ionization_energy = await self.memory.evaluate_molecule(
@@ -595,6 +595,8 @@ class XTBSimulationAgent(Agent):
 
         def _timed(name: str, fn):  # [evident] node duration and interruption in telemetry
             async def wrapper(state):
+                if self.memory is not None:
+                    self.memory.begin_node(name)  # activity name in every topic message
                 t0 = _time.perf_counter()
                 try:
                     return await fn(state)

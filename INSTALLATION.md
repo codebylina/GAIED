@@ -139,7 +139,7 @@ fournisseur choisi (et vérifier le nom exact du modèle sur le site du fourniss
 docker compose run --rm gaied python tests/test_evident.py
 docker compose run --rm gaied python experiments/run_matrix.py experiments/configs/dryrun.json
 ```
-Résultat attendu : `14/14 tests passed` (la mémoire EVIDENT seule, quelques secondes), puis deux
+Résultat attendu : `19/19 tests passed` (la mémoire EVIDENT seule, quelques secondes), puis deux
 campagnes complètes (Academy, Parsl, vrai xTB, Flowcept) avec un **LLM simulé** : `-> ok` pour
 chacune, en quelques minutes. Rien n'est un résultat scientifique : on vérifie l'installation.
 
@@ -185,7 +185,7 @@ Voir `docs/EVIDENT.md`, section « Protocole expérimental ». En résumé :
 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d redis ollama
 docker compose run --rm gaied python experiments/run_matrix.py experiments/configs/pilot.json
 docker compose run --rm gaied python experiments/run_matrix.py experiments/configs/main.json
-docker compose run --rm gaied python experiments/analyze.py experiments/results/main
+docker compose run --rm gaied python experiments/analyze.py experiments/results/main_v2
 ```
 
 ---

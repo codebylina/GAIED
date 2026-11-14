@@ -56,7 +56,8 @@ services:
       NO_IMPROVEMENT_TOLERANCE: ${NO_IMPROVEMENT_TOLERANCE:-3}   # 0 = fixed budget (experiments)
       GOAL_MAX_HEAVY_ATOMS: "12"        # hard Goal constraints, checked by code
       GOAL_ALLOWED_ELEMENTS: "C,H,N,O,F"
-      EVIDENT_CLAIM_TTL: "900"          # a molecule lock expires after 15 min (crashed agent)
+      EVIDENT_LEASE_TTL: "30"           # reservation lease, renewed while working (crashed agent: free after 30 s)
+      EVIDENT_NOTIFY: ${EVIDENT_NOTIFY:-push}      # push (listener) or poll (fixed intervals), to compare
       FLOWCEPT_SETTINGS_PATH: /app/docker/flowcept_settings.yaml
       PYTHONPATH: /app:/app/docker                # so that local_llm.py is found
     volumes:

@@ -97,7 +97,7 @@ On en tire six limites, que la conception d'EVIDENT reprend une par une :
 | **P2. Une affirmation est une hypothèse testable** | vocabulaire fermé de caractéristiques chimiques (SMARTS) ; direction « augmente / diminue » | L1 |
 | **P3. Le statut est calculé, jamais déclaré** | statistiques sur *tous* les faits de l'équipe ; réplication par au moins deux agents | L1, L5 |
 | **P4. On ne supprime rien** | journal append-only des faits ; chaque changement de statut est une nouvelle version | L4 |
-| **P5. Coordination explicite** | verrou par molécule, échecs partagés, « en cours » visible | L3 |
+| **P5. Coordination explicite** | réservation par bail dès la proposition, échecs partagés, notification push des résultats, topics typés avec enveloppe commune | L3 |
 | **P6. Les décisions sont publiées avant d'être exécutées** | télémétrie temps réel + directives + annulation | L6 |
 
 ## 4. Architecture
@@ -119,7 +119,7 @@ On en tire six limites, que la conception d'EVIDENT reprend une par une :
 | Entrée | Clés Redis | Écrit par | Lu par | Règle |
 |---|---|---|---|---|
 | **Fait** | `facts` (flux, tous les calculs, doublons compris), `facts:by_smiles`, `ranking`, `failed` | le code de calcul uniquement | agents (briefing), vérificateur, analyse | append-only ; un fait = SMILES canonique, énergie ou erreur, agent, `task_id`, durée, caractéristiques |
-| **Coordination** | `lock:{smiles}` (SET NX EX), `inprogress` | l'agent qui calcule | les autres agents | verrou à durée de vie (agent planté) ; libération atomique (Lua) |
+| **Coordination** | `lock:{smiles}` (bail SET NX EX), `inprogress`, topic `reservations` | l'agent qui a proposé la molécule | les autres agents | réservation dès la proposition ; bail court renouvelé (agent planté : molécule libre après un bail) ; libération atomique (Lua) |
 | **Affirmation** | `claims` (état courant), `claims:log` (versions) | l'agent *propose* ; le **vérificateur** fixe le statut | briefing (seulement si vérifiée), monitor | jamais supprimée ; chaque changement de statut = version |
 | **Directive** | `directives:{agent}`, `directives:*` | agents d'analyse (monitor, Nadjiba) | l'agent ciblé, en temps réel | `stop` (annule) ou `advice` (affichée dans le briefing) |
 | **Télémétrie** | `telemetry` (flux) | tout le monde | monitor (temps réel), analyse (après) | propositions, calculs, briefings montrés, directives, durées des nœuds |
@@ -128,36 +128,70 @@ S'y ajoutent `goal` (objectif + **contraintes vérifiables** : nombre maximal d'
 éléments autorisés) et `meta` (configuration de la campagne). Le mode `naive` utilise en plus
 `lessons` (conclusions brutes), uniquement pour la comparaison.
 
-### 4.2 Faits et provenance
+### 4.2 Faits, coordination et notification (push)
 
-`compute_ionization_energy` appelle `memory.evaluate_molecule(smiles, compute)` :
+**Le cycle d'une molécule**, inspiré des baux (*leases*) de Chubby et etcd, des *futures*
+partagées de Ray et Dask, et des files de travaux :
 
-1. **LECTURE** : le fait existe-t-il (SMILES canonique RDKit : `CCO` = `OCC`) ? → réutilisé, y compris
-   un **échec** (une molécule invalide n'est essayée qu'une fois par l'équipe) ;
-2. sinon **VERROU** (`SET NX EX`, atomique) : un seul agent calcule ; les autres attendent le fait ;
-3. **calcul** xTB, *surveillé* (annulable par STOP, §4.5) ;
-4. **ÉCRITURE** du fait avec le `task_id` de la tâche Flowcept ; **libération** du verrou.
+1. **RÉSERVATION dès la décision** : quand `tool_calling` a choisi ses molécules,
+   `record_proposals` réserve chaque molécule nouvelle par un **bail** (`SET NX EX`, atomique,
+   30 s par défaut) et le publie sur le topic `reservations`. Toute l'équipe voit ce qui est
+   pris **avant** le moindre calcul.
+2. **LECTURE** au moment du calcul : le fait existe-t-il (SMILES canonique RDKit : `CCO` = `OCC`) ?
+   → réutilisé, y compris un **échec** (une molécule invalide n'est essayée qu'une fois par l'équipe).
+3. Si l'agent tient le bail (ou l'obtient) : **calcul** xTB, *surveillé* (annulable par STOP,
+   §4.6) ; le bail est **renouvelé** toutes les 10 s tant que l'agent y travaille.
+4. **ÉCRITURE** du fait avec le `task_id` de la tâche Flowcept, **publication** sur le topic
+   `facts`, **libération** du bail. À la fin de `simulate`, les baux des molécules non calculées
+   sont libérés.
+5. Si un **autre** agent tient le bail : l'agent ne recalcule pas et **n'interroge pas** la
+   mémoire en boucle. Il s'abonne au résultat et il est **réveillé dès sa publication** (push).
+   Si le détenteur a planté, son bail n'est plus renouvelé et expire : l'agent reprend la
+   molécule après au plus un bail (30 s, contre 15 min pour le verrou de la première version).
 
-**Push ou pull ?** Au sens des systèmes distribués (*push* : le système notifie les intéressés dès
+**Push ou pull.** Au sens des systèmes distribués (*push* : le système notifie les intéressés dès
 qu'une information change ; *pull* : chacun la demande, éventuellement en redemandant
-régulièrement), la version actuelle d'EVIDENT fonctionne **par pull** :
+régulièrement), EVIDENT est maintenant **push** : chaque agent a un **écouteur** (`bus.py`,
+un fil bloqué sur `XREAD BLOCK`) abonné au topic `facts` et à ses directives. Le mode pull est
+conservé (`EVIDENT_NOTIFY=poll` : relecture toutes les 1 s pour les faits, 0,5 s pour les
+directives) pour mesurer la différence (`experiments/bench_coordination.py`, Redis local) :
 
-| Situation | Mécanisme actuel |
-|---|---|
-| conflit sur une molécule | détecté **instantanément** : le verrou `SET NX` est atomique |
-| un agent apprend ce que l'équipe sait | il lit la mémoire au moment de son **briefing** (pull) : une molécule prise ou calculée entre-temps n'est connue qu'au briefing suivant |
-| un agent attend une molécule en cours chez un autre | il redemande toutes les secondes (pull par *polling*) |
-| une directive STOP | l'agent vérifie toutes les 0,5 s (polling) |
-| l'agent d'analyse | réveillé dès qu'un événement arrive (`XREAD BLOCK`) : quasi-push |
+| Mesure (médiane / 95ᵉ centile) | push | poll |
+|---|---|---|
+| réservation visible par l'équipe | 0,8 / 1,1 ms | 1,1 / 1,2 ms |
+| fait publié → agent en attente réveillé | **0,7 / 1,1 ms** | 445 / 933 ms |
+| STOP envoyé → calcul annulé | **28 / 47 ms** | 261 / 492 ms |
+| détenteur planté (bail de 2 s) → molécule reprise | 2,05 s | 2,01 s |
 
-Suite prévue : un écouteur par agent abonné au flux d'événements (réveil immédiat des agents en
-attente, mise à jour de la vue locale quand un statut change, directives reçues sans attendre),
-et une mesure du délai de propagation en pull et en push.
+Le STOP en push n'est pas instantané : la directive arrive en ~1 ms, mais l'activité en cours
+vérifie l'état local toutes les 50 ms. La reprise après plantage est fixée par la durée du bail,
+pas par le mode de notification.
+
+### 4.3 Topics et enveloppe commune
+
+Un **topic par type de message**, dans des **Redis Streams** plutôt qu'en pub/sub : un stream
+garde ses messages, un abonné occupé ou redémarré relit ce qu'il a manqué depuis son dernier
+identifiant (le pub/sub les perd). Les analyses de Nadjiba peuvent s'abonner aux topics qui les
+intéressent, en direct ou après coup.
+
+| Topic (clé Redis) | Événements | Écrit par | Lu par |
+|---|---|---|---|
+| `topic:reservations` | `reserved`, `released` | l'agent qui réserve | agents, analyse |
+| `topic:facts` | `fact` (énergie ou échec) | le code qui a calculé | **écouteur de chaque agent** (réveil), analyse |
+| `topic:claims` | `status` (changement de statut, version, preuves) | le vérificateur | analyse |
+| `topic:decisions` | `plan`, `proposals` (avant exécution) | les agents | analyse, moniteur |
+| `directives:{agent}`, `directives:*` | `stop`, `advice` | agents d'analyse | **écouteur de l'agent ciblé** |
+
+**Enveloppe commune** de chaque message (demande d'Amal : garder le nom de l'activité et le
+`task_id` dans chaque topic) : `topic`, `event`, `campaign`, `agent`, **`activity`** (le nœud
+LangGraph en cours : `plan`, `tool_calling`, `simulate`…), **`task_id`** (Flowcept), `iteration`,
+`t`, `payload`. Avec le `task_id`, un événement de la mémoire se relie à la tâche
+correspondante dans la provenance Flowcept (canal `interception`), et inversement.
 
 Le `task_id` est le même dans la mémoire et dans la trace Flowcept (`_record_xtb_task`) : depuis
 n'importe quel fait — donc n'importe quelle affirmation — on remonte à l'exécution qui l'a produit.
 
-### 4.3 Affirmations vérifiées
+### 4.4 Affirmations vérifiées
 
 **Extraction.** Le prompt de `conclude` demande, *dans tous les modes* (pour que la comparaison
 soit juste), une ligne finale :
@@ -194,7 +228,7 @@ réussis de l'équipe (une molécule = un point) :
 Un agent seul ne peut donc pas établir une affirmation, et une affirmation fausse injectée par
 un agent est rejetée dès que les données la contredisent — sans qu'aucun humain ni LLM ne juge.
 
-### 4.4 Le briefing : ce que chaque agent voit
+### 4.5 Le briefing : ce que chaque agent voit
 
 Ajouté aux prompts de `plan`, `tool_calling`, `critique` et `update` (pas de `conclude`, qui doit
 synthétiser les résultats propres de l'agent), borné en taille, selon le mode :
@@ -210,7 +244,7 @@ Les directives reçues s'ajoutent dans tous les modes. Chaque briefing est journ
 liste exacte des affirmations montrées : on peut mesurer **combien de connaissances fausses
 chaque agent a lues**.
 
-### 4.5 Contrôle en temps réel (demande d'Amal)
+### 4.6 Contrôle en temps réel (demande d'Amal)
 
 1. `tool_calling` publie les molécules choisies **avant** de les calculer (`proposals`, avec les
    violations des contraintes du Goal déjà calculées) ; `plan` et `update` publient l'intention
@@ -218,8 +252,8 @@ chaque agent a lues**.
 2. L'agent d'analyse lit le flux de télémétrie en continu (`XREAD BLOCK`) ; s'il détecte un
    problème, il écrit une directive dans `directives:{agent}`.
 3. Toute activité longue de l'agent passe par `memory.watched(...)` : les calculs xTB **et** les
-   appels au LLM de `plan`, `critique`, `update`. Dès qu'un STOP arrive (vérifié toutes les
-   0,5 s), l'activité est annulée et l'agent reçoit `StoppedByDirective` :
+   appels au LLM de `plan`, `critique`, `update`. Dès qu'un STOP arrive (poussé par l'écouteur ;
+   l'activité vérifie l'état local toutes les 50 ms), l'activité est annulée et l'agent reçoit `StoppedByDirective` :
    - un calcul annulé libère son verrou et **n'est pas** enregistré comme un échec ;
    - un appel au LLM annulé est remplacé par « [Interrupted by the analysis agent: raison] » ;
    - un STOP général (sans portée) arrête toute l'activité de l'agent (« arrêter ce qu'il fait,
@@ -248,7 +282,7 @@ Chaîne de délais mesurée : événement → directive envoyée (détection), e
 l'agent, mais le processus xTB déjà lancé dans le `ProcessPoolExecutor` termine son calcul en
 arrière-plan (le tuer demande un processus par calcul).
 
-### 4.6 Injection d'une affirmation fausse (test de robustesse)
+### 4.7 Injection d'une affirmation fausse (test de robustesse)
 
 Avec `INJECT_FALSE_CLAIMS=true`, le premier agent enregistré devient « menteur » : à chaque
 conclusion, il partage — au lieu de sa vraie conclusion — l'affirmation **la plus contredite**
@@ -257,7 +291,7 @@ ionization energy, prioritize… »). C'est le scénario d'un agent qui hallucin
 empoisonnée (MINJA, AgentPoison), mais adversarial par construction. On mesure combien de fois
 l'affirmation est montrée aux autres comme connaissance et si leurs propositions la suivent.
 
-### 4.7 Intégration dans GAIED (modifications minimales, marquées `[evident]`)
+### 4.8 Intégration dans GAIED (modifications minimales, marquées `[evident]`)
 
 - `agent_on_startup` : `EvidentMemory.from_env(agent_id)` ;
 - `compute_ionization_energy` : `evaluate_molecule` (et l'annulation est tracée dans Flowcept) ;
@@ -325,6 +359,7 @@ l'affirmation est montrée aux autres comme connaissance et si leurs proposition
 | | `exposure_precision`, `false_exposures` | parmi les connaissances **montrées**, part vraie ; nombre de fausses montrées |
 | Robustesse | `injected_exposures`, `injection_adoption_delta` | fois où l'affirmation injectée est montrée comme connaissance ; variation de la part des propositions contenant la caractéristique injectée |
 | Contrôle | `stops`, `cancelled`, `cancelled_valid`, `detection_s`, `stop_delivery_s`, `stop_reaction_s` | STOP reçus, calculs annulés (dont molécules valides), délais |
+| Coordination | `taken_at_proposal_rate`, `wait_s`, `notify_ms` | propositions de molécules déjà réservées par un autre agent ; attente d'un résultat calculé par un autre ; délai de notification d'un fait |
 | Format du LLM | `tool_call_failures`, `tool_call_retries` | itérations sans appel d'outil lisible, demandes supplémentaires |
 | Coût | `briefing_ms`, `briefing_chars`, `memory_overhead`, `wall_time_s` | temps et taille du briefing, part du temps passé dans la mémoire |
 
@@ -343,11 +378,12 @@ d'effet et intervalles plutôt que les valeurs p.
 cd GAIED/docker
 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d redis ollama
 docker compose exec ollama ollama pull <modèle>          # puis OLLAMA_MODEL=<modèle> dans l'environnement
-docker compose run --rm gaied python tests/test_evident.py                                   # 14/14
+docker compose run --rm gaied python tests/test_evident.py                                   # 19/19
 docker compose run --rm gaied python experiments/run_matrix.py experiments/configs/dryrun.json  # installation
 docker compose run --rm gaied python experiments/run_matrix.py experiments/configs/pilot.json   # 7 campagnes courtes
 docker compose run --rm gaied python experiments/run_matrix.py experiments/configs/main.json    # 35 campagnes
-docker compose run --rm gaied python experiments/analyze.py experiments/results/main
+docker compose run --rm gaied python experiments/analyze.py experiments/results/main_v2
+docker compose run --rm gaied python experiments/bench_coordination.py                       # délais push / poll
 ```
 `run_matrix.py` reprend là où il s'est arrêté (une campagne déjà exportée est sautée) ; chaque
 campagne a son journal dans `experiments/results/<nom>/logs/`. Résultats : `report.md`,

@@ -5,7 +5,11 @@ Five kinds of entries, each with a different write rule:
   FACTS        measured results (energy or failure). Written ONLY by the code that ran
                the computation, with the Flowcept task_id of that computation.
                Append-only log + one entry per molecule (canonical SMILES).
-  COORDINATION who is computing what right now (SET NX EX locks): no duplicate work.
+  COORDINATION who is computing what right now: a molecule is RESERVED as soon as an
+               agent proposes it, with a short LEASE (SET NX EX) renewed while the agent
+               works on it; a crashed agent's molecules are free again after one lease.
+               An agent that needs a molecule reserved by another does not recompute it
+               and does not poll: it waits for the fact to be PUBLISHED (push).
   CLAIMS       structure-property hypotheses asserted by agents, in a closed vocabulary.
                Their status is computed by code from ALL facts (verifier.py), never by
                the LLM; every status change is versioned, nothing is deleted.
@@ -21,17 +25,23 @@ The same class implements the four memory modes compared in the experiments:
            what most agent-memory systems do)
   evident  coord + verified claims (only supported knowledge is shown, with numbers)
 
+Notification (EVIDENT_NOTIFY): "push" (default) = each agent has a listener on the topics
+(bus.py) and is woken as soon as a fact or a directive is published; "poll" = the agent
+re-reads Redis at fixed intervals (1 s for facts, 0.5 s for directives), kept to measure
+the difference.
+
 Redis keys, all prefixed by ev:{campaign}:
   goal                    JSON
   facts                   stream, every computation (duplicates included)
   facts:by_smiles         hash  smiles -> JSON of the first fact
   ranking                 zset  smiles by energy;      failed   set of invalid molecules
-  lock:{smiles}           lock (value = agent);       inprogress  hash smiles -> agent
+  lock:{smiles}           lease (value = agent);      inprogress  hash smiles -> agent
   claims                  hash  claim id -> JSON state; claims:log  stream of versions
   lessons                 stream of raw conclusions (naive mode)
   directives:{agent}      stream per agent;           directives:*  broadcast
   telemetry               stream of events;           stats  hash of counters
   agents                  set;                        liar   agent chosen for fault injection
+  topic:{name}            typed topics with a common envelope (bus.py)
 """
 from __future__ import annotations
 
@@ -39,9 +49,12 @@ import asyncio
 import json
 import logging
 import os
+import threading
 import time
 import uuid
 from collections import deque
+
+from . import bus
 
 from .claims import claim_id, claim_sentence, extract_claims, strip_claims_block
 from .features import (FEATURE_NAMES, canonical_smiles, constraint_violations, describe,
@@ -75,10 +88,12 @@ def _env_bool(name: str, default: str = "false") -> bool:
 
 class EvidentMemory:
     def __init__(self, client, campaign_id: str, agent_id: str, mode: str = "evident",
-                 claim_ttl: int = 900, params: VerifierParams | None = None,
-                 poll: float = 1.0, control_poll: float = 0.5):
+                 claim_ttl: int = 30, params: VerifierParams | None = None,
+                 poll: float = 1.0, control_poll: float = 0.5, notify: str = "push"):
         if mode not in MODES:
             raise ValueError(f"MEMORY_MODE must be one of {MODES}, got {mode!r}")
+        if notify not in ("push", "poll"):
+            raise ValueError(f"EVIDENT_NOTIFY must be push or poll, got {notify!r}")
         self.r = client
         self.campaign_id = campaign_id
         self.agent_id = agent_id
@@ -96,6 +111,16 @@ class EvidentMemory:
         self._active_stops: list[dict] = []
         self._recent_directives: deque = deque(maxlen=3)
         self._has_lua = True
+        self.notify = notify
+        self.activity: str | None = None           # current LangGraph node (envelope)
+        self._held: set[str] = set()               # molecules whose lease this agent holds
+        self._futures: dict[str, asyncio.Future] = {}   # molecules this agent waits for
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._listener: bus.Listener | None = None
+        self._renewer: asyncio.Task | None = None
+        self._dlock = threading.Lock()
+        self._seen_directives: set[str] = set()
+        self._notify_latency: list[float] = []     # fact published -> received (push)
 
     # ------------------------------------------------------------------ setup
     @classmethod
@@ -115,8 +140,9 @@ class EvidentMemory:
             logger.warning("EVIDENT memory unavailable (Redis unreachable): %s", exc)
             return None
         mem = cls(client, campaign, agent_id, mode=mode,
-                  claim_ttl=int(os.environ.get("EVIDENT_CLAIM_TTL", "900")),
-                  params=VerifierParams.from_env())
+                  claim_ttl=int(os.environ.get("EVIDENT_LEASE_TTL", "30")),
+                  params=VerifierParams.from_env(),
+                  notify=os.environ.get("EVIDENT_NOTIFY", "push").strip().lower())
         client.zadd("ev:campaigns", {campaign: time.time()}, nx=True)
         if agent_id not in ("orchestrator", "monitor", "cli"):
             client.sadd(mem.k("agents"), agent_id)
@@ -132,9 +158,80 @@ class EvidentMemory:
         try:
             self.r.xadd(self.k("telemetry"), {
                 "e": event, "agent": self.agent_id, "it": self.iteration,
+                "act": self.activity or "",
                 "t": f"{time.time():.6f}", "d": json.dumps(data, default=str)})
         except Exception as exc:  # telemetry must never break an agent
             logger.debug("telemetry failed: %s", exc)
+
+    def _pub(self, topic: str, event: str, task_id: str | None = None, **payload) -> None:
+        bus.publish(self.r, self.campaign_id, topic, event, self.agent_id,
+                    activity=self.activity, task_id=task_id, iteration=self.iteration, **payload)
+
+    # ------------------------------------------------------------------ background (push)
+    def _ensure_background(self) -> None:
+        """Start, inside the agent's event loop, the listener (push mode) and the lease
+        renewal task. Called lazily from the first coroutine that needs them."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if self._loop is not loop:                 # first use, or a new event loop (tests)
+            self.close()
+            self._loop = loop
+        if self._renewer is None or self._renewer.done():
+            self._renewer = loop.create_task(self._renew_leases())
+        if self.notify == "push" and (self._listener is None or not self._listener.is_alive()):
+            cursors = {bus.topic_key(self.campaign_id, "facts"): "$"}
+            with self._dlock:
+                cursors.update(self._cursors)
+            self._listener = bus.Listener(self.r, cursors, self._on_message)
+            self._listener.start()
+
+    def _push_active(self) -> bool:
+        return (self.notify == "push" and self._listener is not None
+                and self._listener.is_alive())
+
+    def _on_message(self, stream: str, entry_id: str, fields: dict) -> None:
+        """Listener thread: a new message on a subscribed topic."""
+        if stream.endswith(":topic:facts"):
+            env = bus.decode(fields)
+            smiles = env["payload"].get("smiles")
+            self._notify_latency.append(time.time() - env["t"])
+            if self._loop is not None and smiles:
+                self._loop.call_soon_threadsafe(self._resolve, smiles)
+        else:
+            self._ingest_directive(stream, entry_id, fields)
+
+    def _resolve(self, smiles: str) -> None:
+        fut = self._futures.pop(smiles, None)
+        if fut is not None and not fut.done():
+            fut.set_result(True)
+
+    async def _renew_leases(self) -> None:
+        """Keep the leases of the molecules this agent is working on alive."""
+        while True:
+            await asyncio.sleep(max(self.claim_ttl / 3, 0.2))
+            for can in list(self._held):
+                key = self.k("lock", can)
+                try:
+                    if self.r.get(key) == self.agent_id:
+                        self.r.expire(key, self.claim_ttl)
+                    else:
+                        self._held.discard(can)
+                except Exception:
+                    pass
+
+    def close(self) -> None:
+        """Stop the listener and the renewal task (end of an agent, tests)."""
+        if self._listener is not None:
+            self._listener.stop()
+            self._listener = None
+        if self._renewer is not None:
+            try:
+                self._renewer.cancel()
+            except RuntimeError:                   # its event loop is already closed
+                pass
+            self._renewer = None
 
     def _count(self, name: str) -> None:
         self.r.hincrby(self.k("stats"), name, 1)
@@ -180,6 +277,8 @@ class EvidentMemory:
         else:
             pipe.zadd(self.k("ranking"), {can: energy}, nx=True)
         pipe.execute()
+        self._pub("facts", "fact", task_id=task_id, smiles=can, energy=energy,
+                  status=fact["status"], error=error)
         return fact
 
     def all_facts(self) -> list[dict]:
@@ -197,6 +296,8 @@ class EvidentMemory:
         ok = bool(self.r.set(self.k("lock", can), self.agent_id, nx=True, ex=ttl or self.claim_ttl))
         if ok:
             self.r.hset(self.k("inprogress"), can, self.agent_id)
+            self._held.add(can)
+            self._pub("reservations", "reserved", smiles=can)
         return ok
 
     def claimed_by(self, smiles: str) -> str | None:
@@ -217,6 +318,9 @@ class EvidentMemory:
             released = True
         if released or self.r.get(key) is None:
             self.r.hdel(self.k("inprogress"), can)
+        if can in self._held:
+            self._held.discard(can)
+            self._pub("reservations", "released", smiles=can)
 
     def in_progress(self, exclude_self: bool = True) -> dict[str, str]:
         out = {}
@@ -244,11 +348,13 @@ class EvidentMemory:
         """Return the energy of a molecule. compute(task_id) runs xTB.
 
         none : compute (the agent's local cache is the only reuse)
-        other: PULL the fact -> or wait for the agent that holds the lock -> or
-               CLAIM, compute, PUSH the fact, RELEASE.
+        other: READ the fact -> or, if this agent holds (or obtains) the lease, compute,
+               WRITE and publish the fact, release -> or, if another agent holds it,
+               wait until the fact is published (push) or the lease expires.
         Any running computation is cancelled if a STOP directive arrives."""
         can = canonical_smiles(smiles)
         t0 = time.time()
+        self._ensure_background()
         if self.mode == "none":
             self._raise_if_stopped(can)
             return await self._compute_and_store(can, compute, new_task_id, t0)
@@ -265,13 +371,35 @@ class EvidentMemory:
                 if fact["status"] == "error":
                     raise SimulationFailed(f"{fact['error']} (already failed for {fact['agent']})")
                 return fact["energy"]
-            if self.claim(can):
+            holder = self.claimed_by(can)
+            if holder == self.agent_id or (holder is None and self.claim(can)):
                 try:
                     return await self._compute_and_store(can, compute, new_task_id, t0)
                 finally:
                     self.release(can)
             waited = True
+            await self._wait_for_fact(can)
+
+    async def _wait_for_fact(self, can: str) -> None:
+        """Wait until the fact of `can` is published by the agent holding its lease
+        (push), or that lease expires (crashed agent); poll mode re-reads every second."""
+        if not self._push_active():
             await asyncio.sleep(self.poll)
+            return
+        fut = self._futures.get(can)
+        if fut is None or fut.done():
+            fut = self._loop.create_future()
+            self._futures[can] = fut
+        if self.get_fact(can) is not None:          # published before we subscribed
+            return
+        pttl = self.r.pttl(self.k("lock", can))
+        if pttl is None or pttl < 0:                # lease already gone
+            return
+        try:
+            await self.watched(asyncio.wait_for(asyncio.shield(fut), timeout=pttl / 1000 + 0.05),
+                               smiles=can)
+        except asyncio.TimeoutError:
+            pass
 
     async def _compute_and_store(self, can, compute, new_task_id, t0) -> float:
         task_id = new_task_id() if new_task_id else str(uuid.uuid4())
@@ -323,8 +451,15 @@ class EvidentMemory:
                    "team_known": ("failed" if fact and fact["status"] == "error"
                                   else "computed" if fact else
                                   "in_progress" if can in inprog else "new")}
+            if self.mode != "none" and rec["team_known"] == "new" and rec["valid"]:
+                # reserve at decision time: the team sees at once what is taken
+                rec["reservation"] = ("mine" if self.claimed_by(can) == self.agent_id
+                                      or self.claim(can) else "taken")
             out.append(rec)
+        self._ensure_background()
         self._emit("proposals", items=out, retries=retries)
+        self._pub("decisions", "proposals", items=[
+            {k: r[k] for k in ("smiles", "violations", "team_known") if k in r} for r in out])
         return out
 
     def record_tool_call_failure(self, attempts: int, responses: list[str]) -> None:
@@ -337,6 +472,7 @@ class EvidentMemory:
     def record_decision(self, node: str, text: str) -> None:
         """The agent's intent (plan or updated plan), kept for drift analysis."""
         self._emit("decision", node=node, text=(text or "")[:2000])
+        self._pub("decisions", "plan", node=node, text=(text or "")[:2000])
 
     # ------------------------------------------------------------------ conclusions, lessons, claims
     def record_conclusion(self, text: str, evidence: list[dict] | None = None) -> list[dict]:
@@ -416,6 +552,8 @@ class EvidentMemory:
                         "evidence": json.dumps(ev), "agent": self.agent_id,
                         "t": f"{time.time():.3f}"})
                     changes.append({"id": cid, "from": old, "to": new, "evidence": ev})
+                    self._pub("claims", "status", id=cid, previous=old, status=new,
+                              version=state["version"], evidence=ev)
                 self.r.hset(self.k("claims"), cid, json.dumps(state))
         finally:
             self.r.delete(self.k("verify_lock"))
@@ -437,29 +575,47 @@ class EvidentMemory:
         self._emit("directive_sent", **d)
         return d["id"]
 
-    def poll_directives(self, force: bool = False) -> list[dict]:
-        """Non-blocking read of new directives for this agent (cheap, rate-limited)."""
+    def _ingest_directive(self, stream: str, entry_id: str, fields: dict) -> dict | None:
+        """One directive message (from the listener thread or from a read); each
+        directive is taken into account once."""
         now = time.time()
+        with self._dlock:
+            if stream in self._cursors:
+                self._cursors[stream] = entry_id
+            d = json.loads(fields["d"])
+            if d["id"] in self._seen_directives:
+                return None
+            self._seen_directives.add(d["id"])
+            d["received_at"] = now
+            self._recent_directives.append(d)
+            stale = d.get("iteration") is not None and d["iteration"] < self.iteration
+            if d["kind"] == "stop" and not stale:
+                self._active_stops.append(d)
+        self._emit("directive_received", id=d["id"], kind=d["kind"], rule=d.get("rule"),
+                   delivery=round(now - d["sent_at"], 4), notify=self.notify)
+        return d
+
+    def poll_directives(self, force: bool = False) -> list[dict]:
+        """Read new directives for this agent. In push mode the listener already
+        delivers them; a forced read (briefing) is only a safety net."""
+        now = time.time()
+        if self._push_active() and not force:
+            return []
         if not force and now - self._last_poll < self.control_poll / 2:
             return []
         self._last_poll = now
         try:
-            resp = self.r.xread(self._cursors, count=50)
+            with self._dlock:
+                cursors = dict(self._cursors)
+            resp = self.r.xread(cursors, count=50)
         except Exception:
             return []
         new = []
         for stream, entries in resp or []:
             for entry_id, fields in entries:
-                self._cursors[stream] = entry_id
-                d = json.loads(fields["d"])
-                d["received_at"] = now
-                new.append(d)
-                self._recent_directives.append(d)
-                self._emit("directive_received", id=d["id"], kind=d["kind"], rule=d.get("rule"),
-                           delivery=round(now - d["sent_at"], 4))
-                stale = d.get("iteration") is not None and d["iteration"] < self.iteration
-                if d["kind"] == "stop" and not stale:
-                    self._active_stops.append(d)
+                d = self._ingest_directive(stream, entry_id, fields)
+                if d is not None:
+                    new.append(d)
         return new
 
     @staticmethod
@@ -489,10 +645,13 @@ class EvidentMemory:
     async def watched(self, coro, smiles: str | None = None):
         """Run an activity (xTB computation of `smiles`, or an LLM call) and cancel it as
         soon as a STOP directive that applies to it arrives. Raises StoppedByDirective."""
+        self._ensure_background()
         task = asyncio.ensure_future(coro)
+        # push: directives arrive through the listener, the check is a local look-up
+        interval = 0.05 if self._push_active() else self.control_poll
         try:
             while True:
-                done, _ = await asyncio.wait({task}, timeout=self.control_poll)
+                done, _ = await asyncio.wait({task}, timeout=interval)
                 if done:
                     return task.result()
                 stop = self.check_stop(smiles)
@@ -505,11 +664,19 @@ class EvidentMemory:
             task.cancel()
             raise
 
+    def begin_node(self, node: str) -> None:
+        """Current activity, written in the envelope of every topic message."""
+        self.activity = node
+
     def end_node(self, node: str, duration: float, interrupted: bool = False) -> None:
-        """Node boundary: a STOP that interrupted this node has been handled."""
+        """Node boundary: a STOP that interrupted this node has been handled; at the end
+        of `simulate`, leases of molecules that were not computed are released."""
         self._emit("node", node=node, duration=round(duration, 4), interrupted=interrupted)
         if interrupted:
             self._clear_stops()
+        if node == "simulate":
+            for can in list(self._held):
+                self.release(can)
 
     # ------------------------------------------------------------------ iterations
     def begin_iteration(self, i: int) -> None:
@@ -517,8 +684,12 @@ class EvidentMemory:
 
     def end_iteration(self, own_best: float | None, no_improve: int) -> None:
         top = self.best(1)
+        lat, self._notify_latency = self._notify_latency, []
         self._emit("iteration_end", own_best=own_best, no_improve=no_improve,
-                   team_best=top[0][1] if top else None)
+                   team_best=top[0][1] if top else None, notify=self.notify,
+                   notify_n=len(lat),
+                   notify_ms_mean=round(1000 * sum(lat) / len(lat), 3) if lat else None,
+                   notify_ms_max=round(1000 * max(lat), 3) if lat else None)
 
     # ------------------------------------------------------------------ briefing for the prompts
     def _goal_text(self) -> str:

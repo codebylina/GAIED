@@ -9,10 +9,9 @@ In Docker, from GAIED/docker (Redis and the LLM must be up):
 
 - Repetitions are interleaved (rep 1 of every condition, then rep 2...) so that a drift of
   the machine or of an online LLM affects all conditions equally.
-- Resumable: a run whose export already exists is skipped. Re-run the same command after
-  a crash or an interruption.
-- A run that exceeds `timeout_min` is killed; what it had done is still exported and
-  marked as timed out in its .meta.json.
+- Resumable: a run is skipped only if its .meta.json says "ok". A failed, interrupted or
+  timed-out run is redone; its partial export is kept aside as <run>.json.failed (never
+  read by the analysis). Re-run the same command after a crash or an interruption.
 """
 from __future__ import annotations
 
@@ -53,14 +52,21 @@ def main(config_path: str) -> None:
     plan = [(rep, cond) for rep in range(1, reps + 1) for cond in conditions]
     for i, (rep, cond) in enumerate(plan, 1):
         export = os.path.join(out, "runs", f"{cond}_r{rep}.json")
-        if os.path.exists(export):
-            print(f"[{i}/{len(plan)}] {cond} rep {rep}: already done, skipped")
-            continue
+        meta_path = export.replace(".json", ".meta.json")
+        if os.path.exists(export) and os.path.exists(meta_path):
+            with open(meta_path) as fh:
+                if json.load(fh).get("status") == "ok":
+                    print(f"[{i}/{len(plan)}] {cond} rep {rep}: already done, skipped")
+                    continue
+        for stale in (export, meta_path):              # an earlier failed attempt
+            if os.path.exists(stale):
+                os.replace(stale, stale + ".failed")
         campaign = f"{name}-{cond}-r{rep}-{int(time.time())}"
         env = dict(os.environ)
         env.update({k: str(v) for k, v in cfg.get("env", {}).items()})
         env.update(CONDITIONS[cond])
         env.update({"MEMORY_CAMPAIGN_ID": campaign, "EVIDENT_EXPORT": export,
+                    "PYTHONUNBUFFERED": "1",            # complete logs even on a hard stop
                     "EXPERIMENT_CONDITION": cond, "SEEDS": ",".join(cfg["seeds"]),
                     "MAX_ITERATIONS": str(cfg.get("max_iterations", 10))})
         log_path = os.path.join(out, "logs", f"{cond}_r{rep}.log")
@@ -82,12 +88,15 @@ def main(config_path: str) -> None:
                     os.killpg(proc.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-        if not os.path.exists(export):              # killed or crashed: export what exists
+        if status != "ok":                          # keep what exists, aside, for diagnosis
             try:
-                export_from_redis(campaign, export)
+                if os.path.exists(export):
+                    os.replace(export, export + ".failed")
+                else:
+                    export_from_redis(campaign, export + ".failed")
             except Exception as exc:
                 status += f"; export failed: {exc}"
-        with open(export.replace(".json", ".meta.json"), "w") as fh:
+        with open(meta_path, "w") as fh:
             json.dump({"campaign": campaign, "condition": cond, "rep": rep, "status": status,
                        "seconds": round(time.time() - t0, 1)}, fh)
         print(f"    -> {status} in {(time.time() - t0) / 60:.1f} min", flush=True)

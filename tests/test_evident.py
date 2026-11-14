@@ -33,8 +33,9 @@ def campaign():
     return c
 
 
-def mem(c, agent, mode="evident"):
-    return EvidentMemory(CLIENT, c, agent, mode=mode, claim_ttl=30, poll=0.05, control_poll=0.05)
+def mem(c, agent, mode="evident", notify="push", ttl=30):
+    return EvidentMemory(CLIENT, c, agent, mode=mode, claim_ttl=ttl, poll=0.05, control_poll=0.05,
+                         notify=notify)
 
 
 # ---------------------------------------------------------------- chemistry vocabulary
@@ -316,6 +317,133 @@ def test_adjusted_effect_separates_confounded_features():
     assert abs(adj["urea"]["coef"]) < 0.2 and adj["carbonyl"]["coef"] > 0.8, adj
     assert evaluate("urea", "up", facts, p, adj)["verdict"] != "supports"
     assert evaluate("carbonyl", "up", facts, p, adj)["verdict"] == "supports"
+
+
+# ---------------------------------------------------------------- coordination v2: leases, push, topics
+def test_reservation_at_proposal_is_visible_with_envelope():
+    """A molecule is reserved when it is PROPOSED; the team sees it before any computation,
+    and the topic message carries the activity and the agent."""
+    c = campaign()
+    a, b = mem(c, "A"), mem(c, "B")
+    a.set_goal(GOAL)
+    a.begin_node("tool_calling")
+    recs = a.record_proposals(["CCOC", "CCCO"], own_previous=[])
+    assert [r["reservation"] for r in recs] == ["mine", "mine"]
+    assert canonical_smiles("CCOC") in b.in_progress()
+    assert b.record_proposals(["COCC"], own_previous=[])[0]["team_known"] == "in_progress"
+    from evident import bus
+    msgs = [bus.decode(f) for _, f in CLIENT.xrange(bus.topic_key(c, "reservations"))]
+    assert msgs[0]["event"] == "reserved" and msgs[0]["activity"] == "tool_calling"
+    assert msgs[0]["agent"] == "A"
+    a.end_node("simulate", 0.0)          # leases of molecules not computed are released
+    assert canonical_smiles("CCOC") not in b.in_progress()
+
+
+def _wake_latency(notify):
+    """B needs a molecule A is computing: time between A publishing the fact and B
+    getting it."""
+    c = campaign()
+    a, b = mem(c, "A", notify=notify), mem(c, "B", notify=notify)
+    b.poll = 1.0                                  # the real polling interval
+    published = {}
+
+    async def slow(task_id):
+        await asyncio.sleep(1.3)
+        return 11.0
+
+    async def main():
+        a.claim("CCCCN")
+        task_a = asyncio.create_task(a._compute_and_store("CCCCN", slow, None, time.time()))
+        await asyncio.sleep(0.1)
+        task_b = asyncio.create_task(b.evaluate_molecule("CCCCN", slow))
+        await task_a
+        published["t"] = time.time()
+        a.release("CCCCN")
+        value = await task_b
+        return value, time.time() - published["t"]
+
+    value, latency = asyncio.run(main())
+    a.close(), b.close()
+    assert value == 11.0
+    return latency
+
+
+def test_push_wakes_waiting_agent_faster_than_poll():
+    push, poll = _wake_latency("push"), _wake_latency("poll")
+    print(f"    fact -> waiting agent: push {push * 1000:.0f} ms, poll {poll * 1000:.0f} ms")
+    assert push < 0.2 and push < poll
+
+
+def test_lease_renewed_while_working_and_freed_after_crash():
+    """A lease of 1 s survives a 2.5 s computation (renewal) but a crashed holder frees
+    the molecule after one lease."""
+    c = campaign()
+    a, b = mem(c, "A", ttl=1), mem(c, "B", ttl=1)
+    calls = []
+
+    async def long_compute(task_id):
+        calls.append(task_id)
+        await asyncio.sleep(2.5)
+        return 9.0
+
+    async def main():
+        ta = asyncio.create_task(a.evaluate_molecule("CCCCC", long_compute))
+        await asyncio.sleep(0.2)
+        tb = asyncio.create_task(b.evaluate_molecule("CCCCC", long_compute))
+        return await asyncio.gather(ta, tb)
+
+    assert asyncio.run(main()) == [9.0, 9.0] and len(calls) == 1, "renewed: computed once"
+    ghost = mem(c, "ghost", ttl=1)
+    assert ghost.claim("CCCCCC")                   # reserved, then the agent "crashes"
+
+    async def quick(task_id):
+        return 8.0
+
+    t0 = time.time()
+    assert asyncio.run(b.evaluate_molecule("CCCCCC", quick)) == 8.0
+    assert 0.8 <= time.time() - t0 < 2.0
+    a.close(), b.close()
+
+
+def test_fact_topic_carries_task_id_and_activity():
+    c = campaign()
+    a = mem(c, "A")
+    a.begin_node("simulate")
+
+    async def compute(task_id):
+        return 10.5
+
+    asyncio.run(a.evaluate_molecule("CCF", compute, new_task_id=lambda: "flowcept-7"))
+    a.close()
+    from evident import bus
+    env = bus.decode(CLIENT.xrange(bus.topic_key(c, "facts"))[-1][1])
+    assert env["task_id"] == "flowcept-7" and env["activity"] == "simulate"
+    assert env["payload"]["smiles"] == canonical_smiles("CCF")
+
+
+def test_directive_pushed_to_running_agent():
+    c = campaign()
+    a, ctrl = mem(c, "A"), mem(c, "analysis")
+    a.control_poll = 2.0          # a slow poll: only push can explain a fast reaction
+
+    async def slow(task_id):
+        await asyncio.sleep(5)
+        return 1.0
+
+    async def main():
+        task = asyncio.create_task(a.evaluate_molecule("CCCCCCO", slow))
+        await asyncio.sleep(0.3)
+        sent = time.time()
+        ctrl.send_directive("A", "stop", "drift", rule="test")
+        try:
+            await task
+        except StoppedByDirective:
+            return time.time() - sent
+
+    latency = asyncio.run(main())
+    a.close()
+    print(f"    STOP pushed and applied in {latency * 1000:.0f} ms")
+    assert latency is not None and latency < 0.5
 
 
 def cleanup():
