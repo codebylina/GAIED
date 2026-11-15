@@ -1,6 +1,7 @@
 """Harness for shared-memory experiments with multi-agent campaigns (GAIED and a synthetic benchmark).
 
-Conditions on this branch: "none" (no shared memory) and "mem0" (Mem0, used as designed).
+Conditions: "none" (no shared memory), "mem0" (Mem0, used as designed) and "mem0_verified" (Mem0 with the
+knowledge verification layer; its "text" mode is the ablation that judges memories from their wording).
 """
 from __future__ import annotations
 
@@ -21,6 +22,13 @@ def make_memory(kind: str, store: Store, adapter: DomainAdapter, cfg: MemoryConf
     if kind == "mem0":
         from .mem0_memory import Mem0Memory
         return Mem0Memory(store, adapter, cfg, llm=kw.get("llm"), backend=kw["backend"], top_k=kw.get("top_k"))
+    if kind == "mem0_verified":
+        from .verified_memory import VerifiedMem0Memory
+        from .verifier import VerificationConfig, Verifier
+        vcfg = VerificationConfig(**(kw.get("verification") or {}))
+        verifier = kw.get("verifier") or Verifier(store, adapter, kw.get("llm"), vcfg)
+        return VerifiedMem0Memory(store, adapter, cfg, llm=kw.get("llm"), backend=kw["backend"],
+                                  top_k=kw.get("top_k"), verifier=verifier)
     raise ValueError(f"unknown memory kind: {kind}")
 
 

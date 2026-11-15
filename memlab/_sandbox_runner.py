@@ -36,6 +36,12 @@ def main() -> None:
         env["np"] = np
     except ImportError:
         pass
+    if "codes" in data:      # several tests on the same table, in one process: {key: code}
+        out = {}
+        for key, code in data["codes"].items():
+            out[key] = _run_one(code, data.get("fn", "test"), df, env)
+        print(json.dumps(out, default=str))
+        return
     try:
         exec(compile(data["code"], "<judge-test>", "exec"), env)
         fn = data.get("fn", "test")
@@ -62,6 +68,34 @@ def main() -> None:
         print(json.dumps(plain(out), default=str))
     except Exception as exc:  # reported to the judge, which may rewrite its test
         print(json.dumps({"error": f"{type(exc).__name__}: {exc}"}))
+
+
+def _run_one(code, fn, df, base_env):
+    env = dict(base_env)
+    try:
+        exec(compile(code, "<judge-test>", "exec"), env)
+        if fn not in env:
+            raise ValueError(f"the code must define a function {fn}(df)")
+        res = env[fn](df.copy() if hasattr(df, "copy") else list(df))
+        if not isinstance(res, dict):
+            raise ValueError(f"{fn}(df) must return a dict")
+        return _plain(res)
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _plain(v):
+    if hasattr(v, "tolist"):
+        v = v.tolist()
+    if isinstance(v, (list, tuple, set)):
+        return [_plain(x) for x in v]
+    if isinstance(v, dict):
+        return {str(k): _plain(x) for k, x in v.items()}
+    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+        return None
+    if hasattr(v, "item"):
+        return v.item()
+    return v
 
 
 if __name__ == "__main__":

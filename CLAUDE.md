@@ -23,13 +23,15 @@
     ou une API au format OpenAI (`LLM_PROVIDER=openai`, clé dans `docker/.env`).
   - `apply_patches.py`, `patch_stop_rule.py` : correctifs déjà appliqués (ne pas relancer).
   - `summarize_prov.py` : résume la provenance de la dernière campagne.
-- Mémoire (branche `mem0-baseline`) : **Mem0 2.2.1 seul**, utilisé comme prévu, comme point de départ
-  avant d'ajouter la couche de vérification. Explications : `docs/MEM0_BASELINE.md`.
-  `memlab/` = cadre de mesure commun (interface `Memory`, LLM, adaptateurs, `mem0_memory.py` : Mem0 local
-  ou service HTTP dans `run-07.py`, car les agents sont dans plusieurs processus). `bench/` = banc
-  synthétique à vérité connue (`quick.json`, `main.json`, `dryrun.json`). GAIED : `MEMORY_CONDITION=none|mem0`,
-  `MEMORY_EXPORT=<fichier>`. Le Dockerfile ajoute `mem0ai`, `ollama`, `fastembed` (BM25) et spaCy (reconstruire l'image une fois).
-  Tests : `python tests/test_memlab.py`. Autres branches : `provmem`, `falda-baseline`, `evident-memory`.
+- Mémoire (branche `mem0-verified`) : **Mem0 + couche de vérification des connaissances** (la contribution).
+  Méthode, corrections et protocole : `docs/VERIFICATION_LAYER.md` ; la référence Mem0 seule : branche
+  `mem0-baseline` (`docs/MEM0_BASELINE.md`). `memlab/verifier.py` = formalisation par lots (LLM écrit type,
+  portée, test exécutable avec règle de décision pré-enregistrée), réévaluation sans LLM (tests dans un seul
+  processus isolé), statuts selon la classe des preuves (exploratoire / confirmation / indépendante).
+  `memlab/verified_memory.py` = Mem0 + statuts dans le prompt. Conditions : `none`, `mem0`, `mem0_textcheck`,
+  `mem0_verified`, `mem0_verified_nolayers` (`bench/configs/quick.json`, `main.json`, `dryrun.json`) ;
+  GAIED : `MEMORY_CONDITION=<condition>` (Mem0 et le vérificateur tournent dans `run-07.py`).
+  Tests : `python tests/test_verifier.py`, `python tests/test_memlab.py`. Autres branches : `provmem`, `falda-baseline`.
 - `output/flowcept_buffer_*.jsonl` : provenance de chaque campagne.
 
 ## Modifications déjà faites au code d'Amal (marquées `[gaied-docker ...]`)

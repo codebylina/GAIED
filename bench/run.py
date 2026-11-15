@@ -40,7 +40,7 @@ def run_one(cfg: dict, scenario: dict, cond: dict, seed: int) -> dict:
     mcfg = MemoryConfig(**{**cfg.get("memory_defaults", {}), **cond.get("cfg", {})})
     store = InMemoryStore()
     kw = {"llm": llm}
-    if cond["memory"] == "mem0":
+    if cond["memory"] in ("mem0", "mem0_verified"):
         import shutil
 
         from memlab.mem0_memory import LocalMem0, build_mem0
@@ -52,6 +52,7 @@ def run_one(cfg: dict, scenario: dict, cond: dict, seed: int) -> dict:
             scripted = mem0_scripted(int(os.environ.get("EMBED_DIMS", "768")))
         kw["backend"] = LocalMem0(build_mem0(run_dir, "campaign", scripted=scripted), run_id="campaign", usage=usage)
         kw["top_k"] = cond.get("top_k")              # None: Mem0's default
+        kw["verification"] = cond.get("verification")
     memory = make_memory(cond["memory"], store, adapter, mcfg, **kw)
 
     n_agents, iters = cfg["n_agents"], cfg["iterations"]

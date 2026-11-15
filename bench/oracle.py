@@ -20,7 +20,10 @@ from memlab.sandbox import TestError, run_function
 
 ORACLE_SYSTEM = """You check statements about a design space against its complete ground truth.
 You get a statement and the columns of a table that lists EVERY design with its exact outcome
-(noise-free; value is null for designs that fail). Write a Python function `def holds(df):` that
+(column value: noise-free, null for designs that fail) and, for the designs the team measured, the measured
+outcome (column measured: mean of the team's noisy measurements; n_measured: how many). A statement about
+what a specific design gave or measured is checked against measured; a statement about effects, trends or
+which options are better is checked against value. Write a Python function `def holds(df):` that
 returns True if the statement is true on this complete table and False otherwise. Interpret the
 statement as a scientist would: a statement restricted to a region must be checked in that region only;
 "X increases the outcome" means designs with X have a higher mean outcome than comparable designs without X.
@@ -38,13 +41,15 @@ class Oracle:
     def _key(self, env_id: str, text: str) -> str:
         return hashlib.sha1(f"{env_id}|{text.strip()}".encode()).hexdigest()
 
-    def truth(self, env, text: str) -> bool | None:
-        env_id = json.dumps(env.spec.__dict__, sort_keys=True, default=str)
+    def truth(self, env, text: str, measured: dict[str, list[float]] | None = None, run_key: str = "") -> bool | None:
+        """measured: the run's measurements per entity (statements about measured values refer to them);
+        run_key: identifies the run, since the same words can mean a different measurement in another run."""
+        env_id = json.dumps(env.spec.__dict__, sort_keys=True, default=str) + "|" + run_key
         k = self._key(env_id, text)
         hit = self.cache.get(k)
         if hit and (hit["truth"] is not None or hit.get("reason") == "untestable"):
             return hit["truth"]          # failed evaluations are retried
-        cols = ", ".join(["id", "entity", "value", "status"] + [f"slot_{s}" for s in env.slots])
+        cols = ", ".join(["id", "entity", "value", "measured", "n_measured", "status"] + [f"slot_{s}" for s in env.slots])
         answer = self.llm.complete(ORACLE_SYSTEM, f"COLUMNS: {cols}\nSTATEMENT: {text}", purpose="oracle",
                                    max_tokens=long_output_tokens())
         meta = extract_json(answer.split("def holds")[0]) or {}
@@ -52,7 +57,10 @@ class Oracle:
         if meta.get("testable", True) and "```" in answer:
             code = extract_code(answer)
             try:
-                res = run_function(code, env.population(), "holds", self.timeout_s)
+                pop = [{**r, "measured": (sum(measured[r["entity"]]) / len(measured[r["entity"]])
+                                           if measured and measured.get(r["entity"]) else None),
+                        "n_measured": len((measured or {}).get(r["entity"], []))} for r in env.population()]
+                res = run_function(code, pop, "holds", self.timeout_s)
                 truth = bool(res) if res is not None else None
                 reason = "ok" if truth is not None else "error"
             except TestError as exc:

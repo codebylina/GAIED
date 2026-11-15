@@ -31,7 +31,7 @@ from bench.env import EnvSpec, SyntheticEnv
 from bench.oracle import Oracle
 from memlab.llm import LLM, LLMUsage
 
-ASSERTED_LAYERS = ("supported", "established")
+ASSERTED_LAYERS = ("supported", "established", "verified", "accepted", "stored", "live")
 
 
 def regret_curve(obs: list[dict], env: SyntheticEnv, optimum: float) -> list[float]:
@@ -89,6 +89,16 @@ def run_metrics(d: dict, oracle: Oracle | None) -> dict:
     m["briefing_chars"] = st.mean(b["chars"] for b in br) if br else 0.0
     m["wall_time_s"] = d.get("wall_time_s", 0.0)
     extra = mem.get("extra", {})
+    ver = extra.get("verification")
+    if ver:
+        vm = ver.get("verified_memories", [])
+        m["verif_memories"] = len(vm)
+        for st_ in ("verified", "established", "supported", "hypothesis", "refuted", "unsupported", "unverifiable",
+                    "pending", "accepted"):
+            m[f"verif_{st_}"] = sum(x["status"] == st_ for x in vm)
+        lags = [x["history"][0]["t"] - x["registered_at"] for x in vm if x.get("history")]
+        m["verif_lag_s"] = st.mean(lags) if lags else math.nan
+        m["verif_repairs"] = sum(bool(x.get("repaired")) for x in vm)
     if "mem0_ops" in extra:
         ops = extra["mem0_ops"]
         ok = [o for o in ops if "error" not in o]
@@ -113,6 +123,11 @@ def run_metrics(d: dict, oracle: Oracle | None) -> dict:
             m[f"claims_{k}"] = v
     # ---------------------------------------------------------------- knowledge (oracle)
     if oracle is not None:
+        measured = defaultdict(list)
+        for o in obs:
+            if o["status"] == "ok" and o["value"] is not None:
+                measured[o["entity"]].append(o["value"])
+        run_key = f"{m['scenario']}|{m['condition']}|{m['seed']}"
         imp_total = imp_false = hyp_total = hyp_false = 0
         texts = {}
         for b in br:
@@ -121,7 +136,7 @@ def run_metrics(d: dict, oracle: Oracle | None) -> dict:
                     continue
                 t = it["text"]
                 if t not in texts:
-                    texts[t] = oracle.truth(env, t)
+                    texts[t] = oracle.truth(env, t, measured, run_key)
                 truth = texts[t]
                 if truth is None:
                     continue
@@ -133,26 +148,38 @@ def run_metrics(d: dict, oracle: Oracle | None) -> dict:
                 imp_false += (truth != bool(it["asserted"]))
         m["false_exposure"] = imp_false / imp_total if imp_total else math.nan
         m["knowledge_impressions"] = imp_total
+        m["true_impressions"] = imp_total - imp_false
         m["false_share_unasserted"] = hyp_false / hyp_total if hyp_total else math.nan
-        final_true, final_known, by_layer = 0, 0, defaultdict(lambda: [0, 0])
+        # distinct memories the agents were shown, with their final status
+        tp = fp = fn = 0
+        by_layer = defaultdict(lambda: [0, 0])
         for k in mem.get("knowledge", []):
-            truth = oracle.truth(env, k["text"])
+            truth = oracle.truth(env, k["text"], measured, run_key)
             if truth is None:
                 continue
             layer = k.get("final_layer", "stored")
             by_layer[layer][0] += truth
             by_layer[layer][1] += 1
-            if layer in ASSERTED_LAYERS or layer in ("stored", "live"):
-                final_known += 1
-                final_true += truth
-        m["final_precision"] = final_true / final_known if final_known else math.nan
+            asserted = layer in ASSERTED_LAYERS
+            tp += asserted and truth
+            fp += asserted and not truth
+            fn += (not asserted) and truth
+        m["knowledge_true"] = tp + fn
+        m["knowledge_false"] = sum(n - t for t, n in by_layer.values())
+        m["final_precision"] = tp / (tp + fp) if tp + fp else math.nan
+        m["final_recall"] = tp / (tp + fn) if tp + fn else math.nan
+        pr, rc = m["final_precision"], m["final_recall"]
+        m["final_f1"] = 2 * pr * rc / (pr + rc) if pr == pr and rc == rc and pr + rc else math.nan
         for layer, (t, n) in by_layer.items():
             m[f"precision_{layer}"] = t / n if n else math.nan
-        planted = set(d.get("false_statements") or [])
+        planted = list(d.get("false_statements") or [])
         if planted:
             reach = sum(1 for b in br for it in b["items"]
                         if it.get("asserted") and any(p[:40] in it["text"] or it["text"][:40] in p for p in planted))
             m["planted_impressions"] = reach
+            judged = [oracle.truth(env, p, measured, run_key) for p in planted]   # false by construction
+            known = [t for t in judged if t is not None]
+            m["oracle_accuracy_on_planted"] = sum(not t for t in known) / len(known) if known else math.nan
     return m
 
 

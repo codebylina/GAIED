@@ -28,6 +28,11 @@
     "deceptive": true,
     "deception_strength": 3.0
    }
+  },
+  {
+   "name": "adversarial",
+   "adversary": 0,
+   "n_false": 3
   }
  ],
  "conditions": [
@@ -41,9 +46,13 @@
   {
    "name": "mem0",
    "memory": "mem0"
+  },
+  {
+   "name": "mem0_verified",
+   "memory": "mem0_verified"
   }
  ],
- "name": "mem0_quick",
+ "name": "verif_quick",
  "seeds": [
   1
  ]

@@ -42,6 +42,52 @@ def mem0_scripted(dims: int = 768):
     return llm, embed
 
 
+GEN_TEST = """def test(df):
+    ok = df[df['status'] == 'ok']
+    col = 'slot_{s}'
+    inside = ok[ok[col] == {o}]
+    ref = ok[ok[col] != {o}]['value'].mean() if (ok[col] != {o}).any() else None
+    if ref is None or len(inside) == 0:
+        return {{'in_scope': [], 'support': [], 'contradict': [], 'stats': {{}}, 'verdict': 'inconclusive'}}
+    good = inside[inside['value'] {op} ref]
+    bad = inside[~(inside['value'] {op} ref)]
+    v = 'supported' if len(good) >= 2 and len(good) > len(bad) else 'contradicted' if len(bad) >= 2 and len(bad) > len(good) else 'inconclusive'
+    return {{'in_scope': list(ok['id']), 'support': list(good['id']), 'contradict': list(bad['id']),
+            'stats': {{'ref': float(ref)}}, 'verdict': v}}
+"""
+
+FACT_TEST = """def test(df):
+    rows = df[df['entity'] == '{e}']
+    ok = rows[rows['status'] == 'ok']
+    good = ok[(ok['value'] - {v}).abs() <= 0.05 * max(1.0, abs({v}))]
+    bad = ok[(ok['value'] - {v}).abs() > 0.05 * max(1.0, abs({v}))]
+    v = 'supported' if len(good) else 'contradicted' if len(bad) else 'inconclusive'
+    return {{'in_scope': list(rows['id']), 'support': list(good['id']), 'contradict': list(bad['id']), 'stats': {{}}, 'verdict': v}}
+"""
+
+
+def scripted_verifier(user: str, text_mode: bool) -> str:
+    out = []
+    for block in re.split(r"(?m)^### ", user.split("MEMORIES TO REVIEW:")[-1].split("MEMORIES:")[-1])[1:]:
+        mid = block.split()[0]
+        body = block[len(mid):]
+        if text_mode:
+            out.append(f'### {mid} {{"verdict": "true"}}')
+            continue
+        m = CLAIM_RE.search(body)
+        f = re.search(r"((?:[A-Z]\d+-)+[A-Z]\d+)\D{0,20}?(-?\d+\.\d+)", body)
+        if m:
+            s_, o, d = m.group(1), m.group(2), m.group(3)
+            code = GEN_TEST.format(s=s_, o=o, op=">" if d == "increases" else "<")
+            out.append(f'### {mid}\n{{"kind": "generalization", "scoped_statement": "{m.group(0)} the outcome"}}\n```python\n{code}```')
+        elif f:
+            code = FACT_TEST.format(e=f.group(1), v=float(f.group(2)))
+            out.append(f'### {mid}\n{{"kind": "fact", "scoped_statement": "{f.group(1)} gave {f.group(2)}"}}\n```python\n{code}```')
+        else:
+            out.append(f'### {mid}\n{{"kind": "untestable", "scoped_statement": "n/a"}}')
+    return "\n".join(out)
+
+
 class ScriptedLLM:
     def __init__(self, env, seed: int = 0) -> None:
         self.env = env
@@ -53,6 +99,9 @@ class ScriptedLLM:
             return self._answer(system, user, purpose)
 
     def _answer(self, system, user, purpose):
+        from memlab.verifier import FORMALIZE_SYSTEM as VF, TEXT_SYSTEM as VT
+        if system in (VF, VT):
+            return scripted_verifier(user, system == VT)
         if purpose == "oracle":
             m = CLAIM_RE.search(user)
             if not m:

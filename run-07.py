@@ -102,16 +102,39 @@ async def main() -> int:
 def start_memory_service():
     """[memlab] With MEMORY_CONDITION=mem0: one Mem0 instance in this process, served over HTTP."""
     from memlab.integrations import gaied
-    if gaied.condition() != 'mem0':
+    if not gaied.condition() or gaied.condition_spec()['memory'] not in ('mem0', 'mem0_verified'):
         return None
+    import threading
+    import time as _time
+    from memlab import LLM, RedisStore
     from memlab.llm import LLMUsage
     from memlab.mem0_memory import LocalMem0, Mem0Service, build_mem0
     store_dir = os.path.join(os.environ.get('MEM0_STORE_DIR', 'results/gaied/mem0_store'), gaied.campaign())
     usage = LLMUsage()
     local = LocalMem0(build_mem0(store_dir, 'campaign'), run_id='campaign', usage=usage)
+    verifier, stop = None, threading.Event()
+    if gaied.condition_spec()['memory'] == 'mem0_verified':   # the verification layer runs here too
+        verifier = gaied.verifier_from_env(RedisStore.connect(gaied.campaign()), LLM(usage=usage))
+
+        def on_added(events, agent):
+            for e in events or []:
+                if str(e.get('event', 'ADD')).upper() in ('ADD', 'UPDATE') and e.get('id'):
+                    verifier.register(str(e['id']), str(e.get('memory', '')), agent)
+        local.on_added = on_added
+
+        def loop():
+            while not stop.is_set():
+                try:
+                    if verifier.step() == 0:
+                        _time.sleep(1.0)
+                except Exception as exc:
+                    logger.warning('verification step failed: %s', exc)
+                    _time.sleep(5.0)
+        threading.Thread(target=loop, daemon=True).start()
     service = Mem0Service(local, int(os.environ.get('MEM0_PORT', str(gaied.DEFAULT_MEM0_PORT))))
-    print(f'Memory: Mem0 service on port {service.server.server_address[1]}, store {store_dir}')
-    return local, service, usage
+    print(f'Memory: Mem0 service on port {service.server.server_address[1]}, store {store_dir}'
+          + (', verification layer on' if verifier else ''))
+    return local, service, usage, verifier, stop
 
 
 def stop_memory_service(mem_service) -> None:
@@ -122,10 +145,15 @@ def stop_memory_service(mem_service) -> None:
         return
     memory = None
     if mem_service is not None:
-        local, service, usage = mem_service
+        local, service, usage, verifier, stop = mem_service
         print('Memory: finishing pending Mem0 writes...')
         service.drain()
-        memory = gaied.memory_from_env(backend=local)
+        if verifier is not None:
+            stop.set()
+            print('Memory: finishing pending verifications...')
+            while verifier.step():
+                pass
+        memory = gaied.memory_from_env(backend=local, verifier=verifier)
         if memory is not None:
             memory.llm = type('U', (), {'usage': usage})()
     else:

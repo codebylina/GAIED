@@ -95,6 +95,7 @@ class LocalMem0:
         self.lock = threading.Lock()
         self.q: queue.Queue = queue.Queue()
         self.ops: list[dict] = []
+        self.on_added = None     # callback(events, agent_id): a layer on top of Mem0 sees each new memory
         gen = self.m.llm.generate_response
 
         def unlocked_llm(*a, **kw):
@@ -132,6 +133,11 @@ class LocalMem0:
             events = res.get("results", res) if isinstance(res, dict) else res
             self.ops.append({"t": time.time(), "agent": agent, "queued_s": t0 - t_req, "seconds": time.time() - t0,
                              "chars": len(text), "results": events})
+            if self.on_added is not None:
+                try:
+                    self.on_added(events, agent)
+                except Exception as exc:
+                    logger.warning("on_added callback failed: %s", exc)
         except Exception as exc:
             logger.warning("mem0 add failed: %s", exc)
             self.ops.append({"t": time.time(), "agent": agent, "error": str(exc)[:500]})

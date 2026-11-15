@@ -53,9 +53,27 @@
   {
    "name": "mem0",
    "memory": "mem0"
+  },
+  {
+   "name": "mem0_textcheck",
+   "memory": "mem0_verified",
+   "verification": {
+    "mode": "text"
+   }
+  },
+  {
+   "name": "mem0_verified",
+   "memory": "mem0_verified"
+  },
+  {
+   "name": "mem0_verified_nolayers",
+   "memory": "mem0_verified",
+   "verification": {
+    "layers": false
+   }
   }
  ],
- "name": "mem0_main",
+ "name": "verif_main",
  "seeds": [
   1,
   2,

@@ -27,6 +27,36 @@ def run_test(code: str, rows: list[dict], timeout_s: float) -> dict:
     return validate(_run(code, rows, timeout_s, "test"), {str(r["id"]) for r in rows})
 
 
+def run_many(codes: dict[str, str], rows: list[dict], timeout_s: float) -> dict[str, dict]:
+    """Run several tests on the same table in one child process. Returns, per key, either the
+    validated result or {"error": "..."}; one failing test does not affect the others."""
+    if not codes:
+        return {}
+    payload = json.dumps({"codes": codes, "rows": rows, "fn": "test"}, default=str)
+    try:
+        proc = subprocess.run([sys.executable, "-I", RUNNER], input=payload, capture_output=True,
+                              text=True, timeout=timeout_s)
+        raw = json.loads(proc.stdout.strip().splitlines()[-1])
+    except subprocess.TimeoutExpired:
+        return {k: {"error": f"tests exceeded {timeout_s} s"} for k in codes}
+    except Exception as exc:
+        return {k: {"error": f"sandbox failure: {exc}"} for k in codes}
+    known = {str(r["id"]) for r in rows}
+    out = {}
+    for k in codes:
+        r = raw.get(k) or {"error": "no result"}
+        if "error" in r:
+            out[k] = r
+            continue
+        try:
+            v = validate(r, known)
+            v["verdict"] = str(r.get("verdict", "")).lower()
+            out[k] = v
+        except TestError as exc:
+            out[k] = {"error": str(exc)}
+    return out
+
+
 def run_function(code: str, rows: list[dict], fn: str, timeout_s: float):
     """Run any function fn(df) of the code and return its (JSON) result."""
     return _run(code, rows, timeout_s, fn).get("result")

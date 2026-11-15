@@ -2,7 +2,8 @@
 Glue between GAIED (Academy + LangGraph agents, Flowcept provenance) and the memory conditions.
 
 Environment:
-  MEMORY_CONDITION   none | mem0. Unset: original GAIED, nothing recorded.
+  MEMORY_CONDITION   a condition of MEMORY_CONFIG: none, mem0, mem0_verified, mem0_textcheck,
+                     mem0_verified_nolayers. Unset: original GAIED, nothing recorded.
   MEMORY_CONFIG      experiment configuration with memory_defaults (default bench/configs/main.json)
   MEMORY_CAMPAIGN_ID namespace of the measurement logs in Redis (default FLOWCEPT_CAMPAIGN_ID)
   MEM0_URL           the Mem0 service started by run-07.py (default http://127.0.0.1:8765)
@@ -27,6 +28,21 @@ def condition() -> str | None:
     return os.environ.get("MEMORY_CONDITION") or None
 
 
+def condition_spec() -> dict:
+    """The condition's entry in MEMORY_CONFIG (memory kind and verification settings)."""
+    name = condition()
+    path = os.environ.get("MEMORY_CONFIG", os.path.join(ROOT, "bench", "configs", "main.json"))
+    for c in json.load(open(path))["conditions"]:
+        if c["name"] == name:
+            return c
+    raise ValueError(f"MEMORY_CONDITION={name} is not a condition of {path}")
+
+
+def verifier_from_env(store, llm=None):
+    from memlab.verifier import VerificationConfig, Verifier
+    return Verifier(store, adapter_from_env(), llm, VerificationConfig(**(condition_spec().get("verification") or {})))
+
+
 def defaults() -> dict:
     path = os.environ.get("MEMORY_CONFIG", os.path.join(ROOT, "bench", "configs", "main.json"))
     return json.load(open(path)).get("memory_defaults", {})
@@ -44,7 +60,7 @@ def adapter_from_env() -> ChemistryAdapter:
                             allowed_elements=[e.strip() for e in elements.split(",")] if elements else None)
 
 
-def memory_from_env(backend=None):
+def memory_from_env(backend=None, verifier=None):
     """The memory an agent uses (backend=None: the Mem0 service over HTTP)."""
     cond = condition()
     if not cond:
@@ -58,12 +74,18 @@ def memory_from_env(backend=None):
     if cond == "none":
         cfg.briefing_budget_chars = 0
         return make_memory("none", store, adapter_from_env(), cfg)
-    if cond == "mem0":
+    kind = condition_spec()["memory"]
+    if kind in ("mem0", "mem0_verified"):
         if backend is None:
             from memlab.mem0_memory import Mem0Client
             backend = Mem0Client(os.environ.get("MEM0_URL", f"http://127.0.0.1:{DEFAULT_MEM0_PORT}"))
-        return make_memory("mem0", store, adapter_from_env(), cfg, backend=backend)
-    raise ValueError(f"MEMORY_CONDITION={cond}: this branch has 'none' and 'mem0'")
+        kw = {"backend": backend}
+        if kind == "mem0_verified":   # agents only read statuses; the verifier runs in run-07.py
+            kw["verifier"] = verifier
+            if verifier is None:
+                kw["verifier"] = verifier_from_env(store)
+        return make_memory(kind, store, adapter_from_env(), cfg, **kw)
+    raise ValueError(f"MEMORY_CONDITION={cond}: unknown memory kind {kind}")
 
 
 def block(memory, agent: str, node: str, query: str, iteration: int) -> str:
