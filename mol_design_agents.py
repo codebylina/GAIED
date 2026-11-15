@@ -411,6 +411,11 @@ class XTBSimulationAgent(Agent):
         # [provenance-fix] agent name written in the provenance of its xTB tasks
         import uuid as _uuid
         self.agent_name = f'{self.search_state.seed}#{_uuid.uuid4().hex[:6]}'
+        # [memlab] shared memory of the team (None when MEMORY_CONDITION is unset)
+        from memlab.integrations.gaied import memory_from_env
+        self.memory = memory_from_env()
+        if self.memory is not None:
+            self.memory.register_agent(self.agent_name)
 
     async def agent_on_shutdown(self) -> None:
         if self._lg_interceptor is not None:
@@ -511,8 +516,6 @@ class XTBSimulationAgent(Agent):
         campaign_id: str | None,
     ) -> None:
         """Write the provenance record of one xTB computation (subtype parsl_task)."""
-        if self._academy_interceptor is None:
-            return
         task: dict = {
             'task_id': task_id,
             'activity_id': 'compute_ionization_energy',
@@ -534,6 +537,13 @@ class XTBSimulationAgent(Agent):
             task['workflow_id'] = workflow_id
         if campaign_id:
             task['campaign_id'] = campaign_id
+        if getattr(self, 'memory', None) is not None:  # [memlab] measurement only (observations log)
+            try:
+                self.memory.ingest(task)
+            except Exception as exc:
+                logger.warning('memory ingest failed: %s', exc)
+        if self._academy_interceptor is None:
+            return
         try:
             self._academy_interceptor.intercept_task(task)
         except Exception as exc:
@@ -550,6 +560,18 @@ class XTBSimulationAgent(Agent):
         ionizationenergy, using the starting molecule as a seed for the
         search space.
         """
+
+        def _mem(node: str, query: str) -> str:  # [memlab] memory block for a prompt
+            from memlab.integrations.gaied import block
+            return block(getattr(self, 'memory', None), self.agent_name, node, query, _iteration)
+
+        def _remember(node: str, text: str) -> None:  # [memlab] what the agent observed or concluded
+            memory = getattr(self, 'memory', None)
+            if memory is not None and text:
+                try:
+                    memory.record_episode(self.agent_name, node, text, _iteration)
+                except Exception as exc:
+                    logger.warning('memory write failed: %s', exc)
 
         async def plan(state: SearchState) -> SearchState:
             response = await self.reasoning_llm.ainvoke(
@@ -579,6 +601,7 @@ class XTBSimulationAgent(Agent):
                         content=(
                             'Look for molecules with high ionization energy '
                             f'starting with the molecule {state.seed}'
+                            + _mem('plan', f'molecules with high ionization energy from {state.seed}')  # [memlab]
                         ),
                     ),
                 ],
@@ -617,12 +640,15 @@ class XTBSimulationAgent(Agent):
                             f'Plan: {state.plan}\n\n'
                             f'Simulated Molecules: {previously_simulated} '
                             'Do not repeat those molecules in the tool calls.'
+                            + _mem('propose', str(state.plan))  # [memlab]
                         ),
                     ),
                 ],
             )
             logger.info(f'Tool Calling: {response}')
-            while len(response.tool_calls) == 0:
+            _retries = 0  # [gaied-fix] bounded retries (the original loops forever)
+            while len(response.tool_calls) == 0 and _retries < int(os.environ.get('TOOL_CALL_RETRIES', '3')):
+                _retries += 1
                 logger.warning('Tool calling agent did not call tools!')
                 logger.warning(response)
                 response = await self.llm_with_tools.ainvoke(
@@ -731,11 +757,14 @@ class XTBSimulationAgent(Agent):
                             'Simulation Results:\n'
                             'Molecule\t\tEnergy\n'
                             f'{results_str}'
+                            + _mem('conclude', str(state.plan))  # [memlab]
                         ),
                     ),
                 ],
             )
             logger.info(f'Conclusions: {response}')
+            _remember('results', 'Results of my xTB simulations (ionization energy):\n' + results_str)  # [memlab]
+            _remember('conclude', response.content)  # [memlab]
             new_state = SearchState(
                 seed=state.seed,
                 plan=response.content,
@@ -773,6 +802,7 @@ class XTBSimulationAgent(Agent):
                             f'{results_str}\n\n'
                             'Conclusions:\n'
                             f'\t{conclusions}'
+                            + _mem('critique', str(state.plan))  # [memlab]
                         ),
                     ),
                 ],
@@ -822,6 +852,7 @@ class XTBSimulationAgent(Agent):
                             f'\t{conclusions}\n\n'
                             'Critique:\n'
                             f'\t{state.critique}'
+                            + _mem('update', str(state.critique))  # [memlab]
                         ),
                     ),
                 ],

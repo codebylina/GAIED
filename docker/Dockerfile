@@ -26,6 +26,9 @@ RUN pip install --no-cache-dir --retries 10 --timeout 60 \
 # 0.4.0 also keeps the Runtime methods that the Flowcept plugin patches.
 RUN pip install --no-cache-dir --retries 10 --timeout 60 "academy-py==0.4.0"
 
+# Mem0 (open source) as a shared-memory baseline; ollama = its client for the local LLM.
+RUN pip install --no-cache-dir --retries 10 --timeout 60 "mem0ai==2.2.1" "ollama==0.6.3"
+
 ENV PYTHONUNBUFFERED=1 \
     OMP_NUM_THREADS=1 \
     OMP_STACKSIZE=1G

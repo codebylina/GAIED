@@ -23,8 +23,13 @@
     ou une API au format OpenAI (`LLM_PROVIDER=openai`, clé dans `docker/.env`).
   - `apply_patches.py`, `patch_stop_rule.py` : correctifs déjà appliqués (ne pas relancer).
   - `summarize_prov.py` : résume la provenance de la dernière campagne.
-- Mémoire : **pas encore de mémoire sur cette branche** (version naïve retirée le 14 nov., gardée sur
-  la branche `archive/naive-memory-v1` ; la version EVIDENT est sur la branche `evident-memory`).
+- Mémoire (branche `mem0-baseline`) : **Mem0 2.2.1 seul**, utilisé comme prévu, comme point de départ
+  avant d'ajouter la couche de vérification. Explications : `docs/MEM0_BASELINE.md`.
+  `memlab/` = cadre de mesure commun (interface `Memory`, LLM, adaptateurs, `mem0_memory.py` : Mem0 local
+  ou service HTTP dans `run-07.py`, car les agents sont dans plusieurs processus). `bench/` = banc
+  synthétique à vérité connue (`quick.json`, `main.json`, `dryrun.json`). GAIED : `MEMORY_CONDITION=none|mem0`,
+  `MEMORY_EXPORT=<fichier>`. Le Dockerfile ajoute `mem0ai` et `ollama` (reconstruire l'image une fois).
+  Tests : `python tests/test_memlab.py`. Autres branches : `provmem`, `falda-baseline`, `evident-memory`.
 - `output/flowcept_buffer_*.jsonl` : provenance de chaque campagne.
 
 ## Modifications déjà faites au code d'Amal (marquées `[gaied-docker ...]`)

@@ -18,3 +18,4 @@ run-07.py.before-stop-rule
 .vscode/
 # experiment outputs from other branches (large, machine-specific)
 experiments/results/
+results/

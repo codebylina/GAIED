@@ -32,7 +32,7 @@ async def main() -> int:
                         ''  # [gaied-docker patch] no conda activate needed in Docker
                     ),
                 ),
-                max_workers_per_node=2,
+                max_workers_per_node=int(os.environ.get('PARSL_MAX_WORKERS', '2')),  # [memlab] one per agent
                 # [gaied-docker patch] a local LLM on CPU can starve the Parsl manager
                 # for minutes; the default (120 s) made Parsl drop both agents (ManagerLost)
                 heartbeat_threshold=int(os.environ.get('PARSL_HEARTBEAT_THRESHOLD', '1200')),
@@ -46,6 +46,7 @@ async def main() -> int:
         executors=executor,
     ) as manager:
         seeds = os.environ.get('SEEDS', 'CNC(N)=O,CC1=C(O)N=C(O)N1').split(',')  # [gaied-docker patch]
+        mem_service = start_memory_service()  # [memlab] Mem0 runs here, agents reach it over HTTP
 
         agents = []
         for molecule in seeds:
@@ -56,7 +57,7 @@ async def main() -> int:
                         XTBConfig(),
                         molecule,
                         int(os.environ.get('MAX_ITERATIONS', '20')),   # max_iterations  # [gaied-docker patch]
-                        3,   # no_improvement_tolerance
+                        int(os.environ.get('NO_IMPROVEMENT_TOLERANCE', '3')) or None,   # no_improvement_tolerance  # [memlab] 0 = fixed budget
                     ),
                 ),
             )
@@ -92,8 +93,53 @@ async def main() -> int:
             print('All agents completed.')
         except (KeyboardInterrupt, asyncio.CancelledError):
             print('\nShutting down agents...')
+        finally:
+            stop_memory_service(mem_service)  # [memlab]
 
     return 0
+
+
+def start_memory_service():
+    """[memlab] With MEMORY_CONDITION=mem0: one Mem0 instance in this process, served over HTTP."""
+    from memlab.integrations import gaied
+    if gaied.condition() != 'mem0':
+        return None
+    from memlab.llm import LLMUsage
+    from memlab.mem0_memory import LocalMem0, Mem0Service, build_mem0
+    store_dir = os.path.join(os.environ.get('MEM0_STORE_DIR', 'results/gaied/mem0_store'), gaied.campaign())
+    usage = LLMUsage()
+    local = LocalMem0(build_mem0(store_dir, 'campaign'), run_id='campaign', usage=usage)
+    service = Mem0Service(local, int(os.environ.get('MEM0_PORT', str(gaied.DEFAULT_MEM0_PORT))))
+    print(f'Memory: Mem0 service on port {service.server.server_address[1]}, store {store_dir}')
+    return local, service, usage
+
+
+def stop_memory_service(mem_service) -> None:
+    """[memlab] Finish Mem0's pending writes, then export everything the analysis needs."""
+    import json
+    from memlab.integrations import gaied
+    if not gaied.condition():
+        return
+    memory = None
+    if mem_service is not None:
+        local, service, usage = mem_service
+        print('Memory: finishing pending Mem0 writes...')
+        service.drain()
+        memory = gaied.memory_from_env(backend=local)
+        if memory is not None:
+            memory.llm = type('U', (), {'usage': usage})()
+    else:
+        memory = gaied.memory_from_env()
+    path = os.environ.get('MEMORY_EXPORT')
+    if memory is not None and path:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        data = memory.export()
+        data['campaign'] = {'condition': gaied.condition(), 'seeds': os.environ.get('SEEDS'),
+                            'max_iterations': os.environ.get('MAX_ITERATIONS'),
+                            'flowcept_campaign_id': os.environ.get('FLOWCEPT_CAMPAIGN_ID')}
+        with open(path, 'w') as fh:
+            json.dump(data, fh, default=str)
+        print(f'Memory exported to {path}')
 
 
 def _print_perf_summary(perf_csv: str) -> None:
