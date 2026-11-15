@@ -132,6 +132,26 @@ def extract_json(text: str):
 
 
 def extract_code(text: str) -> str:
-    """Python code from a fenced block, or the whole answer if there is no fence."""
-    m = re.search(r"```(?:python)?\s*(.*?)```", text or "", re.DOTALL)
-    return (m.group(1) if m else (text or "")).strip()
+    """Python code from a fenced block. An opening fence without a closing one (answer cut by the
+    token limit) gives the code after the fence; is_truncated() tells the two cases apart."""
+    text = text or ""
+    blocks = re.findall(r"```[ \t]*([A-Za-z0-9]*)[ \t]*\n(.*?)```", text, re.DOTALL)
+    code = [b for lang, b in blocks if "def " in b] or [b for lang, b in blocks if lang.lower().startswith("py")]
+    if code:
+        return code[0].strip()
+    tail = text.rsplit("```", 1)
+    if len(tail) == 2 and is_truncated(text):     # last fence opened, never closed
+        return re.sub(r"^[ \t]*[A-Za-z0-9]*[ \t]*\n", "", tail[1], count=1).strip()
+    return text.strip() if "```" not in text else ""
+
+
+def is_truncated(text: str) -> bool:
+    """True when the answer opens a code fence that it never closes."""
+    return (text or "").count("```") % 2 == 1
+
+
+def long_output_tokens() -> int:
+    """Token limit for answers that contain code (judge, oracle): JUDGE_MAX_TOKENS, or half of the
+    context window. NUM_PREDICT (1024 by default) is meant for the agents' short answers and cuts
+    tests in the middle."""
+    return int(os.environ.get("JUDGE_MAX_TOKENS") or int(os.environ.get("NUM_CTX", "8192")) // 2)

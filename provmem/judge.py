@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import os
 
-from .llm import LLM, extract_code, extract_json
+from .llm import LLM, extract_code, extract_json, is_truncated, long_output_tokens
 
 VERDICTS = ("supported", "contradicted", "inconclusive", "untestable")
 
@@ -35,7 +35,8 @@ A team member stated a claim. Turn it into an executable test over the team's ob
 
 Rules:
 - Restate the claim so that it says no more than the observations can support (scoped_statement):
-  keep its meaning, but restrict it to the part of the space it is actually about.
+  keep its meaning and its direction, but restrict it to the part of the space it is actually about.
+  Never turn the claim into its opposite: if the data disagree, the test will show it.
 - Write a Python function `def test(df):` where df is a pandas DataFrame of observations.
   It must return a dict with:
     "in_scope":   list of observation ids (column "id") that the claim is about,
@@ -47,6 +48,8 @@ Rules:
   numpy as np, math and statistics too. Do not read files or use the network.
   For claims about a group effect, compare in-scope observations against a reference group and
   decide support/contradiction per observation relative to that reference; explain in "note".
+  Keep the test short: no comments, no docstrings, no prints. "support" and "contradict" must be
+  subsets of "in_scope".
 - If the claim cannot be tested with these observations at all (a methodological advice, a plan),
   set "testable": false and give no code.
 - Compare with the existing related claims and say if the new claim duplicates one, refines one
@@ -99,14 +102,16 @@ class GroundedJudge:
                 ("\n".join(f"- {c['id']}: {c['statement']} [{c['layer']}]" for c in related) or "(none)"))
         if error:
             user += f"\n\nYOUR PREVIOUS TEST FAILED:\n{previous_code}\nERROR: {error}\nFix it."
-        answer = self.llm.complete(FORMALIZE_SYSTEM, user, purpose="judge")
-        meta = extract_json(answer.split("```python")[0]) or extract_json(answer) or {}
-        code = extract_code(answer[answer.find("```python"):]) if "```python" in answer else ""
+        answer = self.llm.complete(FORMALIZE_SYSTEM, user, purpose="judge", max_tokens=long_output_tokens())
+        meta = extract_json(answer.split("def test")[0]) or extract_json(answer) or {}
+        code = extract_code(answer)
+        if "def test" not in code:
+            code = ""
         rel = meta.get("relation") if isinstance(meta.get("relation"), dict) else {}
         return {"testable": bool(meta.get("testable", bool(code))) and bool(code),
                 "scoped_statement": str(meta.get("scoped_statement") or statement),
                 "relation": {"type": str(rel.get("type") or "new"), "target": rel.get("target")},
-                "code": code, "raw": answer}
+                "code": code, "truncated": is_truncated(answer), "raw": answer}
 
     def verdict(self, claim: dict, result: dict, rows: list[dict], domain_note: str | None) -> dict:
         limit = _rows_budget()
@@ -121,7 +126,7 @@ class GroundedJudge:
                 f"{' — first %d of %d' % (len(shown), len(rows)) if len(rows) > len(shown) else ''}:\n{table}")
         if domain_note:
             user += f"\n\nPRIOR DOMAIN KNOWLEDGE (may contest, never refute, a claim):\n{domain_note}"
-        answer = self.llm.complete(VERDICT_SYSTEM, user, purpose="judge")
+        answer = self.llm.complete(VERDICT_SYSTEM, user, purpose="judge", max_tokens=long_output_tokens())
         return self._parse_verdict(answer)
 
     def review(self, claim: dict, proposal: dict, result: dict, rows: list[dict]) -> dict:

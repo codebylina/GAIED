@@ -200,6 +200,8 @@ class ProvMem(Memory):
 
     def _run_with_repairs(self, claim, f, rows, related):
         code, err = f["code"], None
+        if f.get("truncated"):
+            self._journal(claim, "test_error", {"attempt": -1, "error": "answer cut by the token limit"})
         for attempt in range(1 + self.cfg.test_repairs):
             if attempt:
                 f2 = self.judge.formalize(claim["statement"], self._schema_doc(), rows[-20:], related,
@@ -210,6 +212,8 @@ class ProvMem(Memory):
                 return run_test(code, rows, self.cfg.test_timeout_s)
             except TestError as exc:
                 err = str(exc)
+                if f.get("truncated") and attempt == 0:
+                    err += " (your answer was cut off: write a much shorter test)"
                 self._journal(claim, "test_error", {"attempt": attempt, "error": err})
         return None
 

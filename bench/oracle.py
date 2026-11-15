@@ -15,7 +15,7 @@ import json
 import os
 import threading
 
-from provmem.llm import LLM, extract_code, extract_json
+from provmem.llm import LLM, extract_code, extract_json, long_output_tokens
 from provmem.sandbox import TestError, run_function
 
 ORACLE_SYSTEM = """You check statements about a design space against its complete ground truth.
@@ -25,7 +25,8 @@ returns True if the statement is true on this complete table and False otherwise
 statement as a scientist would: a statement restricted to a region must be checked in that region only;
 "X increases the outcome" means designs with X have a higher mean outcome than comparable designs without X.
 If the statement is not a claim about outcomes (a plan, an advice, a remark), answer {"testable": false}.
-Otherwise answer {"testable": true} followed by the code in a ```python block. pandas is available as pd."""
+Otherwise answer {"testable": true} followed by the code in a ```python block. pandas is available as pd.
+Keep the code short: no comments, no docstrings, no prints."""
 
 
 class Oracle:
@@ -40,21 +41,24 @@ class Oracle:
     def truth(self, env, text: str) -> bool | None:
         env_id = json.dumps(env.spec.__dict__, sort_keys=True, default=str)
         k = self._key(env_id, text)
-        if k in self.cache:
-            return self.cache[k]["truth"]
+        hit = self.cache.get(k)
+        if hit and (hit["truth"] is not None or hit.get("reason") == "untestable"):
+            return hit["truth"]          # failed evaluations are retried
         cols = ", ".join(["id", "entity", "value", "status"] + [f"slot_{s}" for s in env.slots])
-        answer = self.llm.complete(ORACLE_SYSTEM, f"COLUMNS: {cols}\nSTATEMENT: {text}", purpose="oracle")
-        meta = extract_json(answer.split("```")[0]) or {}
-        truth, code = None, ""
+        answer = self.llm.complete(ORACLE_SYSTEM, f"COLUMNS: {cols}\nSTATEMENT: {text}", purpose="oracle",
+                                   max_tokens=long_output_tokens())
+        meta = extract_json(answer.split("def holds")[0]) or {}
+        truth, code, reason = None, "", "untestable"
         if meta.get("testable", True) and "```" in answer:
-            code = extract_code(answer[answer.find("```"):])
+            code = extract_code(answer)
             try:
                 res = run_function(code, env.population(), "holds", self.timeout_s)
                 truth = bool(res) if res is not None else None
-            except TestError:
-                truth = None
+                reason = "ok" if truth is not None else "error"
+            except TestError as exc:
+                reason = f"error: {str(exc)[:300]}"
         with self.lock:
-            self.cache[k] = {"text": text, "truth": truth, "code": code}
+            self.cache[k] = {"text": text, "truth": truth, "code": code, "reason": reason}
         return truth
 
     def save(self) -> None:
