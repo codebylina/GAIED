@@ -1,6 +1,6 @@
 # Mémoire partagée — premier prototype (`memory/`)
 
-Branche `claude/confident-hypatia-6pjvms`, construite à partir de `docker-local`. Code : `memory/` (bibliothèque
+Branche `shared-memory-prototype`, construite à partir de `docker-local`. Code : `memory/` (bibliothèque
 générique), `memory/domains/chemistry.py` et `memory/integrations/gaied.py` (branchement GAIED),
 `tests/test_memory.py`.
 
