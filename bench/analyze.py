@@ -93,12 +93,41 @@ def run_metrics(d: dict, oracle: Oracle | None) -> dict:
     if ver:
         vm = ver.get("verified_memories", [])
         m["verif_memories"] = len(vm)
-        for st_ in ("verified", "established", "supported", "hypothesis", "refuted", "unsupported", "unverifiable",
-                    "pending", "accepted"):
+        for st_ in ("verified", "established", "supported", "hypothesis", "open", "contested", "refuted",
+                    "unsupported", "unverifiable", "pending", "accepted"):
             m[f"verif_{st_}"] = sum(x["status"] == st_ for x in vm)
         lags = [x["history"][0]["t"] - x["registered_at"] for x in vm if x.get("history")]
         m["verif_lag_s"] = st.mean(lags) if lags else math.nan
         m["verif_repairs"] = sum(bool(x.get("repaired")) for x in vm)
+        # pre-registration: share of rules written after seeing measurements later than the claim
+        rules = [r for x in vm for r in x.get("rules", [])]
+        late = [r for r, x in ((r, x) for x in vm for r in x.get("rules", []))
+                if r.get("max_t_seen") is not None and r["max_t_seen"] > x["claimed_at"]]
+        m["rule_leak_rate"] = len(late) / len(rules) if rules else math.nan
+        m["rule_versions_per_memory"] = len(rules) / sum(1 for x in vm if x.get("rules")) if rules else math.nan
+        # provenance classes of the supporting evidence (E exploratory, C author, R informed, I independent)
+        cls = "".join(((x.get("eval") or {}).get("classes") or {}).get("support", "") for x in vm)
+        for c in "ECRI":
+            m[f"evidence_share_{c}"] = cls.count(c) / len(cls) if cls else math.nan
+        gens = [x for x in vm if x.get("kind") == "generalization" and (x.get("eval") or {}).get("verdict") == "supported"]
+        m["established_if_any_other_agent"] = sum(any(c in "RI" for c in x["eval"]["classes"]["support"]) for x in gens)
+        # reversals: memories shown as true that the measurements later demoted
+        rev = [x for x in vm if any(h["from"] in ASSERTED_LAYERS and h["to"] not in ASSERTED_LAYERS
+                                    for h in x.get("history", []))]
+        m["reversals"] = len(rev)
+        exposure = 0
+        for x in rev:
+            t_dem = next(h["t"] for h in x["history"] if h["from"] in ASSERTED_LAYERS and h["to"] not in ASSERTED_LAYERS)
+            exposure += sum(1 for b in br if b["t"] < t_dem for it in b["items"] if it["id"] == x["id"] and it.get("asserted"))
+        m["impressions_before_correction"] = exposure
+        # adversarial: memories the lying agent wrote from its planted statements (false by construction)
+        liars = {a["agent"] for a in d.get("agents", []) if a.get("adversary")}
+        planted = [x for x in vm if x.get("author") in liars and x.get("kind") not in ("report",)]
+        if planted:
+            m["planted_memories"] = len(planted)
+            m["planted_asserted_final"] = sum(x["status"] in ASSERTED_LAYERS for x in planted) / len(planted)
+            m["planted_ever_asserted"] = sum(any(h["to"] in ASSERTED_LAYERS for h in x.get("history", []))
+                                             for x in planted) / len(planted)
     if "mem0_ops" in extra:
         ops = extra["mem0_ops"]
         ok = [o for o in ops if "error" not in o]
@@ -172,6 +201,23 @@ def run_metrics(d: dict, oracle: Oracle | None) -> dict:
         m["final_f1"] = 2 * pr * rc / (pr + rc) if pr == pr and rc == rc and pr + rc else math.nan
         for layer, (t, n) in by_layer.items():
             m[f"precision_{layer}"] = t / n if n else math.nan
+        if ver:   # the verifier's verdicts against the evaluator, on every memory it decided
+            agree = n_dec = narrowed = n_scoped = 0
+            for x in ver.get("verified_memories", []):
+                if x["status"] not in ASSERTED_LAYERS + ("refuted",):
+                    continue
+                t_scoped = oracle.truth(env, x["scoped"], measured, run_key)
+                if t_scoped is None:
+                    continue
+                n_dec += 1
+                agree += (x["status"] in ASSERTED_LAYERS) == t_scoped
+                if x["scoped"].strip() != x["text"].strip():
+                    t_orig = oracle.truth(env, x["text"], measured, run_key)
+                    if t_orig is not None:
+                        n_scoped += 1
+                        narrowed += bool(t_scoped and not t_orig)
+            m["verifier_accuracy_decided"] = agree / n_dec if n_dec else math.nan
+            m["scope_narrowing_rate"] = narrowed / n_scoped if n_scoped else math.nan
         planted = list(d.get("false_statements") or [])
         if planted:
             reach = sum(1 for b in br for it in b["items"]

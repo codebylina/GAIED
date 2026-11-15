@@ -71,6 +71,20 @@
    "verification": {
     "layers": false
    }
+  },
+  {
+   "name": "mem0_verified_posthoc",
+   "memory": "mem0_verified",
+   "verification": {
+    "preregistered": false
+   }
+  },
+  {
+   "name": "mem0_verified_agentindep",
+   "memory": "mem0_verified",
+   "verification": {
+    "independence": "agent"
+   }
   }
  ],
  "name": "verif_main",

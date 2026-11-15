@@ -27,9 +27,11 @@
   Méthode, corrections et protocole : `docs/VERIFICATION_LAYER.md` ; la référence Mem0 seule : branche
   `mem0-baseline` (`docs/MEM0_BASELINE.md`). `memlab/verifier.py` = formalisation par lots (LLM écrit type,
   portée, test exécutable avec règle de décision pré-enregistrée), réévaluation sans LLM (tests dans un seul
-  processus isolé), statuts selon la classe des preuves (exploratoire / confirmation / indépendante).
-  `memlab/verified_memory.py` = Mem0 + statuts dans le prompt. Conditions : `none`, `mem0`, `mem0_textcheck`,
-  `mem0_verified`, `mem0_verified_nolayers` (`bench/configs/quick.json`, `main.json`, `dryrun.json`) ;
+  processus isolé), règle figée sur la fenêtre de la date d'affirmation (empreinte, versions), statuts selon la
+  classe des preuves (E exploratoire / C auteur / R autre agent qui avait vu le souvenir / I autre agent qui ne
+  l'avait pas vu). `memlab/verified_memory.py` = Mem0 + statuts dans le prompt. Conditions : `none`, `mem0`,
+  `mem0_textcheck`, `mem0_verified`, `mem0_verified_nolayers`, `mem0_verified_agentindep`, `mem0_verified_posthoc`
+  (`bench/configs/quick.json`, `main.json`, `dryrun.json`) ; audit manuel des tests : `bench/audit_tests.py` ;
   GAIED : `MEMORY_CONDITION=<condition>` (Mem0 et le vérificateur tournent dans `run-07.py`).
   Tests : `python tests/test_verifier.py`, `python tests/test_memlab.py`. Autres branches : `provmem`, `falda-baseline`.
 - `output/flowcept_buffer_*.jsonl` : provenance de chaque campagne.

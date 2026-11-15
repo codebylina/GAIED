@@ -123,26 +123,148 @@ def test_without_layers_a_supported_verdict_establishes():
     assert v.status_of(["g"])["g"]["status"] == "established"
 
 
-def test_verdict_without_evidence_is_inconclusive():
+def freeze(v, mem_id, code, kind="generalization"):
+    """Give a registered memory a frozen rule, as the formalization step does."""
+    from memlab.verifier import sha
+    d = v.store.get("vmem", mem_id)
+    d.update(kind=kind, code=code, rule={"version": 1, "sha256": sha(code)}, rules=[{"version": 1, "code": code}])
+    v.store.put("vmem", mem_id, d)
+
+
+def test_verdict_without_evidence_is_insufficient():
     store, adapter, v, clock = setup()
     observe(adapter, store, clock, others()[0], "a1")
     v.register("g", "x", "a1")
-    d = v.store.get("vmem", "g")
-    d.update(kind="generalization", code="def test(df):\n    return {'in_scope': [], 'support': [], 'contradict': [], 'verdict': 'supported'}")
-    v.store.put("vmem", "g", d)
+    freeze(v, "g", "def test(df):\n    return {'in_scope': [], 'support': [], 'contradict': [], 'verdict': 'supported'}")
     v._evaluate()
-    assert v.status_of(["g"])["g"]["eval"]["verdict"] == "inconclusive"
+    d = v.status_of(["g"])["g"]
+    assert d["eval"]["verdict"] == "insufficient" and d["status"] == "open" and d["evidence"] == "none", d
 
 
 def test_failing_test_is_repaired_once_then_unverifiable():
     store, adapter, v, clock = setup()
     observe(adapter, store, clock, others()[0], "a1")
     v.register("g", "- something odd", "a1")
-    d = v.store.get("vmem", "g")
-    d.update(kind="generalization", code="def test(df):\n    return 1 / 0")
-    v.store.put("vmem", "g", d)
+    freeze(v, "g", "def test(df):\n    raise ValueError('value 2.71828 too low')")
     v._evaluate()          # error -> rewrite request; the scripted rewrite says untestable
+    d = v.status_of(["g"])["g"]
+    assert d["status"] == "unverifiable"
+    repair = [j for j in store.read_log("v_journal") if j["step"] == "repair"]
+    assert repair and d["scoped"] == "- something odd"           # a repair keeps the statement
+
+
+def test_repair_error_does_not_leak_values():
+    from memlab.verifier import sanitize
+    assert "2.71" not in sanitize("ValueError: value 2.71828 too low") and "<number>" in sanitize("x 1.5e-3")
+
+
+def test_tampered_rule_is_not_run():
+    store, adapter, v, clock = _generalization()
+    d = v.store.get("vmem", "g")
+    d["code"] = d["code"].replace(">=", ">")                     # changed after it was frozen
+    v.store.put("vmem", "g", d)
+    observe(adapter, store, clock, a0_designs()[2], "a2")
+    v._evaluate()
     assert v.status_of(["g"])["g"]["status"] == "unverifiable"
+
+
+# --------------------------------------------------------------------------- pre-registration
+def test_rule_is_written_from_the_claim_time_window_only():
+    store, adapter, v, clock = setup()
+    for e in a0_designs()[:2] + others()[:3]:
+        observe(adapter, store, clock, e, "a1")
+    t_claim = clock()
+    for e in a0_designs()[2:4]:                                   # measured after the claim, before formalization
+        observe(adapter, store, clock, e, "a2")
+    v.register("g", "- Option A0 increases the outcome compared with the other options of slot A.", "a1",
+               written_at=t_claim)
+    while v.step():
+        pass
+    d = v.status_of(["g"])["g"]
+    assert d["rule"]["window_until"] == t_claim and d["rule"]["max_t_seen"] <= t_claim, d["rule"]
+    assert "C" not in d["eval"]["classes"]["support"] and "I" in d["eval"]["classes"]["support"]
+
+
+def test_posthoc_ablation_rewrites_the_rule_after_new_data():
+    store, adapter, v, clock = _generalization(preregistered=False)
+    observe(adapter, store, clock, a0_designs()[2], "a2")
+    while v.step():
+        pass
+    d = v.status_of(["g"])["g"]
+    assert len(d["rules"]) >= 2 and d["rules"][-1]["reason"] == "posthoc" and d["rule"]["window_until"] is None
+
+
+# --------------------------------------------------------------------------- independence
+def _show(store, clock, agent, mem_id):
+    store.append("briefings", {"agent": agent, "node": "propose", "iteration": 0, "t": clock(), "chars": 0,
+                               "items": [{"id": mem_id, "kind": "claim", "asserted": None, "text": ""}]})
+
+
+def test_informed_replication_is_not_independent():
+    store, adapter, v, clock = _generalization()
+    _show(store, clock, "a2", "g")                               # a2 reads the claim, then tests it
+    observe(adapter, store, clock, a0_designs()[2], "a2")
+    while v.step():
+        pass
+    d = v.status_of(["g"])["g"]
+    assert d["status"] == "supported" and "R" in d["eval"]["classes"]["support"] and "I" not in d["eval"]["classes"]["support"], d["eval"]
+    observe(adapter, store, clock, a0_designs()[3], "a3")       # a3 never saw it
+    while v.step():
+        pass
+    d = v.status_of(["g"])["g"]
+    assert d["status"] == "established" and d["eval"]["independent_agents"] == ["a3"]
+
+
+def test_agent_independence_ablation_ignores_exposure():
+    store, adapter, v, clock = _generalization(independence="agent")
+    _show(store, clock, "a2", "g")
+    observe(adapter, store, clock, a0_designs()[2], "a2")
+    while v.step():
+        pass
+    assert v.status_of(["g"])["g"]["status"] == "established"
+
+
+def test_remeasurement_of_an_old_design_is_exploratory():
+    store, adapter, v, clock = _generalization()
+    observe(adapter, store, clock, a0_designs()[0], "a2")       # same design as before the claim
+    while v.step():
+        pass
+    d = v.status_of(["g"])["g"]
+    assert d["status"] == "hypothesis" and set(d["eval"]["classes"]["support"]) == {"E"}
+
+
+# --------------------------------------------------------------------------- statuses
+def test_prediction_without_measurement_is_open_report_is_unsupported():
+    store, adapter, v, clock = setup()
+    observe(adapter, store, clock, others()[0], "a1")
+    e = a0_designs()[0]
+    code = ("def test(df):\n    r = df[df['entity'] == '" + e + "']\n"
+            "    return {'in_scope': list(r['id']), 'support': list(r['id']), 'contradict': [], 'verdict': 'supported'}")
+    for mid, kind in (("p", "prediction"), ("r", "report")):
+        v.register(mid, "x", "a1")
+        freeze(v, mid, code, kind)
+    v._evaluate()
+    st = {i: d["status"] for i, d in v.status_of(["p", "r"]).items()}
+    assert st == {"p": "open", "r": "unsupported"}, st
+    observe(adapter, store, clock, e, "a2")
+    v._evaluate()
+    assert v.status_of(["p"])["p"]["status"] == "verified"
+
+
+def test_asserted_then_insufficient_is_contested():
+    store, adapter, v, clock = _generalization()
+    observe(adapter, store, clock, a0_designs()[2], "a1")
+    while v.step():
+        pass
+    assert v.status_of(["g"])["g"]["status"] == "supported"
+    n = store.log_len("obs_log")
+    freeze(v, "g", "def test(df):\n    return {'in_scope': list(df['id']), 'support': [], 'contradict': [], "
+                   "'verdict': 'insufficient'}")
+    observe(adapter, store, clock, others()[3], "a1")
+    v._evaluate()
+    d = v.status_of(["g"])["g"]
+    assert d["status"] == "contested" and d["evidence"] == "insufficient" and n < store.log_len("obs_log")
+    assert store.read_log("v_demotions")[-1]["to"] == "contested"
 
 
 def test_text_mode_judges_wording():

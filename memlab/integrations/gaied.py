@@ -3,7 +3,7 @@ Glue between GAIED (Academy + LangGraph agents, Flowcept provenance) and the mem
 
 Environment:
   MEMORY_CONDITION   a condition of MEMORY_CONFIG: none, mem0, mem0_verified, mem0_textcheck,
-                     mem0_verified_nolayers. Unset: original GAIED, nothing recorded.
+                     mem0_verified_nolayers, mem0_verified_posthoc, mem0_verified_agentindep. Unset: original GAIED, nothing recorded.
   MEMORY_CONFIG      experiment configuration with memory_defaults (default bench/configs/main.json)
   MEMORY_CAMPAIGN_ID namespace of the measurement logs in Redis (default FLOWCEPT_CAMPAIGN_ID)
   MEM0_URL           the Mem0 service started by run-07.py (default http://127.0.0.1:8765)

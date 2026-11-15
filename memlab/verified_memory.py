@@ -5,10 +5,13 @@ Mem0 is used exactly as in the baseline: the same writes, the same search, the s
 the same prompt budget. The layer only (1) checks every memory Mem0 creates against the measurements,
 and (2) presents the memories Mem0 retrieves according to their status:
 
-    VERIFIED AGAINST MEASUREMENTS   verified facts, supported and established generalizations (shown as true)
-    TO TEST                         hypotheses: supported only by the evidence that suggested them
+    VERIFIED AGAINST MEASUREMENTS   verified reports, supported and established generalizations (shown as true)
+    TO TEST                         hypotheses (only the evidence that suggested them) and open memories
+                                    (no or insufficient evidence yet)
+    CONTESTED                       were verified; the new measurements no longer support them
     NOT CHECKED YET                 memories the layer has not processed yet
-    NOT BACKED BY ANY MEASUREMENT   facts about measurements that do not exist; untestable memories
+    NO MEASUREMENT ON RECORD        reports of measurements the provenance does not contain
+    CANNOT BE CHECKED               untestable memories, or tests that could not run
     KNOWN FALSE                     memories the measurements contradict
 
 Agents that were shown a memory as true and whose status later dropped get a notice in their next prompt.
@@ -21,9 +24,11 @@ from .verifier import ASSERTED, Verifier
 
 SECTIONS = [
     ("VERIFIED AGAINST MEASUREMENTS:", ("verified", "established", "supported", "accepted"), True),
-    ("TO TEST (hypotheses, not confirmed by new measurements yet):", ("hypothesis",), None),
+    ("TO TEST (not confirmed by new measurements yet):", ("hypothesis", "open"), None),
+    ("CONTESTED (no longer supported by the new measurements):", ("contested",), None),
     ("NOT CHECKED YET:", ("pending",), None),
-    ("NOT BACKED BY ANY MEASUREMENT:", ("unsupported", "unverifiable"), None),
+    ("NO MEASUREMENT ON RECORD (reported results the provenance does not contain):", ("unsupported",), None),
+    ("CANNOT BE CHECKED AGAINST MEASUREMENTS:", ("unverifiable",), None),
     ("KNOWN FALSE (contradicted by measurements):", ("refuted",), False),
 ]
 
@@ -37,11 +42,12 @@ class VerifiedMem0Memory(Mem0Memory):
         if isinstance(self.backend, LocalMem0):
             self.backend.on_added = self.on_mem0_added
 
-    def on_mem0_added(self, events, agent) -> None:
+    def on_mem0_added(self, events, agent, written_at=None) -> None:
+        """written_at: when the agent wrote the text Mem0 extracted these memories from (the claim time)."""
         for e in events or []:
             ev = str(e.get("event", "ADD")).upper()
             if ev in ("ADD", "UPDATE") and e.get("id"):
-                self.verifier.register(str(e["id"]), str(e.get("memory", "")), agent)
+                self.verifier.register(str(e["id"]), str(e.get("memory", "")), agent, written_at)
             elif ev == "DELETE" and e.get("id"):
                 self.verifier.forget(str(e["id"]))
 
@@ -51,13 +57,15 @@ class VerifiedMem0Memory(Mem0Memory):
     def _label(self, d: dict) -> str:
         ev = d.get("eval") or {}
         text = d.get("scoped") or d.get("text")
-        if d["status"] in ("supported", "established", "hypothesis") and ev:
-            cls = ev.get("classes", {})
+        if d["status"] in ("supported", "established", "hypothesis", "contested", "open") and ev:
+            sup = ev.get("classes", {}).get("support", "")
             extra = f" [{len(ev.get('support', []))} for, {len(ev.get('contradict', []))} against"
             if d["status"] == "established":
-                extra += f"; confirmed by {len(ev.get('independent_agents', []))} other agent(s)"
-            elif d["status"] == "hypothesis" and cls.get("support") and set(cls["support"]) == {"E"}:
+                extra += f"; confirmed by {len(ev.get('independent_agents', []))} other agent(s) who had not seen it"
+            elif d["status"] == "hypothesis" and sup and set(sup) == {"E"}:
                 extra += "; only the evidence that suggested it"
+            elif d["status"] == "open":
+                extra += "; not enough evidence yet"
             return text + extra + "]"
         return text
 

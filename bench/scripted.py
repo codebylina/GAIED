@@ -48,10 +48,10 @@ GEN_TEST = """def test(df):
     inside = ok[ok[col] == {o}]
     ref = ok[ok[col] != {o}]['value'].mean() if (ok[col] != {o}).any() else None
     if ref is None or len(inside) == 0:
-        return {{'in_scope': [], 'support': [], 'contradict': [], 'stats': {{}}, 'verdict': 'inconclusive'}}
+        return {{'in_scope': [], 'support': [], 'contradict': [], 'stats': {{}}, 'verdict': 'insufficient'}}
     good = inside[inside['value'] {op} ref]
     bad = inside[~(inside['value'] {op} ref)]
-    v = 'supported' if len(good) >= 2 and len(good) > len(bad) else 'contradicted' if len(bad) >= 2 and len(bad) > len(good) else 'inconclusive'
+    v = 'supported' if len(good) >= 2 and len(good) > len(bad) else 'contradicted' if len(bad) >= 2 and len(bad) > len(good) else 'insufficient'
     return {{'in_scope': list(ok['id']), 'support': list(good['id']), 'contradict': list(bad['id']),
             'stats': {{'ref': float(ref)}}, 'verdict': v}}
 """
@@ -61,7 +61,7 @@ FACT_TEST = """def test(df):
     ok = rows[rows['status'] == 'ok']
     good = ok[(ok['value'] - {v}).abs() <= 0.05 * max(1.0, abs({v}))]
     bad = ok[(ok['value'] - {v}).abs() > 0.05 * max(1.0, abs({v}))]
-    v = 'supported' if len(good) else 'contradicted' if len(bad) else 'inconclusive'
+    v = 'supported' if len(good) else 'contradicted' if len(bad) else 'insufficient'
     return {{'in_scope': list(rows['id']), 'support': list(good['id']), 'contradict': list(bad['id']), 'stats': {{}}, 'verdict': v}}
 """
 
@@ -82,7 +82,7 @@ def scripted_verifier(user: str, text_mode: bool) -> str:
             out.append(f'### {mid}\n{{"kind": "generalization", "scoped_statement": "{m.group(0)} the outcome"}}\n```python\n{code}```')
         elif f:
             code = FACT_TEST.format(e=f.group(1), v=float(f.group(2)))
-            out.append(f'### {mid}\n{{"kind": "fact", "scoped_statement": "{f.group(1)} gave {f.group(2)}"}}\n```python\n{code}```')
+            out.append(f'### {mid}\n{{"kind": "report", "scoped_statement": "{f.group(1)} gave {f.group(2)}"}}\n```python\n{code}```')
         else:
             out.append(f'### {mid}\n{{"kind": "untestable", "scoped_statement": "n/a"}}')
     return "\n".join(out)

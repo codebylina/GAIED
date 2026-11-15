@@ -116,10 +116,10 @@ def start_memory_service():
     if gaied.condition_spec()['memory'] == 'mem0_verified':   # the verification layer runs here too
         verifier = gaied.verifier_from_env(RedisStore.connect(gaied.campaign()), LLM(usage=usage))
 
-        def on_added(events, agent):
+        def on_added(events, agent, written_at=None):
             for e in events or []:
                 if str(e.get('event', 'ADD')).upper() in ('ADD', 'UPDATE') and e.get('id'):
-                    verifier.register(str(e['id']), str(e.get('memory', '')), agent)
+                    verifier.register(str(e['id']), str(e.get('memory', '')), agent, written_at)
         local.on_added = on_added
 
         def loop():
