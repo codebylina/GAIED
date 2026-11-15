@@ -96,6 +96,7 @@ def main(path: str | None) -> int:
     llm_total_s, llm_calls, empty_tool_calls, sims, sim_errors = 0.0, 0, 0, 0, 0
     xtb_runs = Counter()   # canonical molecule -> number of actual xTB computations
     tool_calls = Counter()  # canonical molecule -> number of tool requests by the LLM
+    s3m = Counter()         # [s3m] memory operations recorded in the provenance
 
     for r in records:
         st = r.get("subtype")
@@ -104,7 +105,17 @@ def main(path: str | None) -> int:
         if r.get("started_at") and r.get("ended_at"):
             dur = r["ended_at"] - r["started_at"]
 
-        if st == "langgraph_node":
+        if st == "s3m":   # [s3m] shared-memory operation (reuse, wait, lesson, verification, briefing)
+            act = r.get("activity_id", "")
+            s3m[act] += 1
+            if act == "s3m.verify_lesson":
+                s3m["verdict:" + str(gen.get("status"))] += 1
+            if act in ("s3m.reuse", "s3m.blocked", "s3m.verify_lesson"):
+                what = used.get("entity") or used.get("lesson_id")
+                outcome = gen.get("value", gen.get("status", gen.get("reason")))
+                print(f"[mem]   {act[4:]:<13} {_short(what, 28):<28} -> {_short(outcome, 40)}")
+
+        elif st == "langgraph_node":
             name = (r.get("custom_metadata") or {}).get("node_name") or r.get("activity_id")
             print(f"[node]  {name:<13} {'' if dur is None else f'{dur:7.1f} s'}")
 
@@ -153,6 +164,13 @@ def main(path: str | None) -> int:
         print(f"xTB computations         : {sum(xtb_runs.values())} for {len(xtb_runs)} distinct molecules")
         print(f"DUPLICATE computations   : {wasted}" + (
             "  (" + ", ".join(f"{m} ×{n}" for m, n in sorted(dup.items(), key=lambda x: -x[1])) + ")" if dup else ""))
+    if s3m:   # [s3m]
+        print("-" * 60)
+        print(f"Shared memory (S3M)      : {s3m['s3m.reuse']} results reused (xTB runs avoided), "
+              f"{s3m['s3m.wait']} waits, {s3m['s3m.blocked']} known failures not retried")
+        print(f"Lessons                  : {s3m['s3m.propose_lesson']} proposed; verifications: "
+              + ", ".join(f"{k[8:]}={v}" for k, v in sorted(s3m.items()) if k.startswith("verdict:")))
+        print(f"Briefings                : {s3m['s3m.briefing']}")
     return 0
 
 

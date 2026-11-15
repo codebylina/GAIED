@@ -92,6 +92,10 @@ async def main() -> int:
             print('All agents completed.')
         except (KeyboardInterrupt, asyncio.CancelledError):
             print('\nShutting down agents...')
+        finally:  # [s3m] final verification pass and summary of the shared memory
+            from dataclasses import asdict
+            from s3m.integrations.gaied import print_report
+            print_report(asdict(XTBConfig()))
 
     return 0
 

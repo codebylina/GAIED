@@ -5,6 +5,7 @@ import logging
 import os
 import sys
 from concurrent.futures import ProcessPoolExecutor
+from dataclasses import asdict  # [s3m]
 from dataclasses import dataclass
 from dataclasses import field
 from io import StringIO
@@ -412,6 +413,30 @@ class XTBSimulationAgent(Agent):
         import uuid as _uuid
         self.agent_name = f'{self.search_state.seed}#{_uuid.uuid4().hex[:6]}'
 
+        # [s3m] shared memory of the team (None unless S3M=true): memory operations are written to
+        # this agent's Flowcept provenance, linked to the current action and campaign
+        from s3m.integrations import gaied as _s3m
+        self.xtb_params = asdict(self.config)
+        self.memory = _s3m.from_env(
+            self.agent_name, self.xtb_params,
+            sink=self._academy_interceptor.intercept_task if self._academy_interceptor else None,
+            context=self._prov_ids,
+        )
+        logger.warning('S3M shared memory %s for agent %s',
+                       f'ENABLED ({self.memory.namespace})' if self.memory else 'disabled', self.agent_name)
+
+    def _prov_ids(self) -> dict:  # [s3m] Flowcept ids of the current action, for memory records
+        ids = {}
+        if self._academy_interceptor is not None:
+            try:
+                from flowcept.agents.academy.academy_plugin import _current_action_task_id
+                ids['parent_task_id'] = _current_action_task_id.get(None)
+            except Exception:
+                pass
+            ids['workflow_id'] = self._academy_interceptor._workflow_id
+            ids['campaign_id'] = self._academy_interceptor._campaign_id
+        return {k: v for k, v in ids.items() if v}
+
     async def agent_on_shutdown(self) -> None:
         if self._lg_interceptor is not None:
             try:
@@ -494,7 +519,13 @@ class XTBSimulationAgent(Agent):
                     parent_task_id, workflow_id, campaign_id,
                 )
 
-        ionization_energy = await _run_xtb()
+        if getattr(self, 'memory', None) is not None:  # [s3m] reuse / wait / claim -> compute -> record
+            ionization_energy = await self.memory.get_or_compute(
+                smiles, _run_xtb, method='xtb', params=self.xtb_params,
+                provenance={'parent_task_id': parent_task_id} if parent_task_id else None,
+            )
+        else:
+            ionization_energy = await _run_xtb()
         self.molecule_cache[smiles] = ionization_energy
         return ionization_energy
 
@@ -520,7 +551,7 @@ class XTBSimulationAgent(Agent):
             'status': 'ERROR' if error else 'FINISHED',
             'started_at': started_at,
             'ended_at': ended_at,
-            'used': {'smiles': smiles},
+            'used': {'smiles': smiles, 'xtb_config': asdict(self.config)},  # [s3m] parameters of the experiment
             'generated': {'ionization_energy': result} if result is not None else None,
             'stderr': str(error) if error else None,
             'custom_metadata': {
@@ -551,6 +582,11 @@ class XTBSimulationAgent(Agent):
         search space.
         """
 
+        from s3m.integrations import gaied as _s3m  # [s3m]
+
+        def _memory_text(node: str) -> str:  # [s3m] bounded summary of the shared memory for a prompt
+            return _s3m.briefing(getattr(self, 'memory', None), self.xtb_params, self._prov_ids(), node)
+
         async def plan(state: SearchState) -> SearchState:
             response = await self.reasoning_llm.ainvoke(
                 [
@@ -579,6 +615,7 @@ class XTBSimulationAgent(Agent):
                         content=(
                             'Look for molecules with high ionization energy '
                             f'starting with the molecule {state.seed}'
+                            + _memory_text('plan')  # [s3m]
                         ),
                     ),
                 ],
@@ -599,6 +636,10 @@ class XTBSimulationAgent(Agent):
             previously_simulated = ' '.join(
                 state.simulated_molecules.keys(),
             )
+            team_known = _s3m.known_molecules(getattr(self, 'memory', None), self.xtb_params)  # [s3m]
+            if team_known:  # [s3m] molecules of the WHOLE team (measured, failed, running)
+                previously_simulated = ' '.join(dict.fromkeys([*state.simulated_molecules, *team_known]))
+            memory_text = _memory_text('tool_calling')  # [s3m]
             response = await self.llm_with_tools.ainvoke(
                 [
                     SystemMessage(
@@ -617,6 +658,7 @@ class XTBSimulationAgent(Agent):
                             f'Plan: {state.plan}\n\n'
                             f'Simulated Molecules: {previously_simulated} '
                             'Do not repeat those molecules in the tool calls.'
+                            + memory_text  # [s3m]
                         ),
                     ),
                 ],
@@ -736,6 +778,8 @@ class XTBSimulationAgent(Agent):
                 ],
             )
             logger.info(f'Conclusions: {response}')
+            await _s3m.learn(getattr(self, 'memory', None), self.generation_llm,  # [s3m] lessons
+                             response.content, self.xtb_params, self._prov_ids())
             new_state = SearchState(
                 seed=state.seed,
                 plan=response.content,
@@ -822,6 +866,7 @@ class XTBSimulationAgent(Agent):
                             f'\t{conclusions}\n\n'
                             'Critique:\n'
                             f'\t{state.critique}'
+                            + _memory_text('update')  # [s3m] verified lessons of the team for the new plan
                         ),
                     ),
                 ],
