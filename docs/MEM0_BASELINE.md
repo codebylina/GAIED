@@ -54,7 +54,7 @@ docker compose build gaied
 Le banc d'essai : d'abord l'essai léger, 1 scénario et 1 graine, puis l'analyse.
 ```powershell
 docker compose run --rm --no-deps -e LLM_PROVIDER=ollama -e OLLAMA_URL=http://host.docker.internal:11434 -e OLLAMA_MODEL=qwen3.5:9b -e LLM_MODEL=qwen3.5:9b -e EMBED_MODEL=nomic-embed-text gaied python -m bench.run bench/configs/quick.json
-docker compose run --rm --no-deps -e LLM_PROVIDER=ollama -e OLLAMA_URL=http://host.docker.internal:11434 -e OLLAMA_MODEL=qwen3.5:9b -e LLM_MODEL=qwen3.5:9b gaied python -m bench.analyze results/quick --reference mem0
+docker compose run --rm --no-deps -e LLM_PROVIDER=ollama -e OLLAMA_URL=http://host.docker.internal:11434 -e OLLAMA_MODEL=qwen3.5:9b -e LLM_MODEL=qwen3.5:9b gaied python -m bench.analyze results/mem0_quick --reference mem0
 ```
 
 Une campagne GAIED avec Mem0. `MEMORY_CONDITION=none` donne la même campagne sans mémoire, avec la même mesure.
@@ -65,6 +65,6 @@ docker compose run --rm --no-deps gaied python -m bench.analyze_gaied results/ga
 
 Tests sans LLM : `python tests/test_memlab.py`. Essai à blanc complet :
 `python -m bench.run bench/configs/dryrun.json`, puis
-`LLM_PROVIDER=scripted python -m bench.analyze results/dryrun`.
+`LLM_PROVIDER=scripted python -m bench.analyze results/mem0_dryrun`.
 
 Branchements dans le code d'Amal marqués `[memlab]`, et correctif des relances `[gaied-fix]`.

@@ -43,7 +43,7 @@
    "memory": "mem0"
   }
  ],
- "name": "quick",
+ "name": "mem0_quick",
  "seeds": [
   1
  ]

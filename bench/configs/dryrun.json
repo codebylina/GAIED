@@ -55,7 +55,7 @@
    "memory": "mem0"
   }
  ],
- "name": "dryrun",
+ "name": "mem0_dryrun",
  "scripted": true,
  "seeds": [
   1,

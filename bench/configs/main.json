@@ -55,7 +55,7 @@
    "memory": "mem0"
   }
  ],
- "name": "main",
+ "name": "mem0_main",
  "seeds": [
   1,
   2,
