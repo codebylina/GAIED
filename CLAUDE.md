@@ -28,7 +28,7 @@
   `memlab/` = cadre de mesure commun (interface `Memory`, LLM, adaptateurs, `mem0_memory.py` : Mem0 local
   ou service HTTP dans `run-07.py`, car les agents sont dans plusieurs processus). `bench/` = banc
   synthétique à vérité connue (`quick.json`, `main.json`, `dryrun.json`). GAIED : `MEMORY_CONDITION=none|mem0`,
-  `MEMORY_EXPORT=<fichier>`. Le Dockerfile ajoute `mem0ai` et `ollama` (reconstruire l'image une fois).
+  `MEMORY_EXPORT=<fichier>`. Le Dockerfile ajoute `mem0ai`, `ollama`, `fastembed` (BM25) et spaCy (reconstruire l'image une fois).
   Tests : `python tests/test_memlab.py`. Autres branches : `provmem`, `falda-baseline`, `evident-memory`.
 - `output/flowcept_buffer_*.jsonl` : provenance de chaque campagne.
 
