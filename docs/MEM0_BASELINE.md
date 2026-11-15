@@ -31,8 +31,12 @@ Branche `mem0-baseline`, partie de `docker-local`, indépendante des autres bran
 3. **Une fenêtre de contexte suffisante.** Le prompt d'extraction de Mem0 fait environ 36 000
    caractères, soit environ 9 000 tokens. C'est plus que les 8192 tokens des agents, et Ollama le
    couperait sans prévenir. Mem0 reçoit donc 16 384 tokens (`MEM0_NUM_CTX`).
-4. **Sans les options lourdes.** Ni `mem0ai[extras]` (recherche BM25 avec fastembed) ni `mem0ai[nlp]`
-   (spaCy) ne sont installés. Mem0 cherche par le sens seulement.
+4. **Configuration complète de la recherche.** La recherche par mots-clés (BM25, avec `fastembed`) et la
+   lemmatisation (spaCy, `en_core_web_sm`) sont installées, donc Mem0 combine recherche par le sens et
+   par mots-clés, comme dans sa configuration complète. En revanche, le paquet entier `mem0ai[extras]`
+   n'est pas installé : il ajoute torch, d'autres bases vectorielles et une autre version de LangChain,
+   inutiles ici. Le rapport indique si ces deux parties étaient bien actives
+   (`mem0_bm25_keyword_search`, `mem0_spacy_lemmatization` = 1).
 
 ## Mesure (`memlab/`, `bench/`)
 

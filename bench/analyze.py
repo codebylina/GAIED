@@ -97,6 +97,8 @@ def run_metrics(d: dict, oracle: Oracle | None) -> dict:
         m["mem0_write_s"] = st.mean(o["seconds"] for o in ok) if ok else math.nan
         m["mem0_queue_wait_s"] = st.mean(o["queued_s"] for o in ok) if ok else math.nan
         m["mem0_memories"] = len(extra.get("mem0_memories") or [])
+        for k, v in (extra.get("mem0_features") or {}).items():
+            m[f"mem0_{k}"] = int(bool(v))
     if "claims" in extra:
         lags = []
         for c in extra["claims"]:

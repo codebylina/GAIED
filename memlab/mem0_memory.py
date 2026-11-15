@@ -149,6 +149,20 @@ class LocalMem0:
                  "agent": (r.get("agent_id") or (r.get("metadata") or {}).get("agent_id"))}
                 for r in (res.get("results", res) if isinstance(res, dict) else res)]
 
+    def features(self) -> dict:
+        """Which optional parts of Mem0 are active (to check the baseline runs in full configuration)."""
+        out = {}
+        try:
+            out["bm25_keyword_search"] = bool(self.m.vector_store._get_bm25_encoder())
+        except Exception:
+            out["bm25_keyword_search"] = False
+        try:
+            from mem0.utils.spacy_models import get_nlp_lemma
+            out["spacy_lemmatization"] = get_nlp_lemma() is not None
+        except Exception:
+            out["spacy_lemmatization"] = False
+        return out
+
     def all(self) -> list[dict]:
         with self.lock:
             res = self.m.get_all(filters={"run_id": self.run_id}, top_k=100_000)
@@ -290,6 +304,7 @@ class Mem0Memory(Memory):
         out = {}
         if isinstance(self.backend, LocalMem0):
             out["mem0_ops"] = self.backend.ops
+            out["mem0_features"] = self.backend.features()
             try:
                 out["mem0_memories"] = self.backend.all()
             except Exception as exc:
