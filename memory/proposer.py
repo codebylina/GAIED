@@ -31,7 +31,9 @@ Answer with ONLY a JSON object:
   {"kind": "none"}
       the lesson cannot be checked with the measurements (advice, plan)
 "evidence" lists the references (o1, o2...) of the measurements the lesson is based on.
-Give at most %d lessons. Only state what the measurements show. Prefer feature_effect and comparison."""
+Give at most %d lessons. Only state what the measurements show. Prefer feature_effect and comparison.
+Do not repeat a lesson that is obvious from a single measurement, and do not invent lessons:
+if the measurements do not support any new lesson, answer exactly {"lessons": []}."""
 
 
 class LessonProposer:

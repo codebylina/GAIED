@@ -362,6 +362,40 @@ def test_same_lesson_proposed_twice_is_merged_and_reverified():
     assert a.lessons.counts()["verified"] == 1 and sum(a.lessons.counts().values()) == 1
 
 
+def test_lesson_extraction_only_with_new_data_and_one_agent_at_a_time():
+    ns = f"test-{uuid.uuid4().hex[:8]}"
+    a, b = mem("a", ns), mem("b", ns)
+    assert a.begin_extraction(M, P, min_new=3) is None             # no data yet
+    for w, v in (("ant", 1.0), ("bee", 2.0), ("cat", 3.0)):
+        measure(a, w, v)
+    slot = a.begin_extraction(M, P, min_new=3)
+    assert slot is not None and slot[1] == 3
+    assert b.begin_extraction(M, P, min_new=3) is None             # a is extracting: b skips
+    a.end_extraction(M, P, slot, success=True)
+    assert b.begin_extraction(M, P, min_new=3) is None             # nothing new since a's extraction
+    measure(b, "dog", 4.0)
+    measure(b, "elk", 5.0)
+    assert b.begin_extraction(M, P, min_new=3) is None             # 2 new < 3
+    measure(b, "fox", 6.0)
+    slot = b.begin_extraction(M, P, min_new=3)
+    assert slot is not None
+    b.end_extraction(M, P, slot, success=False)                   # LLM failed: data stays new
+    slot = a.begin_extraction(M, P, min_new=3)
+    assert slot is not None and slot[1] == 6
+    a.end_extraction(M, P, slot, success=True)
+    stats = a.report()["stats"]
+    assert stats["extractions"] == 2 and stats["extractions_skipped_busy"] == 1
+    assert stats["extractions_skipped_no_new_data"] == 3
+
+
+def test_empty_answer_gives_no_lesson():
+    m = mem()
+    _team(m)
+    system, _, refs = m.lesson_prompt("nothing new", M, P)
+    assert '{"lessons": []}' in system
+    assert m.propose_from_llm('{"lessons": []}', refs) == []
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in list(globals().items()):

@@ -96,7 +96,19 @@ l'analyse de Nadjiba. Une notification manquée ne fait rien perdre : l'état es
 **Transformer les conclusions en leçons** (`memory/proposer.py`). Le module construit le prompt et lit la
 réponse, **sans appeler de LLM lui-même** : chaque workflow utilise son propre client. Les observations
 sont montrées au LLM sous des références courtes (`o1`, `o2`…), qui sont ensuite remplacées par les
-vrais identifiants.
+vrais identifiants. Le prompt demande explicitement de renvoyer `{"lessons": []}` quand les mesures
+ne permettent aucune nouvelle leçon.
+
+**Économie d'appels LLM.** L'extraction coûte un appel LLM. Elle n'a lieu que si elle peut apprendre
+quelque chose (`begin_extraction` / `end_extraction`) :
+
+- **assez de nouvelles données** : au moins `MEMORY_LESSON_MIN_NEW` observations (3 par défaut) sont
+  arrivées sous cette condition depuis la dernière extraction ;
+- **un seul agent à la fois** : un verrou de la coordination (`_extract/{condition}`) empêche deux agents
+  d'extraire des leçons des mêmes données.
+
+Si l'appel LLM échoue, les données restent « nouvelles » pour l'extraction suivante. Les compteurs
+`extractions`, `extractions_skipped_no_new_data` et `extractions_skipped_busy` mesurent l'économie.
 
 ### 3.3 Vérification (`memory/verification.py`)
 
@@ -181,7 +193,7 @@ condition, statut et entité.
 | `compute_ionization_energy` | `get_or_compute` : réutilisation, attente, échec connu, ou calcul sous réservation |
 | `_record_xtb_task` | ajoute les paramètres xTB (`used.xtb_config`) à l'enregistrement Flowcept |
 | `plan`, `tool_calling`, `update` | ajoutent le briefing au prompt ; `tool_calling` liste aussi les molécules de **toute l'équipe** |
-| `conclude` | conclusions → leçons (1 appel LLM supplémentaire), puis vérification immédiate |
+| `conclude` | conclusions → leçons (1 appel LLM, seulement s'il y a assez de nouvelles données et qu'aucun autre agent ne le fait déjà), puis vérification immédiate |
 | `run-07.py` | vérification finale et résumé de la mémoire |
 
 Variables d'environnement (`docker/docker-compose.yml`) :
@@ -191,6 +203,7 @@ Variables d'environnement (`docker/docker-compose.yml`) :
 | `MEMORY` | `true` dans Docker | `false` = GAIED original (la référence) |
 | `MEMORY_NAMESPACE` | vide | vide = une mémoire par campagne ; un nom fixe (ex. `gaied`) = mémoire partagée entre campagnes |
 | `MEMORY_LESSONS` | `true` | `false` = pas de leçons, seulement coordination et observations |
+| `MEMORY_LESSON_MIN_NEW` | `3` | nouvelles observations nécessaires avant une nouvelle extraction de leçons |
 | `MEMORY_CLAIM_TTL` | `300` | durée (s) avant qu'une réservation d'agent planté expire |
 | `MEMORY_BRIEFING_CHARS` | `2500` | taille maximale du texte mémoire dans un prompt |
 
@@ -287,8 +300,11 @@ Ces ajouts restent dans le cadre de la proposition :
   molécules.
 - **Une vérification volontairement simple.** Les leçons sans affirmation vérifiable restent en
   `needs_review` : elles demandent une expérience ou un humain.
-- **Le coût d'un appel LLM supplémentaire** par itération pour extraire les leçons
-  (`MEMORY_LESSONS=false` pour le supprimer).
+- **Le coût des appels LLM d'extraction.** Dans le test de bout en bout, il y a eu 2 à 3 extractions au
+  lieu de 6 (une par agent et par itération), soit 24-25 appels LLM au lieu de 28 ; la référence sans
+  mémoire en fait 22. `MEMORY_LESSONS=false` supprime l'extraction.
+- **Les leçons ne voient que les 40 observations les plus récentes** de la condition. Des leçons tirées
+  de tout l'historique, calculées sans LLM, sont une piste pour la suite.
 - **Pas de mécanisme dédié pour les corrections de l'analyse en ligne.** Pour l'instant, elle peut
   écrire une leçon, ou une revue avec `review(...)`. Les directives dédiées ont été reportées, comme
   dans la proposition.

@@ -272,6 +272,33 @@ class Memory:
             observations = self.obs.in_condition(condition_id(method, params), limit=self.proposer.max_rows)
         return self.proposer.prompt(conclusions, observations)
 
+    def begin_extraction(self, method: str, params: dict | None = None, min_new: int = 3,
+                         ttl_s: float = 600.0) -> tuple[str, int] | None:
+        """Decide whether turning conclusions into lessons (an LLM call) is worth it now.
+        Granted only when at least `min_new` observations arrived under this condition since the last
+        extraction, and only to one agent at a time (a claim of the coordination component).
+        Returns (token, number of observations) to pass to end_extraction, or None to skip."""
+        cond = condition_id(method, params)
+        n_obs = int(self.r.zcard(f"{self.p}:cond:{cond}:obs"))
+        done = int(self.r.get(f"{self.p}:cond:{cond}:extracted") or 0)
+        if n_obs - done < max(1, min_new):
+            self._stat("extractions_skipped_no_new_data")
+            return None
+        token = self.coord.claim(f"_extract/{cond}", self.agent, ttl_s=ttl_s)
+        if token is None:
+            self._stat("extractions_skipped_busy")
+            return None
+        return token, n_obs
+
+    def end_extraction(self, method: str, params: dict | None, slot: tuple[str, int], success: bool) -> None:
+        """Close an extraction: on success, the observations it saw no longer count as new."""
+        cond = condition_id(method, params)
+        token, n_obs = slot
+        if success:
+            self.r.set(f"{self.p}:cond:{cond}:extracted", n_obs)
+            self._stat("extractions")
+        self.coord.release(f"_extract/{cond}", token)
+
     def _lesson_key(self, statement: str, claim: dict | None, cond: str | None) -> str:
         """Two proposals are the same lesson when they make the same checkable claim under the same
         condition (or, without a checkable claim, have the same wording)."""

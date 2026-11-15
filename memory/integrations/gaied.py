@@ -6,7 +6,9 @@ Environment:
   MEMORY           "true" to enable the shared memory (unset / "false": original GAIED, the baseline)
   MEMORY_NAMESPACE    memory namespace in Redis. Default: the Flowcept campaign id (one memory per run).
                    Set a fixed name (e.g. "gaied") to accumulate knowledge across campaigns.
-  MEMORY_LESSONS      "true" (default): conclusions are turned into lessons (one extra LLM call per iteration)
+  MEMORY_LESSONS      "true" (default): conclusions are turned into lessons (one extra LLM call, only
+                   when there is enough new data and no other agent is already doing it)
+  MEMORY_LESSON_MIN_NEW  new observations needed since the last extraction (default 3)
   MEMORY_CLAIM_TTL    seconds before the claim of a silent (crashed) agent expires (default 300)
   MEMORY_BRIEFING_CHARS  size limit of the memory text added to a prompt (default 2500)
   REDIS_HOST       Redis host (same instance as Academy)
@@ -71,16 +73,28 @@ def known_molecules(memory: Memory | None, xtb_params: dict, limit: int = 100) -
 async def learn(memory: Memory | None, llm, conclusions: str, xtb_params: dict,
                 provenance: dict | None = None) -> list[dict]:
     """Turn the conclusions of an iteration into lessons (LLM), then verify them (rules).
+    The LLM call is skipped when fewer than MEMORY_LESSON_MIN_NEW observations arrived since the last
+    extraction, or when another agent is already extracting lessons from the same data.
     `llm` is the agent's own client (anything with `await llm.ainvoke(messages)`)."""
     if memory is None or os.environ.get("MEMORY_LESSONS", "true").lower() not in ("1", "true", "yes"):
         return []
     from langchain.messages import HumanMessage, SystemMessage
+    try:
+        slot = memory.begin_extraction(METHOD, xtb_params, int(os.environ.get("MEMORY_LESSON_MIN_NEW", "3")))
+    except Exception as exc:
+        logger.warning("Memory lesson step failed: %s", exc)
+        return []
+    if slot is None:
+        logger.warning("Memory: lesson extraction skipped (no new data, or another agent is on it)")
+        return []
+    success = False
     try:
         system, user, refs = memory.lesson_prompt(conclusions, METHOD, xtb_params)
         if not refs:
             return []
         answer = await llm.ainvoke([SystemMessage(content=system), HumanMessage(content=user)])
         lessons = memory.propose_from_llm(answer.content, refs, provenance=provenance)
+        success = True
         verdicts = dict(memory.verify_pending())
         for l in lessons:
             logger.warning("Memory lesson %s: %s -> %s", l["id"], l["statement"][:80], verdicts.get(l["id"], "queued"))
@@ -88,6 +102,11 @@ async def learn(memory: Memory | None, llm, conclusions: str, xtb_params: dict,
     except Exception as exc:
         logger.warning("Memory lesson step failed: %s", exc)
         return []
+    finally:
+        try:
+            memory.end_extraction(METHOD, xtb_params, slot, success)
+        except Exception as exc:
+            logger.warning("Memory: could not close the extraction: %s", exc)
 
 
 def print_report(xtb_params: dict) -> None:
