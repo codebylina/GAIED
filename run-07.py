@@ -32,7 +32,7 @@ async def main() -> int:
                         ''  # [gaied-docker patch] no conda activate needed in Docker
                     ),
                 ),
-                max_workers_per_node=2,
+                max_workers_per_node=int(os.environ.get('PARSL_MAX_WORKERS', '2')),  # [provmem] one per agent
                 # [gaied-docker patch] a local LLM on CPU can starve the Parsl manager
                 # for minutes; the default (120 s) made Parsl drop both agents (ManagerLost)
                 heartbeat_threshold=int(os.environ.get('PARSL_HEARTBEAT_THRESHOLD', '1200')),
@@ -46,6 +46,7 @@ async def main() -> int:
         executors=executor,
     ) as manager:
         seeds = os.environ.get('SEEDS', 'CNC(N)=O,CC1=C(O)N=C(O)N1').split(',')  # [gaied-docker patch]
+        steward = start_steward()  # [provmem] the memory's background work (judge), if any
 
         agents = []
         for molecule in seeds:
@@ -56,7 +57,7 @@ async def main() -> int:
                         XTBConfig(),
                         molecule,
                         int(os.environ.get('MAX_ITERATIONS', '20')),   # max_iterations  # [gaied-docker patch]
-                        3,   # no_improvement_tolerance
+                        int(os.environ.get('NO_IMPROVEMENT_TOLERANCE', '3')) or None,   # no_improvement_tolerance  # [provmem] 0 = fixed budget
                     ),
                 ),
             )
@@ -92,8 +93,59 @@ async def main() -> int:
             print('All agents completed.')
         except (KeyboardInterrupt, asyncio.CancelledError):
             print('\nShutting down agents...')
+        finally:
+            stop_steward(steward)  # [provmem]
 
     return 0
+
+
+def start_steward():
+    """[provmem] Runs memory.maintain() in a thread while the agents work; None without memory."""
+    import threading
+    import time
+    from provmem.integrations.gaied import memory_from_env
+    memory = memory_from_env()
+    if memory is None:
+        return None
+    stop = threading.Event()
+
+    def loop():
+        while not stop.is_set():
+            try:
+                if memory.maintain() == 0:
+                    time.sleep(1.0)
+            except Exception as exc:
+                logger.warning('memory maintenance failed: %s', exc)
+                time.sleep(5.0)
+    thread = threading.Thread(target=loop, daemon=True)
+    thread.start()
+    print(f'Memory: {memory.name} (condition {os.environ.get("MEMORY_CONDITION")})')
+    return memory, stop, thread
+
+
+def stop_steward(steward) -> None:
+    """[provmem] Final maintenance pass, then export of the memory for the analysis."""
+    if steward is None:
+        return
+    import json
+    memory, stop, thread = steward
+    stop.set()
+    thread.join(timeout=600)
+    try:
+        while memory.maintain():
+            pass
+    except Exception as exc:
+        logger.warning('final memory maintenance failed: %s', exc)
+    path = os.environ.get('MEMORY_EXPORT')
+    if path:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        data = memory.export()
+        data['campaign'] = {'condition': os.environ.get('MEMORY_CONDITION'), 'seeds': os.environ.get('SEEDS'),
+                            'max_iterations': os.environ.get('MAX_ITERATIONS'),
+                            'flowcept_campaign_id': os.environ.get('FLOWCEPT_CAMPAIGN_ID')}
+        with open(path, 'w') as fh:
+            json.dump(data, fh, default=str)
+        print(f'Memory exported to {path}')
 
 
 def _print_perf_summary(perf_csv: str) -> None:

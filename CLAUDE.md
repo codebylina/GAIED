@@ -23,8 +23,15 @@
     ou une API au format OpenAI (`LLM_PROVIDER=openai`, clé dans `docker/.env`).
   - `apply_patches.py`, `patch_stop_rule.py` : correctifs déjà appliqués (ne pas relancer).
   - `summarize_prov.py` : résume la provenance de la dernière campagne.
-- Mémoire : **pas encore de mémoire sur cette branche** (version naïve retirée le 14 nov., gardée sur
-  la branche `archive/naive-memory-v1` ; la version EVIDENT est sur la branche `evident-memory`).
+- Mémoire (branche `provmem`) : **ProvMem**, méthode et protocole dans `docs/PROVMEM.md`.
+  `provmem/` = la mémoire générale (adaptateur de domaine, stockage InMemory/Redis, recherche BM25 +
+  embeddings, juge LLM qui écrit et exécute ses tests dans un bac à sable, couches de confiance,
+  coordination par baux, briefing à budget fixe, directives, références `none/shared_log/rag/mem0`).
+  `provmem/adapters/chemistry.py` + `provmem/integrations/gaied.py` = branchement GAIED (`[provmem]`).
+  `bench/` = banc d'essai synthétique à vérité connue (`bench.run`, `bench.analyze`, `bench.oracle`,
+  `bench/configs/main.json`, `dryrun.json` avec `LLM_PROVIDER=scripted`), `bench.analyze_gaied`.
+  GAIED : `MEMORY_CONDITION=<condition de main.json>`, `MEMORY_EXPORT=<fichier>`; sans elle = original.
+  Tests : `python tests/test_provmem.py` (sans LLM). Anciennes versions : `evident-memory`, `falda-baseline`.
 - `output/flowcept_buffer_*.jsonl` : provenance de chaque campagne.
 
 ## Modifications déjà faites au code d'Amal (marquées `[gaied-docker ...]`)

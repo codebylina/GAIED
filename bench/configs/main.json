@@ -1,0 +1,140 @@
+{
+ "env": {
+  "n_slots": 5,
+  "n_options": 4,
+  "main_scale": 1.0,
+  "interaction_scale": 0.5,
+  "n_interactions": 3,
+  "noise_sd": 0.3,
+  "n_forbidden": 6,
+  "duration_s": 0.0
+ },
+ "memory_defaults": {
+  "briefing_budget_chars": 3000,
+  "lease_ttl_s": 120,
+  "test_timeout_s": 60,
+  "test_repairs": 1,
+  "min_independent": 1,
+  "extra": {
+   "related_k": 5
+  }
+ },
+ "agent": {
+  "pull_rounds": 3,
+  "wait_timeout_s": 120,
+  "refill_rounds": 1
+ },
+ "n_agents": 4,
+ "iterations": 8,
+ "batch_size": 4,
+ "steward_idle_s": 0.5,
+ "scenarios": [
+  {
+   "name": "standard"
+  },
+  {
+   "name": "deceptive",
+   "env": {
+    "deceptive": true,
+    "deception_strength": 3.0
+   }
+  },
+  {
+   "name": "adversarial",
+   "adversary": 0,
+   "n_false": 3
+  },
+  {
+   "name": "crash",
+   "crash_at": 4
+  }
+ ],
+ "conditions": [
+  {
+   "name": "none",
+   "memory": "none",
+   "cfg": {
+    "briefing_budget_chars": 0,
+    "coordination": false,
+    "claims": false
+   }
+  },
+  {
+   "name": "shared_log",
+   "memory": "shared_log",
+   "cfg": {
+    "coordination": false
+   }
+  },
+  {
+   "name": "rag",
+   "memory": "rag",
+   "cfg": {
+    "coordination": false
+   }
+  },
+  {
+   "name": "mem0",
+   "memory": "mem0",
+   "cfg": {
+    "coordination": false
+   }
+  },
+  {
+   "name": "provmem",
+   "memory": "provmem",
+   "cfg": {}
+  },
+  {
+   "name": "provmem_no_coordination",
+   "memory": "provmem",
+   "cfg": {
+    "coordination": false
+   }
+  },
+  {
+   "name": "provmem_no_layers",
+   "memory": "provmem",
+   "cfg": {
+    "layers": false
+   }
+  },
+  {
+   "name": "provmem_text_judge",
+   "memory": "provmem",
+   "cfg": {
+    "judge_mode": "text"
+   }
+  },
+  {
+   "name": "provmem_accept_all",
+   "memory": "provmem",
+   "cfg": {
+    "judge_mode": "accept"
+   }
+  },
+  {
+   "name": "provmem_review",
+   "memory": "provmem",
+   "cfg": {
+    "review": true
+   }
+  },
+  {
+   "name": "provmem_pull",
+   "memory": "provmem",
+   "cfg": {
+    "push": false
+   },
+   "pull": true
+  }
+ ],
+ "name": "main",
+ "seeds": [
+  1,
+  2,
+  3,
+  4,
+  5
+ ]
+}

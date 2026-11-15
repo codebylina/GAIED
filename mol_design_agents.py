@@ -411,6 +411,11 @@ class XTBSimulationAgent(Agent):
         # [provenance-fix] agent name written in the provenance of its xTB tasks
         import uuid as _uuid
         self.agent_name = f'{self.search_state.seed}#{_uuid.uuid4().hex[:6]}'
+        # [provmem] shared memory of the team (None when MEMORY_CONDITION is unset)
+        from provmem.integrations.gaied import memory_from_env
+        self.memory = memory_from_env()
+        if self.memory is not None:
+            self.memory.register_agent(self.agent_name)
 
     async def agent_on_shutdown(self) -> None:
         if self._lg_interceptor is not None:
@@ -511,8 +516,6 @@ class XTBSimulationAgent(Agent):
         campaign_id: str | None,
     ) -> None:
         """Write the provenance record of one xTB computation (subtype parsl_task)."""
-        if self._academy_interceptor is None:
-            return
         task: dict = {
             'task_id': task_id,
             'activity_id': 'compute_ionization_energy',
@@ -534,6 +537,13 @@ class XTBSimulationAgent(Agent):
             task['workflow_id'] = workflow_id
         if campaign_id:
             task['campaign_id'] = campaign_id
+        if getattr(self, 'memory', None) is not None:  # [provmem] the memory reads the same record
+            try:
+                self.memory.ingest(task)
+            except Exception as exc:
+                logger.warning('memory ingest failed: %s', exc)
+        if self._academy_interceptor is None:
+            return
         try:
             self._academy_interceptor.intercept_task(task)
         except Exception as exc:
@@ -550,6 +560,10 @@ class XTBSimulationAgent(Agent):
         ionizationenergy, using the starting molecule as a seed for the
         search space.
         """
+
+        def _mem(node: str, query: str) -> str:  # [provmem] memory block for a prompt
+            from provmem.integrations.gaied import block
+            return block(getattr(self, 'memory', None), self.agent_name, node, query, _iteration)
 
         async def plan(state: SearchState) -> SearchState:
             response = await self.reasoning_llm.ainvoke(
@@ -579,6 +593,7 @@ class XTBSimulationAgent(Agent):
                         content=(
                             'Look for molecules with high ionization energy '
                             f'starting with the molecule {state.seed}'
+                            + _mem('plan', f'molecules with high ionization energy from {state.seed}')  # [provmem]
                         ),
                     ),
                 ],
@@ -617,12 +632,15 @@ class XTBSimulationAgent(Agent):
                             f'Plan: {state.plan}\n\n'
                             f'Simulated Molecules: {previously_simulated} '
                             'Do not repeat those molecules in the tool calls.'
+                            + _mem('propose', str(state.plan))  # [provmem]
                         ),
                     ),
                 ],
             )
             logger.info(f'Tool Calling: {response}')
-            while len(response.tool_calls) == 0:
+            _retries = 0  # [gaied-fix] bounded retries (the original loops forever)
+            while len(response.tool_calls) == 0 and _retries < int(os.environ.get('TOOL_CALL_RETRIES', '3')):
+                _retries += 1
                 logger.warning('Tool calling agent did not call tools!')
                 logger.warning(response)
                 response = await self.llm_with_tools.ainvoke(
@@ -676,15 +694,39 @@ class XTBSimulationAgent(Agent):
             if len(state.tool_calls) == 0:
                 return state
 
+            results = {}
+            calls = state.tool_calls
+            memory = getattr(self, 'memory', None)
+            if memory is not None:  # [provmem] pre-action control: known, failed, being measured
+                decisions = memory.screen(
+                    self.agent_name, [c['args']['smiles'] for c in calls], _iteration)
+                waiting = {}
+                keep = []
+                for c, d in zip(calls, decisions):
+                    if d.action == 'known':
+                        results[c['args']['smiles']] = d.value
+                    elif d.action == 'failed_before':
+                        results[c['args']['smiles']] = f'failed earlier (computed by {d.owner})'
+                    elif d.action == 'in_progress':
+                        waiting[d.entity] = c['args']['smiles']
+                    elif d.action in ('run', 'invalid'):
+                        keep.append(c)
+                if waiting:
+                    got = await asyncio.to_thread(
+                        memory.await_results, self.agent_name, list(waiting),
+                        memory.cfg.lease_ttl_s)
+                    for ent, obs in got.items():
+                        results[waiting[ent]] = obs['value'] if obs['status'] == 'ok' else 'failed'
+                calls = keep
+
             task_to_smiles = {}
-            for tool_call in state.tool_calls:
+            for tool_call in calls:
                 tool = self.tools_by_name[tool_call['name']]
                 task = asyncio.create_task(tool.ainvoke(tool_call['args']))
                 task_to_smiles[task] = tool_call['args']['smiles']
 
-            done, _ = await asyncio.wait(task_to_smiles)
+            done = (await asyncio.wait(task_to_smiles))[0] if task_to_smiles else set()
 
-            results = {}
             for task in done:
                 smiles = task_to_smiles[task]
                 try:
@@ -731,11 +773,17 @@ class XTBSimulationAgent(Agent):
                             'Simulation Results:\n'
                             'Molecule\t\tEnergy\n'
                             f'{results_str}'
+                            + _mem('conclude', str(state.plan))  # [provmem]
                         ),
                     ),
                 ],
             )
             logger.info(f'Conclusions: {response}')
+            if getattr(self, 'memory', None) is not None:  # [provmem] conclusions become claims
+                try:
+                    self.memory.submit_conclusion(self.agent_name, response.content, _iteration)
+                except Exception as exc:
+                    logger.warning('memory submit_conclusion failed: %s', exc)
             new_state = SearchState(
                 seed=state.seed,
                 plan=response.content,
@@ -773,6 +821,7 @@ class XTBSimulationAgent(Agent):
                             f'{results_str}\n\n'
                             'Conclusions:\n'
                             f'\t{conclusions}'
+                            + _mem('critique', str(state.plan))  # [provmem]
                         ),
                     ),
                 ],
@@ -822,6 +871,7 @@ class XTBSimulationAgent(Agent):
                             f'\t{conclusions}\n\n'
                             'Critique:\n'
                             f'\t{state.critique}'
+                            + _mem('update', str(state.critique))  # [provmem]
                         ),
                     ),
                 ],
