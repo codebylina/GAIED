@@ -52,7 +52,8 @@ def run_one(cfg: dict, scenario: dict, cond: dict, seed: int) -> dict:
                               pull_rounds=cfg.get("agent", {}).get("pull_rounds", 0) if cond.get("pull") else 0,
                               wait_timeout_s=cfg.get("agent", {}).get("wait_timeout_s", 0.0),
                               false_statements=false_stmts if adversary == i else None, stop=stop,
-                              refill_rounds=cfg.get("agent", {}).get("refill_rounds", 0))
+                              refill_rounds=cfg.get("agent", {}).get("refill_rounds", 0),
+                              max_conclusions=cfg.get("agent", {}).get("max_conclusions"))
                 for i in range(n_agents)]
 
     agent_done = threading.Event()
