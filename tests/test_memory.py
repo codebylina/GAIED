@@ -1,10 +1,10 @@
 """
-Tests of S3M without LLM and without xTB.
+Tests of Memory without LLM and without xTB.
 
-Redis: S3M_TEST_REDIS=host:port (a real server, e.g. the "redis" service of docker-compose), otherwise
+Redis: MEMORY_TEST_REDIS=host:port (a real server, e.g. the "redis" service of docker-compose), otherwise
 fakeredis (pip install fakeredis lupa). Each test uses its own namespace.
 
-    python tests/test_s3m.py          or          python -m pytest tests/test_s3m.py
+    python tests/test_memory.py          or          python -m pytest tests/test_memory.py
 """
 from __future__ import annotations
 
@@ -17,12 +17,12 @@ import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from s3m import S3M, KnownFailure, Domain, condition_id  # noqa: E402
-from s3m.domain import SCIENTIFIC, TECHNICAL  # noqa: E402
+from memory import Memory, KnownFailure, Domain, condition_id  # noqa: E402
+from memory.domain import SCIENTIFIC, TECHNICAL  # noqa: E402
 
 
 def _client():
-    target = os.environ.get("S3M_TEST_REDIS")
+    target = os.environ.get("MEMORY_TEST_REDIS")
     if target:
         import redis
         host, _, port = target.partition(":")
@@ -50,14 +50,14 @@ class ToyDomain(Domain):
         return SCIENTIFIC if "impossible" in error else TECHNICAL
 
 
-def mem(agent="a", ns=None, **kw) -> S3M:
-    return S3M(CLIENT, ToyDomain(), ns or f"test-{uuid.uuid4().hex[:8]}", agent, **kw)
+def mem(agent="a", ns=None, **kw) -> Memory:
+    return Memory(CLIENT, ToyDomain(), ns or f"test-{uuid.uuid4().hex[:8]}", agent, **kw)
 
 
 M, P = "toy", {"precision": 1}
 
 
-def measure(m: S3M, word: str, value: float, agent: str | None = None) -> dict:
+def measure(m: Memory, word: str, value: float, agent: str | None = None) -> dict:
     return m.record_observation(word, method=M, params=P, value=value, agent=agent)
 
 
@@ -186,7 +186,7 @@ def test_observations_are_append_only_and_idempotent():
 def test_ingest_flowcept_records_is_idempotent_and_keeps_ids():
     class TaskDomain(ToyDomain):
         activity, input_key, output_key, method, default_params = "measure", "word", "score", M, P
-    m = S3M(CLIENT, TaskDomain(), f"test-{uuid.uuid4().hex[:8]}")
+    m = Memory(CLIENT, TaskDomain(), f"test-{uuid.uuid4().hex[:8]}")
     recs = [{"task_id": "t1", "activity_id": "measure", "status": "FINISHED", "used": {"word": "Owl"},
              "generated": {"score": 2.5}, "workflow_id": "w", "campaign_id": "c",
              "custom_metadata": {"agent": "x"}},
@@ -200,7 +200,7 @@ def test_ingest_flowcept_records_is_idempotent_and_keeps_ids():
 
 
 # ---------------------------------------------------------------------- lessons and verification
-def _team(m: S3M) -> dict[str, str]:
+def _team(m: Memory) -> dict[str, str]:
     """Words with an x score high, others low."""
     vals = {"fox": 9.0, "box": 8.0, "lynx": 7.5, "cat": 2.0, "dog": 1.0, "owl": 1.5}
     return {w: measure(m, w, v)["id"] for w, v in vals.items()}
@@ -311,11 +311,11 @@ def test_briefing_shows_only_verified_as_knowledge_and_respects_budget():
     assert "cats are underrated" in text.split("Open questions")[1]
     assert len(m.briefing(M, P, max_chars=120)) <= 120
     kinds = [r["activity_id"] for r in sink]
-    assert kinds.count("s3m.propose_lesson") == 3 and kinds.count("s3m.verify_lesson") == 3
-    shown = [r for r in sink if r["activity_id"] == "s3m.briefing"][0]
+    assert kinds.count("memory.propose_lesson") == 3 and kinds.count("memory.verify_lesson") == 3
+    shown = [r for r in sink if r["activity_id"] == "memory.briefing"][0]
     assert good["id"] in shown["generated"]["lesson_ids"] and shown["workflow_id"] == "wf"
     lesson = m.lessons.get(bad["id"])
-    verify_ids = {r["task_id"] for r in sink if r["activity_id"] == "s3m.verify_lesson"}
+    verify_ids = {r["task_id"] for r in sink if r["activity_id"] == "memory.verify_lesson"}
     assert lesson["verification_task_id"] in verify_ids
     assert lesson["provenance"]["proposal_task_id"] in {r["task_id"] for r in sink}
     assert pending["provenance"]["campaign_id"] == "camp"

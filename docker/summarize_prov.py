@@ -96,7 +96,7 @@ def main(path: str | None) -> int:
     llm_total_s, llm_calls, empty_tool_calls, sims, sim_errors = 0.0, 0, 0, 0, 0
     xtb_runs = Counter()   # canonical molecule -> number of actual xTB computations
     tool_calls = Counter()  # canonical molecule -> number of tool requests by the LLM
-    s3m = Counter()         # [s3m] memory operations recorded in the provenance
+    mem_ops = Counter()     # [memory] shared-memory operations recorded in the provenance
 
     for r in records:
         st = r.get("subtype")
@@ -105,15 +105,15 @@ def main(path: str | None) -> int:
         if r.get("started_at") and r.get("ended_at"):
             dur = r["ended_at"] - r["started_at"]
 
-        if st == "s3m":   # [s3m] shared-memory operation (reuse, wait, lesson, verification, briefing)
+        if st == "memory":   # [memory] shared-memory operation (reuse, wait, lesson, verification, briefing)
             act = r.get("activity_id", "")
-            s3m[act] += 1
-            if act == "s3m.verify_lesson":
-                s3m["verdict:" + str(gen.get("status"))] += 1
-            if act in ("s3m.reuse", "s3m.blocked", "s3m.verify_lesson"):
+            mem_ops[act] += 1
+            if act == "memory.verify_lesson":
+                mem_ops["verdict:" + str(gen.get("status"))] += 1
+            if act in ("memory.reuse", "memory.blocked", "memory.verify_lesson"):
                 what = used.get("entity") or used.get("lesson_id")
                 outcome = gen.get("value", gen.get("status", gen.get("reason")))
-                print(f"[mem]   {act[4:]:<13} {_short(what, 28):<28} -> {_short(outcome, 40)}")
+                print(f"[mem]   {act.split('.', 1)[1]:<13} {_short(what, 28):<28} -> {_short(outcome, 40)}")
 
         elif st == "langgraph_node":
             name = (r.get("custom_metadata") or {}).get("node_name") or r.get("activity_id")
@@ -164,13 +164,13 @@ def main(path: str | None) -> int:
         print(f"xTB computations         : {sum(xtb_runs.values())} for {len(xtb_runs)} distinct molecules")
         print(f"DUPLICATE computations   : {wasted}" + (
             "  (" + ", ".join(f"{m} ×{n}" for m, n in sorted(dup.items(), key=lambda x: -x[1])) + ")" if dup else ""))
-    if s3m:   # [s3m]
+    if mem_ops:   # [memory]
         print("-" * 60)
-        print(f"Shared memory (S3M)      : {s3m['s3m.reuse']} results reused (xTB runs avoided), "
-              f"{s3m['s3m.wait']} waits, {s3m['s3m.blocked']} known failures not retried")
-        print(f"Lessons                  : {s3m['s3m.propose_lesson']} proposed; verifications: "
-              + ", ".join(f"{k[8:]}={v}" for k, v in sorted(s3m.items()) if k.startswith("verdict:")))
-        print(f"Briefings                : {s3m['s3m.briefing']}")
+        print(f"Shared memory            : {mem_ops['memory.reuse']} results reused (xTB runs avoided), "
+              f"{mem_ops['memory.wait']} waits, {mem_ops['memory.blocked']} known failures not retried")
+        print(f"Lessons                  : {mem_ops['memory.propose_lesson']} proposed; verifications: "
+              + ", ".join(f"{k[8:]}={v}" for k, v in sorted(mem_ops.items()) if k.startswith("verdict:")))
+        print(f"Briefings                : {mem_ops['memory.briefing']}")
     return 0
 
 

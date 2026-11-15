@@ -1,7 +1,7 @@
 """
-Domain description: the only part of S3M that knows what an experiment is.
+Domain description: the only part of the memory that knows what an experiment is.
 
-S3M itself never mentions molecules or energies. A workflow plugs in by describing:
+The memory itself never mentions molecules or energies. A workflow plugs in by describing:
   - the entity it experiments on (canonical key, so two spellings of the same thing match),
   - the objective (name and direction),
   - how to classify a failure (scientific: the experiment itself is impossible / meaningless, do not

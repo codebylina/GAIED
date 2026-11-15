@@ -1,13 +1,13 @@
 """
-Command line tool to inspect and maintain an S3M memory (Redis host from REDIS_HOST, default localhost).
+Command line tool to inspect and maintain a shared memory (Redis host from REDIS_HOST, default localhost).
 
-  python -m s3m namespaces                              list the memories in Redis
-  python -m s3m show [NS]                               summary + briefing (latest namespace by default)
-  python -m s3m lessons NS [--status S]                 lessons with their evidence and history
-  python -m s3m events NS [-n 30]                       latest events
-  python -m s3m ingest NS FILE.jsonl... [--domain D]    rebuild observations from Flowcept JSONL buffers
-  python -m s3m verify NS [--domain D]                  verify pending lessons, re-check the others
-  python -m s3m review NS LESSON STATUS "REASON"        human decision on a lesson
+  python -m memory namespaces                              list the memories in Redis
+  python -m memory show [NS]                               summary + briefing (latest namespace by default)
+  python -m memory lessons NS [--status S]                 lessons with their evidence and history
+  python -m memory events NS [-n 30]                       latest events
+  python -m memory ingest NS FILE.jsonl... [--domain D]    rebuild observations from Flowcept JSONL buffers
+  python -m memory verify NS [--domain D]                  verify pending lessons, re-check the others
+  python -m memory review NS LESSON STATUS "REASON"        human decision on a lesson
 
 --domain: "generic" or "chemistry" (default), or "package.module:Class".
 """
@@ -40,18 +40,18 @@ def _client():
 
 
 def _memory(ns: str | None, domain: str):
-    from .memory import S3M
+    from .core import Memory
     r = _client()
     if ns is None:
-        latest = r.zrevrange("s3m:namespaces", 0, 0)
+        latest = r.zrevrange("memory:namespaces", 0, 0)
         if not latest:
-            sys.exit("No S3M memory in Redis.")
+            sys.exit("No shared memory in Redis.")
         ns = latest[0]
-    return S3M(r, _domain(domain), ns, agent="cli")
+    return Memory(r, _domain(domain), ns, agent="cli")
 
 
 def main(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(prog="python -m s3m", description=__doc__,
+    ap = argparse.ArgumentParser(prog="python -m memory", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("command", choices=["namespaces", "show", "lessons", "events", "ingest", "verify", "review"])
     ap.add_argument("args", nargs="*")
@@ -61,7 +61,7 @@ def main(argv: list[str]) -> int:
     a = ap.parse_args(argv)
 
     if a.command == "namespaces":
-        for ns, t in _client().zrange("s3m:namespaces", 0, -1, withscores=True):
+        for ns, t in _client().zrange("memory:namespaces", 0, -1, withscores=True):
             print(f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(t))}  {ns}")
         return 0
 
@@ -69,7 +69,7 @@ def main(argv: list[str]) -> int:
 
     if a.command == "show":
         rep = mem.report()
-        print(f"S3M memory '{rep['namespace']}': {rep['observations']} observations, lessons {rep['lessons']}")
+        print(f"Shared memory '{rep['namespace']}': {rep['observations']} observations, lessons {rep['lessons']}")
         print("counters: " + (", ".join(f"{k}={v}" for k, v in sorted(rep["stats"].items())) or "none"))
         for cond, info in rep["conditions"].items():
             print(f"\n--- condition {cond}: {info['method']} {json.dumps(info['params'])}")

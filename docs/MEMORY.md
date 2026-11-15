@@ -1,8 +1,8 @@
-# S3M — Simple Shared Scientific Memory (premier prototype)
+# Mémoire partagée — premier prototype (`memory/`)
 
-Branche `claude/confident-hypatia-6pjvms`, construite à partir de `docker-local`. Code : `s3m/` (bibliothèque
-générique), `s3m/domains/chemistry.py` et `s3m/integrations/gaied.py` (branchement GAIED),
-`tests/test_s3m.py`.
+Branche `claude/confident-hypatia-6pjvms`, construite à partir de `docker-local`. Code : `memory/` (bibliothèque
+générique), `memory/domains/chemistry.py` et `memory/integrations/gaied.py` (branchement GAIED),
+`tests/test_memory.py`.
 
 ## 1. Principe
 
@@ -17,7 +17,7 @@ Trois choses sont séparées :
 | **Ce qu'on en a appris** : les leçons | mémoire des leçons | les agents (le LLM propose) |
 | **Ce qu'on a le droit de réutiliser** : les leçons `verified` | statut de la leçon | des règles déterministes |
 
-Flowcept garde la trace complète de l'exécution. S3M ne garde que ce qui sert à décider, et s'y
+Flowcept garde la trace complète de l'exécution. La mémoire ne garde que ce qui sert à décider, et s'y
 rattache par les identifiants (section 5).
 
 ## 2. Architecture
@@ -26,7 +26,7 @@ rattache par les identifiants (section 5).
   Agent A        Agent B        Agent C          (GAIED : Academy + LangGraph + LLM + xTB)
      |  avant d'agir : briefing, statut      |  après : observation, leçon
      v                                       v
- +---------------------------- S3M (une instance Redis) -----------------------------+
+ +---------------------- mémoire partagée (une instance Redis) ----------------------+
  |  1. Coordination           2. Mémoire                        3. Vérification     |
  |  claim / release /         observations (faits, append-only)  règles             |
  |  renew / get_status        leçons (pending / verified /        déterministes      |
@@ -34,24 +34,24 @@ rattache par les identifiants (section 5).
  +-----------------------------------------------------------------------------------+
      |  chaque opération qui influence une décision est écrite comme une tâche Flowcept
      v
-  Flowcept (provenance) : tâches xTB, appels LLM, nœuds LangGraph, opérations s3m.*
+  Flowcept (provenance) : tâches xTB, appels LLM, nœuds LangGraph, opérations memory.*
 ```
 
 ## 3. Les trois composants
 
-### 3.1 Coordination (`s3m/coordination.py`)
+### 3.1 Coordination (`memory/coordination.py`)
 
 | Opération | Rôle |
 |---|---|
 | `claim(task, agent)` | réserve une tâche (`SET NX PX`) ; renvoie un **jeton** secret, ou `None` si un autre agent la tient |
 | `release(task, token)` | libère, **atomiquement** et seulement si le jeton est toujours le propriétaire (script Lua) |
 | `renew(task, token)` | prolonge, même règle ; un calcul long renouvelle sa réservation en arrière-plan |
-| `S3M.get_status(...)` | `success`, `failed` (scientifique), `running`, `retryable` (panne technique), `unknown` |
+| `Memory.get_status(...)` | `success`, `failed` (scientifique), `running`, `retryable` (panne technique), `unknown` |
 
 Une tâche est identifiée par `condition/entité`, où la condition regroupe la méthode et ses
 paramètres. La même molécule calculée avec d'autres paramètres xTB est donc une autre expérience.
 
-`S3M.get_or_compute(entité, compute, method=..., params=...)` combine les trois composants :
+`Memory.get_or_compute(entité, compute, method=..., params=...)` combine les trois composants :
 
 1. le résultat existe : il est **réutilisé** ;
 2. un **échec scientifique** est connu : on ne relance pas (`KnownFailure`) ;
@@ -71,13 +71,13 @@ l'analyse de Nadjiba. Une notification manquée ne fait rien perdre : l'état es
 
 ### 3.2 Mémoire
 
-**Observations** (`s3m/observations.py`) : les faits.
+**Observations** (`memory/observations.py`) : les faits.
 
 - Elles sont **en ajout seul** : une nouvelle mesure crée une nouvelle observation et n'écrase rien. L'écriture se fait en `SET NX`, donc elle est idempotente.
 - Leur identifiant est **l'identifiant de la tâche Flowcept** qui les a produites.
 - Chacune porte : l'entité, la méthode, les paramètres, le statut, la valeur ou l'erreur, le type d'échec, l'agent, les dates, et les ids Flowcept.
 
-**Leçons** (`s3m/lessons.py`) : les interprétations.
+**Leçons** (`memory/lessons.py`) : les interprétations.
 
 | Champ | Utilité |
 |---|---|
@@ -93,12 +93,12 @@ l'analyse de Nadjiba. Une notification manquée ne fait rien perdre : l'état es
 - Rien n'est supprimé : une leçon rejetée reste en mémoire, pour qu'on ne refasse pas la même erreur.
 - **Une même leçon n'est stockée qu'une fois.** Si un agent repropose la même affirmation vérifiable sous la même condition, elle est fusionnée avec la leçon existante : ses preuves s'ajoutent, l'agent est noté dans `endorsed_by`, et la leçon est revérifiée.
 
-**Transformer les conclusions en leçons** (`s3m/proposer.py`). Le module construit le prompt et lit la
+**Transformer les conclusions en leçons** (`memory/proposer.py`). Le module construit le prompt et lit la
 réponse, **sans appeler de LLM lui-même** : chaque workflow utilise son propre client. Les observations
 sont montrées au LLM sous des références courtes (`o1`, `o2`…), qui sont ensuite remplacées par les
 vrais identifiants.
 
-### 3.3 Vérification (`s3m/verification.py`)
+### 3.3 Vérification (`memory/verification.py`)
 
 Un LLM **propose** une leçon. Il ne décide **jamais** si elle est vraie : le statut vient de règles
 explicites, calculées sur les observations.
@@ -121,14 +121,14 @@ Types d'affirmations fournis :
 Un workflow peut ajouter ses propres types avec `Verifier.register(kind, fonction)`.
 
 - **Revérification.** Quand de nouvelles observations arrivent, les leçons `verified` et `needs_review` sont revérifiées (`recheck`, un seul vérificateur à la fois grâce à la coordination). Une leçon vérifiée que les nouvelles données contredisent repasse en `needs_review`.
-- **Revue humaine.** `python -m s3m review NS LESSON verified "raison"`. Une décision humaine n'est jamais écrasée par la revérification automatique.
+- **Revue humaine.** `python -m memory review NS LESSON verified "raison"`. Une décision humaine n'est jamais écrasée par la revérification automatique.
 
 > Limite assumée : la règle est une vérification de bon sens (sens de la différence des moyennes,
 > taille minimale des groupes), pas un test statistique. Deux agents qui utilisent le même modèle et
 > les mêmes données ne sont pas des validations indépendantes : `endorsed_by` n'est pas utilisé pour
 > valider.
 
-### 3.4 Ce que voient les agents (`S3M.briefing`)
+### 3.4 Ce que voient les agents (`Memory.briefing`)
 
 Le briefing est un texte borné (`max_chars`), propre à une condition, ajouté au prompt :
 
@@ -147,9 +147,9 @@ Les leçons `pending` ne sont jamais montrées.
 |---|---|
 | observation ↔ tâche xTB | `observation.id` = `task_id` de la tâche Flowcept `compute_ionization_energy` |
 | leçon → observations | `evidence_ids` = des `task_id` Flowcept |
-| leçon → sa proposition et sa vérification | `provenance.proposal_task_id` et `verification_task_id` = des tâches Flowcept `s3m.*` |
-| opérations mémoire → campagne | les tâches `s3m.reuse`, `s3m.wait`, `s3m.blocked`, `s3m.propose_lesson`, `s3m.verify_lesson`, `s3m.briefing` portent `campaign_id`, `workflow_id` et l'agent ; `s3m.briefing` porte aussi le nœud LangGraph et les ids des leçons montrées |
-| provenance → mémoire | `python -m s3m ingest NS output/flowcept_buffer_*.jsonl` reconstruit les observations à partir des JSONL Flowcept, de façon idempotente |
+| leçon → sa proposition et sa vérification | `provenance.proposal_task_id` et `verification_task_id` = des tâches Flowcept `memory.*` |
+| opérations mémoire → campagne | les tâches `memory.reuse`, `memory.wait`, `memory.blocked`, `memory.propose_lesson`, `memory.verify_lesson`, `memory.briefing` portent `campaign_id`, `workflow_id` et l'agent ; `memory.briefing` porte aussi le nœud LangGraph et les ids des leçons montrées |
+| provenance → mémoire | `python -m memory ingest NS output/flowcept_buffer_*.jsonl` reconstruit les observations à partir des JSONL Flowcept, de façon idempotente |
 
 Ainsi, depuis la provenance, on sait **quelles leçons un agent a lues avant de décider**, et quels
 calculs ont été évités ou attendus.
@@ -160,7 +160,7 @@ par `campaign_id` et `workflow_id`, plus le nœud pour les briefings.
 
 ## 5. Organisation dans Redis
 
-Tout est rangé sous `s3m:{namespace}:`.
+Tout est rangé sous `memory:{namespace}:`.
 
 | Clé | Contenu |
 |---|---|
@@ -173,7 +173,7 @@ Tout est rangé sous `s3m:{namespace}:`.
 Il n'y a ni MongoDB, ni base vectorielle, ni recherche sémantique : la recherche se fait par
 condition, statut et entité.
 
-## 6. Intégration dans GAIED (crochets `[s3m]`)
+## 6. Intégration dans GAIED (crochets `[memory]`)
 
 | Où | Quoi |
 |---|---|
@@ -188,16 +188,16 @@ Variables d'environnement (`docker/docker-compose.yml`) :
 
 | Variable | Défaut | Rôle |
 |---|---|---|
-| `S3M` | `true` dans Docker | `false` = GAIED original (la référence) |
-| `S3M_NAMESPACE` | vide | vide = une mémoire par campagne ; un nom fixe (ex. `gaied`) = mémoire partagée entre campagnes |
-| `S3M_LESSONS` | `true` | `false` = pas de leçons, seulement coordination et observations |
-| `S3M_CLAIM_TTL` | `300` | durée (s) avant qu'une réservation d'agent planté expire |
-| `S3M_BRIEFING_CHARS` | `2500` | taille maximale du texte mémoire dans un prompt |
+| `MEMORY` | `true` dans Docker | `false` = GAIED original (la référence) |
+| `MEMORY_NAMESPACE` | vide | vide = une mémoire par campagne ; un nom fixe (ex. `gaied`) = mémoire partagée entre campagnes |
+| `MEMORY_LESSONS` | `true` | `false` = pas de leçons, seulement coordination et observations |
+| `MEMORY_CLAIM_TTL` | `300` | durée (s) avant qu'une réservation d'agent planté expire |
+| `MEMORY_BRIEFING_CHARS` | `2500` | taille maximale du texte mémoire dans un prompt |
 
-## 7. Utiliser S3M dans un autre workflow
+## 7. Utiliser la mémoire dans un autre workflow
 
 ```python
-from s3m import S3M, Domain, SCIENTIFIC, TECHNICAL
+from memory import Memory, Domain, SCIENTIFIC, TECHNICAL
 
 class MyDomain(Domain):
     name, objective, direction = "material", "band_gap", "max"
@@ -206,7 +206,7 @@ class MyDomain(Domain):
     def classify_failure(self, error):
         return SCIENTIFIC if "unstable" in error else TECHNICAL
 
-mem = S3M.connect(MyDomain(), namespace="campaign-42", agent="agent-1",
+mem = Memory.connect(MyDomain(), namespace="campaign-42", agent="agent-1",
                   provenance_sink=interceptor.intercept_task)          # optional: Flowcept
 value = mem.get_or_compute_sync("GaN", lambda task_id: simulate("GaN", task_id),
                                 method="dft", params={"functional": "PBE"})
@@ -220,13 +220,13 @@ mem.verify_pending()
 ## 8. Commandes
 
 ```bash
-# GAIED avec S3M (depuis docker/) ; S3M=false pour la référence
+# GAIED avec la mémoire (depuis docker/) ; MEMORY=false pour la référence
 docker compose run --rm gaied
-docker compose run --rm -e S3M=false gaied
+docker compose run --rm -e MEMORY=false gaied
 docker compose run --rm gaied python docker/summarize_prov.py      # doublons + opérations mémoire
-docker compose run --rm gaied python -m s3m show                   # mémoire de la dernière campagne
-docker compose run --rm gaied python -m s3m lessons <namespace>    # leçons, preuves, historique
-docker compose run --rm -e S3M_TEST_REDIS=redis:6379 gaied python tests/test_s3m.py
+docker compose run --rm gaied python -m memory show                   # mémoire de la dernière campagne
+docker compose run --rm gaied python -m memory lessons <namespace>    # leçons, preuves, historique
+docker compose run --rm -e MEMORY_TEST_REDIS=redis:6379 gaied python tests/test_memory.py
 ```
 
 ## 9. Mesures disponibles pour l'évaluation
@@ -234,10 +234,10 @@ docker compose run --rm -e S3M_TEST_REDIS=redis:6379 gaied python tests/test_s3m
 | Mesure | Source |
 |---|---|
 | simulations redondantes | `summarize_prov.py` → « DUPLICATE computations » (tâches xTB Flowcept) |
-| calculs évités, attentes, échecs non relancés | compteurs `stats` ; tâches `s3m.reuse`, `s3m.wait`, `s3m.blocked` |
-| leçons par statut, raisons des rejets | `python -m s3m lessons`, `report()` |
-| leçons montrées aux agents, et à quel nœud | tâches `s3m.briefing` (`lesson_ids`, `label`) |
-| coût | appels LLM (dont l'extraction des leçons) dans la provenance ; durée des opérations `s3m.*` |
+| calculs évités, attentes, échecs non relancés | compteurs `stats` ; tâches `memory.reuse`, `memory.wait`, `memory.blocked` |
+| leçons par statut, raisons des rejets | `python -m memory lessons`, `report()` |
+| leçons montrées aux agents, et à quel nœud | tâches `memory.briefing` (`lesson_ids`, `label`) |
+| coût | appels LLM (dont l'extraction des leçons) dans la provenance ; durée des opérations `memory.*` |
 
 ## 10. Test de bout en bout réalisé
 
@@ -249,15 +249,15 @@ comparaison vraie. Ces chiffres valident donc **le fonctionnement**, pas l'inté
 
 | Campagne (2 agents, 3 itérations, 18 molécules demandées) | Calculs xTB | Molécules distinctes | Doublons | Résultats réutilisés | Attentes | Échecs connus non relancés |
 |---|---|---|---|---|---|---|
-| GAIED original (`S3M=false`) | 18 | 8 | **10** | – | – | – |
-| GAIED + S3M, mémoire neuve | 13 | 13 | **0** | 5 | 3 | 0 |
-| GAIED + S3M, 2ᵉ campagne sur la même mémoire (`S3M_NAMESPACE` fixe) | 4 | 4 | **0** | 12 | 0 | 2 |
+| GAIED original (`MEMORY=false`) | 18 | 8 | **10** | – | – | – |
+| GAIED + mémoire, mémoire neuve | 13 | 13 | **0** | 5 | 3 | 0 |
+| GAIED + mémoire, 2ᵉ campagne sur la même mémoire (`MEMORY_NAMESPACE` fixe) | 4 | 4 | **0** | 12 | 0 | 2 |
 
 Leçons (campagne avec mémoire neuve) : 18 propositions fusionnées en leçons uniques, dont 3 vérifiées,
 5 rejetées et 3 en `needs_review` au moment de leur vérification. Les comparaisons fausses du faux LLM
 sont toutes rejetées, avec les valeurs mesurées comme raison.
 
-Reconstruction depuis la provenance : `python -m s3m ingest` sur les JSONL de la campagne sans S3M
+Reconstruction depuis la provenance : `python -m memory ingest` sur les JSONL de la campagne sans mémoire
 recrée les 18 observations ; une seconde ingestion n'en ajoute aucune.
 
 Le test vérifie aussi :
@@ -288,7 +288,7 @@ Ces ajouts restent dans le cadre de la proposition :
 - **Une vérification volontairement simple.** Les leçons sans affirmation vérifiable restent en
   `needs_review` : elles demandent une expérience ou un humain.
 - **Le coût d'un appel LLM supplémentaire** par itération pour extraire les leçons
-  (`S3M_LESSONS=false` pour le supprimer).
+  (`MEMORY_LESSONS=false` pour le supprimer).
 - **Pas de mécanisme dédié pour les corrections de l'analyse en ligne.** Pour l'instant, elle peut
   écrire une leçon, ou une revue avec `review(...)`. Les directives dédiées ont été reportées, comme
   dans la proposition.

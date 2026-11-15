@@ -1,5 +1,5 @@
 """
-S3M — Simple Shared Scientific Memory: the entry point used by a workflow.
+Shared memory: the entry point used by a workflow.
 
 Three components share one Redis instance, under one namespace:
   Coordination   who is computing what          (coordination.Coordinator)
@@ -37,13 +37,13 @@ class KnownFailure(Exception):
     """The memory already knows that this experiment fails: it is not run again."""
 
 
-class S3M:
+class Memory:
     def __init__(self, client, domain: Domain, namespace: str = "default", agent: str = "agent", *,
                  claim_ttl_s: float = 300.0, max_technical_attempts: int = 2, min_per_group: int = 2,
                  provenance_sink: Callable[[dict], None] | None = None,
                  context: Callable[[], dict] | None = None) -> None:
         self.r, self.domain, self.namespace, self.agent = client, domain, namespace, agent
-        self.p = f"s3m:{namespace}"
+        self.p = f"memory:{namespace}"
         self.coord = Coordinator(client, self.p, claim_ttl_s)
         self.obs = ExperimentalMemory(client, self.p, domain)
         self.lessons = LessonMemory(client, self.p)
@@ -51,11 +51,11 @@ class S3M:
         self.proposer = LessonProposer(domain)
         self.claim_ttl_s, self.max_technical_attempts = claim_ttl_s, max_technical_attempts
         self.sink, self.context = provenance_sink, context
-        client.zadd("s3m:namespaces", {namespace: time.time()}, nx=True)
+        client.zadd("memory:namespaces", {namespace: time.time()}, nx=True)
 
     @classmethod
     def connect(cls, domain: Domain, namespace: str = "default", host: str = "localhost", port: int = 6379,
-                **kw) -> "S3M":
+                **kw) -> "Memory":
         import redis
         client = redis.Redis(host=host, port=port, decode_responses=True)
         client.ping()
@@ -82,10 +82,10 @@ class S3M:
         """Write a memory operation as a Flowcept task record (if a sink is configured)."""
         if self.sink is None:
             return None
-        record = {"task_id": str(uuid.uuid4()), "activity_id": activity, "subtype": "s3m",
+        record = {"task_id": str(uuid.uuid4()), "activity_id": activity, "subtype": "memory",
                   "status": "FINISHED", "started_at": started_at, "ended_at": time.time(),
                   "used": used, "generated": generated,
-                  "custom_metadata": {"agent": self.agent, "s3m_namespace": self.namespace}}
+                  "custom_metadata": {"agent": self.agent, "memory_namespace": self.namespace}}
         ids = {**(self.context() if self.context else {}), **(provenance or {})}
         record.update({k: v for k, v in ids.items() if k in ("workflow_id", "campaign_id", "parent_task_id") and v})
         try:
@@ -135,11 +135,11 @@ class S3M:
     def _finish_step(self, kind: str, info: Any, entity: str, cond: str, t0: float, provenance: dict | None):
         if kind == "reuse":
             self._stat("reused")
-            self._emit("s3m.reuse", {"entity": entity, "condition": cond, "obs_id": info["obs_id"]},
+            self._emit("memory.reuse", {"entity": entity, "condition": cond, "obs_id": info["obs_id"]},
                        {"value": info["value"], "computed_by": info.get("agent")}, t0, provenance)
             return info["value"]
         self._stat("blocked_failure")
-        self._emit("s3m.blocked", {"entity": entity, "condition": cond}, {"reason": info}, t0, provenance)
+        self._emit("memory.blocked", {"entity": entity, "condition": cond}, {"reason": info}, t0, provenance)
         raise KnownFailure(info)
 
     async def get_or_compute(self, raw: str, compute: Callable[[str], Awaitable[float]], *, method: str,
@@ -160,7 +160,7 @@ class S3M:
                 w0 = time.time()
                 while self.coord.holder(f"{cond}/{entity}") and self.obs.status(entity, cond)["state"] == "unknown":
                     await asyncio.sleep(poll_s)
-                self._emit("s3m.wait", {"entity": entity, "condition": cond, "holder": info},
+                self._emit("memory.wait", {"entity": entity, "condition": cond, "holder": info},
                            {"waited_s": round(time.time() - w0, 3)}, w0, provenance)
                 continue
             tid, c0 = task_id or str(uuid.uuid4()), time.time()
@@ -193,7 +193,7 @@ class S3M:
                 w0 = time.time()
                 while self.coord.holder(f"{cond}/{entity}") and self.obs.status(entity, cond)["state"] == "unknown":
                     time.sleep(poll_s)
-                self._emit("s3m.wait", {"entity": entity, "condition": cond, "holder": info},
+                self._emit("memory.wait", {"entity": entity, "condition": cond, "holder": info},
                            {"waited_s": round(time.time() - w0, 3)}, w0, provenance)
                 continue
             tid, stop, c0 = task_id or str(uuid.uuid4()), threading.Event(), time.time()
@@ -295,7 +295,7 @@ class S3M:
         found = [o for o in self.obs.get_many(evidence_ids) if o]
         conds = {o["condition"] for o in found}
         index_key = self._lesson_key(statement, claim, next(iter(conds)) if len(conds) == 1 else None)
-        tid = self._emit("s3m.propose_lesson",
+        tid = self._emit("memory.propose_lesson",
                          {"statement": statement, "claim": claim, "evidence_ids": evidence_ids},
                          {"lesson_key": index_key}, t0, provenance)
         existing = self.r.hget(f"{self.p}:lessons:index", index_key)
@@ -337,7 +337,7 @@ class S3M:
         status, reason, details = self.verifier.verify(lesson)
         if status == lesson["status"] and reason == lesson.get("status_reason"):
             return False
-        tid = self._emit("s3m.verify_lesson",
+        tid = self._emit("memory.verify_lesson",
                          {"lesson_id": lesson["id"], "evidence_ids": lesson["evidence_ids"],
                           "claim": lesson.get("claim"), "previous_status": lesson["status"]},
                          {"status": status, "reason": reason}, t0)
@@ -437,7 +437,7 @@ class S3M:
                     shown.append(lid)
         text = "\n".join(lines) if len(lines) > 1 else ""
         self._stat("briefings")
-        self._emit("s3m.briefing", {"condition": cond, "label": label},
+        self._emit("memory.briefing", {"condition": cond, "label": label},
                    {"lesson_ids": shown, "chars": len(text)}, t0, provenance)
         return text
 
