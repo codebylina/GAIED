@@ -3,6 +3,7 @@ Diagnostic only: does Mem0's search return the memories it stored, with the conf
 
     python -m bench.diagnose_mem0
     python -m bench.diagnose_mem0 results/<config>/runs/<run>.json     (replays the run's own queries on its store)
+    python -m bench.diagnose_mem0 --concurrent      (searches while other memories are being written, as in a run)
 
 Builds a fresh Mem0 (as the benchmark does) in a temporary folder, writes two texts, then searches with a short
 query and with a long one (as long as an agent's plan), printing the hits, their scores, and any error in full.
@@ -81,9 +82,47 @@ def replay(run_path: str) -> None:
             traceback.print_exc()
 
 
+def concurrent() -> None:
+    """Search repeatedly while a background thread writes, as agents and the steward do during a run."""
+    import logging
+    import threading
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    for name in ("httpx", "urllib3", "mem0.vector_stores.qdrant"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+    d = tempfile.mkdtemp(prefix="mem0-diag-")
+    local = LocalMem0(build_mem0(d, "diag"), run_id="diag")
+    local.add("Results of my experiments: A0-B2-C2-D2-E2: -1.363; A1-B2-C2-D1-E2: 2.625", "agent0")
+    while local.pending():
+        local.process_one(timeout=1.0)
+    print(f"before: {len(local.all())} memory; search ->", len(local.search("results of the experiments")), "hit(s)")
+    texts = [f"Results of my experiments: A{i}-B1-C{i % 3}-D0-E1: {i * 0.7:.3f}; A{i}-B0-C1-D2-E2: {i * 0.3:.3f}"
+             for i in range(4)]
+    for t in texts:
+        local.add(t, "agent1")
+    done = threading.Event()
+
+    def writer():
+        while local.pending():
+            local.process_one(timeout=1.0)
+        done.set()
+    threading.Thread(target=writer, daemon=True).start()
+    t0, k = time.time(), 0
+    while not done.is_set() and time.time() - t0 < 600:
+        k += 1
+        try:
+            n = len(local.search("results of the experiments"))
+            print(f"  {time.time() - t0:6.1f} s  search {k}: {n} hit(s) | pending writes: {local.pending()}")
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+        time.sleep(1.0)
+    print(f"after: {len(local.all())} memories; search ->", len(local.search("results of the experiments")), "hit(s)")
+
+
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) > 1:
+    if len(sys.argv) > 1 and sys.argv[1] == "--concurrent":
+        concurrent()
+    elif len(sys.argv) > 1:
         replay(sys.argv[1])
     else:
         main()
