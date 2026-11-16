@@ -54,6 +54,10 @@ def run_one(cfg: dict, scenario: dict, cond: dict, seed: int) -> dict:
         kw["top_k"] = cond.get("top_k")              # None: Mem0's default
     kw["verification"] = cond.get("verification")
     kw["evidence"] = cond.get("evidence")
+    if cond["memory"] == "falda":            # a fresh pool per run: every run starts from an empty memory
+        import uuid
+        kw["falda"] = {"pool": f"{cfg['name']}-{scenario['name']}-{cond['name']}-s{seed}-{uuid.uuid4().hex[:6]}",
+                       **(cond.get("falda") or {})}
     memory = make_memory(cond["memory"], store, adapter, mcfg, **kw)
 
     n_agents, iters = cfg["n_agents"], cfg["iterations"]

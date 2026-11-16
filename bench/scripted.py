@@ -80,6 +80,21 @@ def scripted_distiller(user: str) -> str:
     return "\n".join(out)
 
 
+def scripted_falda(system: str, user: str) -> str:
+    """FALDA's distiller prompts: atoms are the option claims found in the text; scenes and core list them."""
+    claims = []
+    for line in user.splitlines():
+        for m in re.finditer(r"Option [A-Z]\d+ (?:increases|decreases) the outcome[^.\n]*\.?", line):
+            if m.group(0) not in claims:
+                claims.append(m.group(0))
+    if system.startswith("You extract"):
+        return json.dumps([{"type": "episodic", "content": c, "priority": 50} for c in claims])
+    if system.startswith("You write"):
+        return "Topic: what the team found\n" + "\n".join(f"- {c}" for c in claims)
+    goal = [l for l in user.splitlines() if l.startswith(("GOAL", "- constraint"))]
+    return "# Project core\n" + "\n".join(goal + [f"- {c}" for c in claims])
+
+
 def scripted_verifier(user: str, text_mode: bool) -> str:
     out = []
     for block in re.split(r"(?m)^### ", user.split("MEMORIES TO REVIEW:")[-1].split("MEMORIES:")[-1])[1:]:
@@ -119,6 +134,9 @@ class ScriptedLLM:
             return scripted_verifier(user, system == VT)
         if system == DISTILL_SYSTEM:
             return scripted_distiller(user)
+        if system.startswith(("You extract durable agent-memory atoms", "You write a concise episodic SCENE",
+                              "You synthesize a long-lived PERSONA/CORE")):
+            return scripted_falda(system, user)
         if purpose == "oracle":
             m = CLAIM_RE.search(user)
             if not m:

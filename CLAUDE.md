@@ -31,7 +31,8 @@
   registre avant xTB (`gated_compute`, marqué `[memlab]`), distillation et vérification dans `run-07.py`.
   Conditions : `bench/configs/evidence_{quick,main,dryrun}.json` (`none`, `mem0`, `registry_only`,
   `evidence_unverified`, `evidence` + ablations). Tests : `tests/test_evidence.py`, `tests/test_verifier.py`,
-  `tests/test_memlab.py`. Branches précédentes : `mem0-verified`, `mem0-baseline`, `falda-baseline` (référence FALDA).
+  `tests/test_memlab.py`, `tests/test_falda.py`. FALDA dans le même cadre : `memlab/falda_memory.py` (condition `falda`,
+  passerelle `docker compose --profile falda up -d falda`). Branches précédentes : `mem0-verified`, `mem0-baseline`, `falda-baseline`.
 - `output/flowcept_buffer_*.jsonl` : provenance de chaque campagne.
 
 ## Modifications déjà faites au code d'Amal (marquées `[gaied-docker ...]`)

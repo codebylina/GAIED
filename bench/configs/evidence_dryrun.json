@@ -99,6 +99,10 @@
   {
    "name": "mem0",
    "memory": "mem0"
+  },
+  {
+   "name": "falda",
+   "memory": "falda"
   }
  ],
  "name": "evidence_dryrun",

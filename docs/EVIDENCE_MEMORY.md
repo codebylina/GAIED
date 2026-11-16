@@ -49,11 +49,12 @@ Réglage `show_messages` pour les montrer quand même (étiquetés « non vérif
 | `evidence_unverified` | L0 + atomes, tous montrés comme vrais |
 | `evidence` | la mémoire complète |
 | `evidence_nolayers`, `evidence_agentindep`, `evidence_posthoc` | ablations (classes de preuves, exposition, pré-enregistrement) |
+| `falda` | FALDA d'origine, par sa passerelle (`memlab/falda_memory.py`, branche `falda-memlab`) |
 
 Ordre prévu :
 1. **Étape 1, l'idée marche-t-elle ?** `none`, `evidence_unverified`, `evidence`. `evidence_quick.json` (1 graine,
    2 scénarios) pour vérifier que tout tourne, puis `evidence_step1.json` (3 graines, 4 scénarios).
-2. **Étape 2, références** : `mem0` (banc synthétique) et FALDA d'origine (GAIED, branche `falda-baseline`).
+2. **Étape 2, références** : `mem0` et `falda`, dans le banc synthétique et dans GAIED.
 3. **Étape 3, ablations** : `registry_only`, `evidence_nolayers`, `evidence_agentindep`, `evidence_posthoc`
    (`evidence_main.json`).
 
@@ -89,3 +90,20 @@ Tests sans LLM : `python tests/test_evidence.py`, `python tests/test_verifier.py
 - Seule l'exposition directe à un atome est tracée pour la classe R.
 - La proximité avec la requête est un simple classement lexical (BM25) : la recherche n'est pas étudiée ici.
 - Dans GAIED, l'évaluateur de vérité n'existe pas : GAIED mesure la coordination, le coût et la découverte.
+
+## FALDA dans le même cadre (`memlab/falda_memory.py`)
+
+FALDA n'est pas modifié : passerelle construite depuis le dépôt officiel (commit `ff6d83b`,
+`docker/falda/Dockerfile`), distillateur d'origine copié tel quel (`memlab/third_party/falda_distiller.py`,
+même empreinte SHA-256 que dans `falda-baseline`). Écriture de chaque tour (plan, résultats, conclusion, mise à jour)
+dans T0 ; rappel = Core + 10 atomes + 10 messages (recherche hybride de la passerelle) ; un pool par essai.
+Choix du cadre, communs ou documentés : le distillateur tourne dans la boucle de fond de la mémoire et appelle le LLM
+par le client du cadre (même modèle et réglages que les agents) ; cadence raccourcie (atomes tous les 6 tours,
+scène toutes les 5 min, cœur toutes les 15 min, vérification toutes les 30 s) ; texte coupé au budget commun.
+
+Lancer (la passerelle doit tourner) :
+```powershell
+docker compose --profile falda up -d falda
+docker compose run --rm --no-deps -e LLM_PROVIDER=ollama -e OLLAMA_URL=http://host.docker.internal:11434 -e OLLAMA_MODEL=qwen3.5:9b -e LLM_MODEL=qwen3.5:9b -e EMBED_MODEL=nomic-embed-text gaied python -m bench.run bench/configs/evidence_quick.json
+```
+Test : `python tests/test_falda.py` (sauté si aucune passerelle ne répond).

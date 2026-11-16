@@ -102,14 +102,15 @@ async def main() -> int:
 def start_memory_service():
     """[memlab] With MEMORY_CONDITION=mem0: one Mem0 instance in this process, served over HTTP."""
     from memlab.integrations import gaied
-    if not gaied.condition() or gaied.condition_spec()['memory'] not in ('mem0', 'mem0_verified', 'evidence'):
+    if not gaied.condition() or gaied.condition_spec()['memory'] not in ('mem0', 'mem0_verified', 'evidence', 'falda'):
         return None
     import threading
     import time as _time
     from memlab import LLM, RedisStore
     from memlab.llm import LLMUsage
-    if gaied.condition_spec()['memory'] == 'evidence':
-        # the distiller (L0 -> L1) and the verifier run in this process; agents only read and claim
+    if gaied.condition_spec()['memory'] in ('evidence', 'falda'):
+        # evidence: the distiller (L0 -> L1) and the verifier run in this process; agents only read and claim.
+        # falda: the campaign's pool is declared here and FALDA's own distiller runs here.
         usage, stop = LLMUsage(), threading.Event()
         central = gaied.memory_from_env(llm=LLM(usage=usage))
 
@@ -122,7 +123,7 @@ def start_memory_service():
                     logger.warning('memory maintenance failed: %s', exc)
                     _time.sleep(5.0)
         threading.Thread(target=maintain, daemon=True).start()
-        print(f'Memory: evidence memory ({gaied.condition()}), distillation and verification in this process')
+        print(f'Memory: {gaied.condition_spec()["memory"]} memory ({gaied.condition()}), background work in this process')
         return {'kind': 'evidence', 'memory': central, 'usage': usage, 'stop': stop}
     from memlab.mem0_memory import LocalMem0, Mem0Service, build_mem0
     store_dir = os.path.join(os.environ.get('MEM0_STORE_DIR', 'results/gaied/mem0_store'), gaied.campaign())

@@ -609,6 +609,7 @@ class XTBSimulationAgent(Agent):
             )
 
             logger.info(f'Planner: {response}')
+            _remember('plan', response.content)  # [memlab] FALDA records every turn; other memories filter nodes
 
             return SearchState(
                 seed=state.seed,
@@ -859,6 +860,7 @@ class XTBSimulationAgent(Agent):
                 ],
             )
             logger.info(f'Update: {response}')
+            _remember('update', response.content)  # [memlab]
 
             return SearchState(
                 seed=state.seed,

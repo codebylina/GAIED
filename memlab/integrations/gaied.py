@@ -88,6 +88,10 @@ def memory_from_env(backend=None, verifier=None, llm=None):
             if verifier is None:
                 kw["verifier"] = verifier_from_env(store)
         return make_memory(kind, store, adapter_from_env(), cfg, **kw)
+    if kind == "falda":   # agents read and write; run-07.py declares the pool and runs FALDA's distiller
+        spec = condition_spec()
+        return make_memory("falda", store, adapter_from_env(), cfg, llm=llm,
+                           falda={"pool": campaign(), "declare": llm is not None, **(spec.get("falda") or {})})
     if kind == "evidence":
         spec = condition_spec()
         return make_memory("evidence", store, adapter_from_env(), cfg, llm=llm, verifier=verifier,

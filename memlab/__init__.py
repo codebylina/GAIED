@@ -1,7 +1,8 @@
 """Harness for shared-memory experiments with multi-agent campaigns (GAIED and a synthetic benchmark).
 
 Memory kinds: "none" (no shared memory), "mem0" (Mem0, used as designed), "mem0_verified" (Mem0 with the
-knowledge verification layer) and "evidence" (the evidence-grounded layered memory, memlab/evidence_memory.py).
+knowledge verification layer), "falda" (FALDA, unchanged, through its gateway) and "evidence" (the
+evidence-grounded layered memory, memlab/evidence_memory.py).
 """
 from __future__ import annotations
 
@@ -43,6 +44,9 @@ def make_memory(kind: str, store: Store, adapter: DomainAdapter, cfg: MemoryConf
             from .retrieval import Embedder
             ev["embedder"] = Embedder(store, provider="scripted")
         return EvidenceMemory(store, adapter, cfg, llm=llm, verifier=verifier, registry_cfg=reg, **ev)
+    if kind == "falda":
+        from .falda_memory import FaldaMemory
+        return FaldaMemory(store, adapter, cfg, llm=kw.get("llm"), **(kw.get("falda") or {}))
     raise ValueError(f"unknown memory kind: {kind}")
 
 
