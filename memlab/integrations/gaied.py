@@ -2,11 +2,13 @@
 Glue between GAIED (Academy + LangGraph agents, Flowcept provenance) and the memory conditions.
 
 Environment:
-  MEMORY_CONDITION   a condition of MEMORY_CONFIG: none, mem0, mem0_verified, mem0_textcheck,
-                     mem0_verified_nolayers, mem0_verified_posthoc, mem0_verified_agentindep. Unset: original GAIED, nothing recorded.
-  MEMORY_CONFIG      experiment configuration with memory_defaults (default bench/configs/main.json)
+  MEMORY_CONDITION   a condition of MEMORY_CONFIG (e.g. none, mem0, mem0_verified, registry_only,
+                     evidence_unverified, evidence). Unset: original GAIED, nothing recorded.
+  MEMORY_CONFIG      experiment configuration with memory_defaults (default bench/configs/evidence_main.json)
   MEMORY_CAMPAIGN_ID namespace of the measurement logs in Redis (default FLOWCEPT_CAMPAIGN_ID)
   MEM0_URL           the Mem0 service started by run-07.py (default http://127.0.0.1:8765)
+  MEMORY_WAIT_S      longest wait for a molecule another agent is computing (default 900; the wait ends
+                     earlier when the result arrives or when the other agent's reservation lapses)
   GOAL_TEXT, GOAL_MAX_HEAVY_ATOMS, GOAL_ALLOWED_ELEMENTS   the Goal (optional constraints)
 """
 from __future__ import annotations
@@ -31,7 +33,7 @@ def condition() -> str | None:
 def condition_spec() -> dict:
     """The condition's entry in MEMORY_CONFIG (memory kind and verification settings)."""
     name = condition()
-    path = os.environ.get("MEMORY_CONFIG", os.path.join(ROOT, "bench", "configs", "main.json"))
+    path = os.environ.get("MEMORY_CONFIG", os.path.join(ROOT, "bench", "configs", "evidence_main.json"))
     for c in json.load(open(path))["conditions"]:
         if c["name"] == name:
             return c
@@ -44,7 +46,7 @@ def verifier_from_env(store, llm=None):
 
 
 def defaults() -> dict:
-    path = os.environ.get("MEMORY_CONFIG", os.path.join(ROOT, "bench", "configs", "main.json"))
+    path = os.environ.get("MEMORY_CONFIG", os.path.join(ROOT, "bench", "configs", "evidence_main.json"))
     return json.load(open(path)).get("memory_defaults", {})
 
 
@@ -60,8 +62,9 @@ def adapter_from_env() -> ChemistryAdapter:
                             allowed_elements=[e.strip() for e in elements.split(",")] if elements else None)
 
 
-def memory_from_env(backend=None, verifier=None):
-    """The memory an agent uses (backend=None: the Mem0 service over HTTP)."""
+def memory_from_env(backend=None, verifier=None, llm=None):
+    """The memory an agent uses (backend=None: the Mem0 service over HTTP). With llm, the evidence memory
+    also distills and verifies (run-07.py does this in one process; agents only read)."""
     cond = condition()
     if not cond:
         return None
@@ -85,7 +88,57 @@ def memory_from_env(backend=None, verifier=None):
             if verifier is None:
                 kw["verifier"] = verifier_from_env(store)
         return make_memory(kind, store, adapter_from_env(), cfg, **kw)
+    if kind == "evidence":
+        spec = condition_spec()
+        return make_memory("evidence", store, adapter_from_env(), cfg, llm=llm, verifier=verifier,
+                           evidence=spec.get("evidence"), verification=spec.get("verification"))
     raise ValueError(f"MEMORY_CONDITION={cond}: unknown memory kind {kind}")
+
+
+async def gated_compute(memory, agent: str, entity: str, compute):
+    """Run compute() unless the experiment registry says not to (evidence memory only).
+
+    already measured   -> the measured value, no computation
+    failed before      -> RuntimeError with the recorded cause (the agent sees it as the result)
+    in progress        -> wait for the other agent's result (or for its reservation to lapse)
+    unknown            -> compute, holding a reservation renewed while it runs
+    """
+    import asyncio
+    if memory is None or not hasattr(memory, "claim"):
+        return await compute()
+    reg = memory.registry
+    for _ in range(2):
+        d = memory.claim(agent, entity)
+        memory.log_decisions(agent, -1, [d])      # -1: GAIED does not pass the iteration here
+        if d.action == "known":
+            return d.value
+        if d.action == "failed_before":
+            v = reg.view(d.entity)
+            raise RuntimeError(f"not run: {entity} already failed ({v.get('state')}: {v.get('error') or 'no message'}, "
+                               f"by {d.owner})")
+        if d.action != "in_progress":
+            break
+        got = await asyncio.to_thread(memory.await_results, agent, [d.entity],
+                                      float(os.environ.get("MEMORY_WAIT_S", "900")))
+        r = got.get(d.entity)
+        if r and r["status"] == "ok":
+            return r["value"]
+        if r:
+            raise RuntimeError(f"not run: {entity} failed for {d.owner} ({r.get('cause')})")
+    stop = asyncio.Event()
+
+    async def renew():
+        while not stop.is_set():
+            await asyncio.sleep(reg.cfg.lease_ttl_s / 3)
+            reg.renew(agent, d.entity)
+
+    keeper = asyncio.create_task(renew())
+    try:
+        return await compute()
+    finally:
+        stop.set()
+        keeper.cancel()
+        memory.release(agent, d.entity)
 
 
 def block(memory, agent: str, node: str, query: str, iteration: int) -> str:

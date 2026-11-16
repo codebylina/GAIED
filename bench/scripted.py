@@ -66,6 +66,20 @@ FACT_TEST = """def test(df):
 """
 
 
+def scripted_distiller(user: str) -> str:
+    """One claim per conclusion line that names an option effect; same_as when the text is already known."""
+    known = dict((t.strip(), i) for i, t in re.findall(r"^\[(a-[0-9a-f]+)\] (.+)$", user, re.M))
+    out = []
+    for mid, body in re.findall(r"^### (\S+) \(by [^)]*\)\n(.*?)(?=^### |\Z)", user.split("MESSAGES:", 1)[-1], re.M | re.S):
+        claims = []
+        for line in body.splitlines():
+            text = line.strip(" -")
+            if CLAIM_RE.search(text):
+                claims.append({"text": text, "same_as": known.get(text)})
+        out.append(f"### {mid}\n" + json.dumps({"claims": claims}))
+    return "\n".join(out)
+
+
 def scripted_verifier(user: str, text_mode: bool) -> str:
     out = []
     for block in re.split(r"(?m)^### ", user.split("MEMORIES TO REVIEW:")[-1].split("MEMORIES:")[-1])[1:]:
@@ -99,9 +113,12 @@ class ScriptedLLM:
             return self._answer(system, user, purpose)
 
     def _answer(self, system, user, purpose):
+        from memlab.distiller import DISTILL_SYSTEM
         from memlab.verifier import FORMALIZE_SYSTEM as VF, TEXT_SYSTEM as VT
         if system in (VF, VT):
             return scripted_verifier(user, system == VT)
+        if system == DISTILL_SYSTEM:
+            return scripted_distiller(user)
         if purpose == "oracle":
             m = CLAIM_RE.search(user)
             if not m:

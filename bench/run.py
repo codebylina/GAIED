@@ -52,7 +52,8 @@ def run_one(cfg: dict, scenario: dict, cond: dict, seed: int) -> dict:
             scripted = mem0_scripted(int(os.environ.get("EMBED_DIMS", "768")))
         kw["backend"] = LocalMem0(build_mem0(run_dir, "campaign", scripted=scripted), run_id="campaign", usage=usage)
         kw["top_k"] = cond.get("top_k")              # None: Mem0's default
-        kw["verification"] = cond.get("verification")
+    kw["verification"] = cond.get("verification")
+    kw["evidence"] = cond.get("evidence")
     memory = make_memory(cond["memory"], store, adapter, mcfg, **kw)
 
     n_agents, iters = cfg["n_agents"], cfg["iterations"]

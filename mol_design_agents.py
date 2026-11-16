@@ -499,7 +499,8 @@ class XTBSimulationAgent(Agent):
                     parent_task_id, workflow_id, campaign_id,
                 )
 
-        ionization_energy = await _run_xtb()
+        from memlab.integrations.gaied import gated_compute  # [memlab] exact registry check before xTB
+        ionization_energy = await gated_compute(getattr(self, 'memory', None), self.agent_name, smiles, _run_xtb)  # [memlab]
         self.molecule_cache[smiles] = ionization_energy
         return ionization_energy
 

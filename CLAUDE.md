@@ -23,17 +23,15 @@
     ou une API au format OpenAI (`LLM_PROVIDER=openai`, clé dans `docker/.env`).
   - `apply_patches.py`, `patch_stop_rule.py` : correctifs déjà appliqués (ne pas relancer).
   - `summarize_prov.py` : résume la provenance de la dernière campagne.
-- Mémoire (branche `mem0-verified`) : **Mem0 + couche de vérification des connaissances** (la contribution).
-  Méthode, corrections et protocole : `docs/VERIFICATION_LAYER.md` ; la référence Mem0 seule : branche
-  `mem0-baseline` (`docs/MEM0_BASELINE.md`). `memlab/verifier.py` = formalisation par lots (LLM écrit type,
-  portée, test exécutable avec règle de décision pré-enregistrée), réévaluation sans LLM (tests dans un seul
-  processus isolé), règle figée sur la fenêtre de la date d'affirmation (empreinte, versions), statuts selon la
-  classe des preuves (E exploratoire / C auteur / R autre agent qui avait vu le souvenir / I autre agent qui ne
-  l'avait pas vu). `memlab/verified_memory.py` = Mem0 + statuts dans le prompt. Conditions : `none`, `mem0`,
-  `mem0_textcheck`, `mem0_verified`, `mem0_verified_nolayers`, `mem0_verified_agentindep`, `mem0_verified_posthoc`
-  (`bench/configs/quick.json`, `main.json`, `dryrun.json`) ; audit manuel des tests : `bench/audit_tests.py` ;
-  GAIED : `MEMORY_CONDITION=<condition>` (Mem0 et le vérificateur tournent dans `run-07.py`).
-  Tests : `python tests/test_verifier.py`, `python tests/test_memlab.py`. Autres branches : `provmem`, `falda-baseline`.
+- Mémoire (branche `evidence-memory`, v1) : **mémoire en couches fondée sur les preuves** (la contribution).
+  Méthode : `docs/EVIDENCE_MEMORY.md`. L0 = registre des expériences tiré de la provenance (`memlab/registry.py`,
+  coordination exacte : déjà mesuré / déjà échoué / en cours) + journal des conclusions ; L1 = atomes proposés par
+  le LLM (`memlab/distiller.py`), vérifiés par un test pré-enregistré réévalué par le code (`memlab/verifier.py`,
+  classes E/C/R/I) ; L2 = sélection des généralisations établies (`memlab/evidence_memory.py`). GAIED : contrôle du
+  registre avant xTB (`gated_compute`, marqué `[memlab]`), distillation et vérification dans `run-07.py`.
+  Conditions : `bench/configs/evidence_{quick,main,dryrun}.json` (`none`, `mem0`, `registry_only`,
+  `evidence_unverified`, `evidence` + ablations). Tests : `tests/test_evidence.py`, `tests/test_verifier.py`,
+  `tests/test_memlab.py`. Branches précédentes : `mem0-verified`, `mem0-baseline`, `falda-baseline` (référence FALDA).
 - `output/flowcept_buffer_*.jsonl` : provenance de chaque campagne.
 
 ## Modifications déjà faites au code d'Amal (marquées `[gaied-docker ...]`)

@@ -1,7 +1,7 @@
 """Harness for shared-memory experiments with multi-agent campaigns (GAIED and a synthetic benchmark).
 
-Conditions: "none" (no shared memory), "mem0" (Mem0, used as designed) and "mem0_verified" (Mem0 with the
-knowledge verification layer; its "text" mode is the ablation that judges memories from their wording).
+Memory kinds: "none" (no shared memory), "mem0" (Mem0, used as designed), "mem0_verified" (Mem0 with the
+knowledge verification layer) and "evidence" (the evidence-grounded layered memory, memlab/evidence_memory.py).
 """
 from __future__ import annotations
 
@@ -29,6 +29,16 @@ def make_memory(kind: str, store: Store, adapter: DomainAdapter, cfg: MemoryConf
         verifier = kw.get("verifier") or Verifier(store, adapter, kw.get("llm"), vcfg)
         return VerifiedMem0Memory(store, adapter, cfg, llm=kw.get("llm"), backend=kw["backend"],
                                   top_k=kw.get("top_k"), verifier=verifier)
+    if kind == "evidence":
+        from .evidence_memory import EvidenceMemory
+        from .registry import RegistryConfig
+        from .verifier import VerificationConfig, Verifier
+        ev = dict(kw.get("evidence") or {})
+        reg = RegistryConfig(**ev.pop("registry", {}))
+        verifier = kw.get("verifier")
+        if verifier is None and ev.get("verify", True) and ev.get("knowledge", True):
+            verifier = Verifier(store, adapter, kw.get("llm"), VerificationConfig(**(kw.get("verification") or {})))
+        return EvidenceMemory(store, adapter, cfg, llm=kw.get("llm"), verifier=verifier, registry_cfg=reg, **ev)
     raise ValueError(f"unknown memory kind: {kind}")
 
 
