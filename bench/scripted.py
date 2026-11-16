@@ -56,6 +56,18 @@ GEN_TEST = """def test(df):
             'stats': {{'ref': float(ref)}}, 'verdict': v}}
 """
 
+GEN_COMPARISON = """def test(df):
+    ok = df[df['status'] == 'ok']
+    col = 'slot_{s}'
+    inside, rest = ok[ok[col] == {o}], ok[ok[col] != {o}]
+    return {{'groups': {{'{a}': ids(inside), '{b}': ids(rest)}}, 'note': 'option vs the other options'}}
+"""
+
+FACT_COMPARISON = """def test(df):
+    rows = df[df['entity'] == '{e}']
+    return {{'facts': [{{'id': i, 'status': 'ok', 'value': '{v}'}} for i in ids(rows)], 'note': 'reported value'}}
+"""
+
 FACT_TEST = """def test(df):
     rows = df[df['entity'] == '{e}']
     ok = rows[rows['status'] == 'ok']
@@ -95,7 +107,7 @@ def scripted_falda(system: str, user: str) -> str:
     return "# Project core\n" + "\n".join(goal + [f"- {c}" for c in claims])
 
 
-def scripted_verifier(user: str, text_mode: bool) -> str:
+def scripted_verifier(user: str, text_mode: bool, comparison: bool = False) -> str:
     out = []
     for block in re.split(r"(?m)^### ", user.split("MEMORIES TO REVIEW:")[-1].split("MEMORIES:")[-1])[1:]:
         mid = block.split()[0]
@@ -107,10 +119,13 @@ def scripted_verifier(user: str, text_mode: bool) -> str:
         f = re.search(r"((?:[A-Z]\d+-)+[A-Z]\d+)\D{0,20}?(-?\d+\.\d+)", body)
         if m:
             s_, o, d = m.group(1), m.group(2), m.group(3)
-            code = GEN_TEST.format(s=s_, o=o, op=">" if d == "increases" else "<")
+            code = (GEN_COMPARISON.format(s=s_, o=o, a="higher" if d == "increases" else "lower",
+                                          b="lower" if d == "increases" else "higher") if comparison
+                    else GEN_TEST.format(s=s_, o=o, op=">" if d == "increases" else "<"))
             out.append(f'### {mid}\n{{"kind": "generalization", "scoped_statement": "{m.group(0)} the outcome"}}\n```python\n{code}```')
         elif f:
-            code = FACT_TEST.format(e=f.group(1), v=float(f.group(2)))
+            code = (FACT_COMPARISON.format(e=f.group(1), v=f.group(2)) if comparison
+                    else FACT_TEST.format(e=f.group(1), v=float(f.group(2))))
             out.append(f'### {mid}\n{{"kind": "report", "scoped_statement": "{f.group(1)} gave {f.group(2)}"}}\n```python\n{code}```')
         else:
             out.append(f'### {mid}\n{{"kind": "untestable", "scoped_statement": "n/a"}}')
@@ -129,9 +144,9 @@ class ScriptedLLM:
 
     def _answer(self, system, user, purpose):
         from memlab.distiller import DISTILL_SYSTEM
-        from memlab.verifier import FORMALIZE_SYSTEM as VF, TEXT_SYSTEM as VT
-        if system in (VF, VT):
-            return scripted_verifier(user, system == VT)
+        from memlab.verifier import FORMALIZE_SYSTEM as VF, FORMALIZE_SYSTEM_CODE as VC, TEXT_SYSTEM as VT
+        if system in (VF, VC, VT):
+            return scripted_verifier(user, system == VT, comparison=system == VC)
         if system == DISTILL_SYSTEM:
             return scripted_distiller(user)
         if system.startswith(("You extract durable agent-memory atoms", "You write a concise episodic SCENE",

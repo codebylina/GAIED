@@ -115,7 +115,7 @@ def test_conclusions_become_atoms_with_source_and_restatements():
 # --------------------------------------------------------------------------- L1 -> L2 and back
 def test_promotion_by_evidence_and_demotion_notice():
     mem, store, clock = memory()
-    for e in a0()[:2] + others()[:3]:
+    for e in a0()[:4] + others()[:4]:
         run(mem, clock, e, "a1")
     mem.submit_conclusion("a1", "- " + CLAIM, 0)
     settle(mem)
@@ -123,7 +123,8 @@ def test_promotion_by_evidence_and_demotion_notice():
     assert store.get("vmem", aid)["status"] == "hypothesis"               # only the data that suggested it
     text = mem.briefing("a2", "plan", "option A0 slot A", 1)
     assert "TO TEST" in text and "ESTABLISHED" not in text
-    run(mem, clock, a0()[2], "a3")                                        # a3 never saw the claim
+    for e in a0()[4:7]:                                                   # a3 never saw the claim
+        run(mem, clock, e, "a3")
     settle(mem)
     assert store.get("vmem", aid)["status"] == "established"
     text = mem.briefing("a2", "plan", "option A0 slot A", 1)
@@ -131,10 +132,10 @@ def test_promotion_by_evidence_and_demotion_notice():
     # the rule now fails to find support: the atom leaves L2 and a2, who was shown it as true, is told
     from memlab.verifier import sha
     d = store.get("vmem", aid)
-    code = "def test(df):\n    return {'in_scope': list(df['id']), 'support': [], 'contradict': [], 'verdict': 'insufficient'}"
+    code = "def test(df):\n    return {'groups': {'higher': [], 'lower': ids(df)}}"
     d.update(code=code, rule={**d["rule"], "sha256": sha(code)})
     store.put("vmem", aid, d)
-    run(mem, clock, others()[3], "a1")
+    run(mem, clock, others()[5], "a1")
     settle(mem)
     assert store.get("vmem", aid)["status"] == "contested"
     text = mem.briefing("a2", "plan", "option A0 slot A", 2)
@@ -143,7 +144,7 @@ def test_promotion_by_evidence_and_demotion_notice():
 
 def test_false_claim_is_shown_as_false():
     mem, store, clock = memory()
-    for e in a0()[:2] + others()[:3]:
+    for e in a0()[:4] + others()[:4]:
         run(mem, clock, e, "a1")
     mem.submit_conclusion("a1", "- " + FALSE, 0)
     settle(mem)
@@ -196,7 +197,7 @@ def test_tools_lookup_best_and_search_are_logged():
     assert "measured by a1" in mem.call_tool("a2", "lookup", {"design": others()[0]})
     assert "never measured" in mem.call_tool("a2", "lookup", {"design": a0()[0]})
     assert others()[0] in mem.call_tool("a2", "best_results", {})
-    for e in a0()[:2] + others()[1:3]:
+    for e in a0()[:4] + others()[1:5]:
         run(mem, clock, e, "a1")
     mem.submit_conclusion("a1", "- " + FALSE, 0)
     settle(mem)
@@ -211,7 +212,7 @@ def test_replay_judges_an_unverified_campaign():
     from bench.analyze_gaied import knowledge_metrics
     from bench.replay_verify import replay
     mem, store, clock = memory(verify=False)
-    for e in a0()[:2] + others()[:3]:
+    for e in a0()[:4] + others()[:4]:
         run(mem, clock, e, "a1")
     mem.submit_conclusion("a1", "- " + FALSE, 0)
     settle(mem)

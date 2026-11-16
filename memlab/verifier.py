@@ -14,7 +14,11 @@ Every memory the host memory (Mem0) stores is checked against the workflow's mea
      run) sees the same window and a sanitized error (no measured values), and must keep the statement
      and the rule. Every rule version is kept.
   2. Evaluation (code, no LLM): the frozen tests are re-run whenever new measurements arrive (all tests
-     in one sandboxed process). The verdict is the one the pre-registered rule computes.
+     in one sandboxed process). With decision="code" (default) the test only returns what the memory predicts
+     (matched pairs, two groups, failure rates or facts) and a fixed statistical rule written in code decides
+     (memlab/evidence_test.py: sign test on disjoint pairs, Mann-Whitney, Fisher, facts at the precision written;
+     significance level alpha). With decision="llm" (ablation, and the first version) the verdict is the one the
+     rule written by the LLM computes.
   3. Evidence classes, from provenance (who measured what, when, after seeing what):
         E  exploratory   available before the claim time, or a re-measurement of a design measured
                          before it (same source: it may have suggested the claim)
@@ -25,8 +29,10 @@ Every memory the host memory (Mem0) stores is checked against the workflow's mea
   4. Status (a function of the current verdict and of the evidence classes):
         reports / predictions   verified | refuted | unsupported (a report with no measurement on record)
                                 | open (no or insufficient evidence yet)
-        generalizations         refuted | established (independent support from >= k other agents)
-                                | supported (support includes C, R or I) | hypothesis (E support only)
+        generalizations         refuted (significant against) | established (significant on the measurements made
+                                after the claim, with >= k independent agents) | supported (significant on new data,
+                                or on all data with the new data pointing the same way) | hypothesis (significant
+                                only on the measurements that suggested it)
                                 | contested (was asserted, the rule no longer finds it supported)
                                 | open (no or insufficient evidence)
         any                     unverifiable (untestable, or the test fails twice) | pending | deleted
@@ -81,9 +87,69 @@ evidence for the noise of the measurements, and return "insufficient" otherwise.
 compare with the measured value at the precision the memory states.
 Use only the columns listed. pandas is pd, numpy is np. Keep each test short: no comments, no prints."""
 
-REPAIR_NOTE = ("YOUR TEST FAILED: {error}\nYOUR TEST:\n{code}\nFix the error only: keep the same kind, the same "
-               "scoped statement and the same decision rule. Remember: in_scope, support and contradict list values of "
-               "df['id']; rows are selected by conditions on the columns, never by measurement ids.")
+FORMALIZE_SYSTEM_CODE = """You check the memories of a team of research agents against the team's measurements.
+For EACH memory below, write a section that starts with a line "### <memory id>", then a JSON line:
+{"kind": "report|prediction|generalization|untestable", "scoped_statement": "..."}
+then, unless the kind is untestable, a ```python block that defines `def test(df):`.
+
+Kinds:
+- report: states the outcome of experiments already run (e.g. "design X gave 2.5", "design Y failed");
+- prediction: states the outcome of specific designs, which may not have been measured yet;
+- generalization: how options or features relate to the outcome, beyond the designs named;
+- untestable: a plan, an advice, or a statement that no measurement could contradict (e.g. "comparable or
+  slightly better", "may help", "is a robust choice").
+
+scoped_statement: the memory restated so that it says no more than it is about: an association observed on
+designs like the ones measured, not a causal law. Keep its meaning and its direction; never turn it into
+its opposite.
+
+You do NOT decide whether the memory is true. The test only says WHICH measurements the memory makes a prediction
+about and WHAT it predicts; the code then compares the prediction with the measured outcomes and decides, with the
+same statistical rule for every memory. The test receives df, one row per measurement (columns below; df.index is
+df['id']). It returns a dict with "note" (one sentence) and exactly ONE of these keys:
+- "pairs": [[id_a, id_b], ...] : the memory predicts value(a) > value(b) for each pair. Use it whenever designs can
+  be compared two by two, equal on every other descriptor: pairs(frame_a, frame_b, vary=[columns]) returns the
+  pairs of rows of frame_a and frame_b that are equal on all the descriptor columns except those in vary.
+- "groups": {"higher": [ids], "lower": [ids]} : values in "higher" tend to exceed those in "lower" (when no matched
+  pairs exist, e.g. the designs with an option against the designs with the other options of the same slot).
+- "fail_rate": {"more": [ids], "less": [ids]} : designs in "more" fail more often than those in "less".
+- "facts": [{"id": id, "status": "ok" or "failed", "value": "<the number exactly as written in the memory>" or
+  null}, ...] : the outcome of these measurements (reports, and predictions about named designs).
+"higher", "lower" and "value(a) > value(b)" are about the value itself; the table header says whether a higher
+value is better, so "improves" means a higher value only when higher is better.
+
+Rules:
+- ids are values of df['id']: ids(frame) returns them. Never values, never the memory's id.
+- Select rows by conditions on the columns, never by listing ids: the test is re-run, unchanged, on every later
+  measurement. A generalization selects by descriptors, so it also covers designs not measured yet; a report or a
+  prediction selects its named designs by their entity key.
+- In "pairs" and "groups" keep the rows with status 'ok'; a claim about failures uses "fail_rate" or "facts".
+- Iterating over a DataFrame gives its column names: use ids(frame), frame.iterrows() or frame.itertuples().
+Example (memory: "option 1 of slot X gives a higher outcome than option 0"):
+def test(df):
+    ok = df[df['status'] == 'ok']
+    return {"pairs": pairs(ok[ok['X'] == 1], ok[ok['X'] == 0], vary=['X']), "note": "X=1 vs X=0, other columns equal"}
+Use only the columns listed. pandas is pd, numpy is np. Keep each test short: no comments, no prints."""
+
+REPAIR_NOTE = ("YOUR TEST FAILED: {error}\n{hint}YOUR TEST:\n{code}\nFix the error only: keep the same kind, the "
+               "same scoped statement and the same meaning. Remember: lists contain values of df['id'] (ids(frame)); "
+               "rows are selected by conditions on the columns, never by measurement ids.")
+
+REPAIR_HINTS = (
+    ("string indices must be integers", "Iterating over a DataFrame gives its column names, not its rows: use "
+                                        "ids(frame), frame.iterrows() or frame.itertuples()."),
+    ("truth value of a Series is ambiguous", "Combine conditions with & and | (with parentheses), and test a frame "
+                                             "with len(frame) > 0, .any() or .all()."),
+    ("KeyError: 'id'", "Only a DataFrame has the column 'id': select the rows with df[mask] before ids(...)."),
+    ("which is a number", "Put ids(frame) in the lists, never frame['value']."),
+    ("SyntaxError", "Check that every bracket and parenthesis is closed."),
+    ("return exactly one of the keys", "Return one comparison only: pairs, groups, fail_rate or facts."),
+)
+
+
+def repair_hint(error: str) -> str:
+    return "".join(h + "\n" for k, h in REPAIR_HINTS if k in error)
+
 
 _LITERAL_ID = re.compile(r"""['"][0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}['"]""")
 
@@ -111,6 +177,9 @@ class VerificationConfig:
     test_timeout_s: float = 120.0
     repair: bool = True               # rewrite a test once when it fails to run
     tokens_per_test: int = 400        # used to size formalization batches (approximate test length)
+    decision: str = "code"            # code: the test says what the memory predicts, a fixed statistical rule decides
+                                      # (memlab/evidence_test.py) | llm: the test computes its own verdict (ablation)
+    alpha: float = 0.05               # significance level of the code's decision rule (convention)
 
 
 def sha(code: str) -> str:
@@ -198,9 +267,10 @@ class Verifier:
             context, max_t = self._context(until)
             user = context + "\n\nMEMORIES:\n" + "\n".join(
                 f"### {d['id']} (written by {d['author']})\n{d['text']}" +
-                ("\n" + REPAIR_NOTE.format(error=errors[d["id"]], code=d["code"]) if errors and d["id"] in errors else "")
+                ("\n" + REPAIR_NOTE.format(error=errors[d["id"]], hint=repair_hint(errors[d["id"]]), code=d["code"]) if errors and d["id"] in errors else "")
                 for d in docs)
-            answer = self.llm.complete(FORMALIZE_SYSTEM, user, purpose="judge", max_tokens=long_output_tokens())
+            system = FORMALIZE_SYSTEM_CODE if self.cfg.decision == "code" else FORMALIZE_SYSTEM
+            answer = self.llm.complete(system, user, purpose="judge", max_tokens=long_output_tokens())
             sections = self._sections(answer, [d["id"] for d in docs])
             for d in docs:
                 self._read_section(d, sections.get(d["id"]), reason, until, max_t)
@@ -306,7 +376,7 @@ class Verifier:
         bad = {d["id"] for d in todo if not d.get("rule") or sha(d["code"]) != d["rule"]["sha256"]}
         static = {d["id"]: p for d in todo if d["id"] not in bad and (p := static_problem(d["code"], d["id"]))}
         results = run_many({d["id"]: d["code"] for d in todo if d["id"] not in bad and d["id"] not in static},
-                           rows, self.cfg.test_timeout_s)
+                           rows, self.cfg.test_timeout_s, form="comparison" if self.cfg.decision == "code" else "verdict")
         results.update({i: {"error": p} for i, p in static.items()})
         by_id = {r["id"]: r for r in rows}
         started = {str(o["id"]): float(o.get("started_at") or o["t"]) for o in self.store.all("obs")}
@@ -321,7 +391,10 @@ class Verifier:
                 else:
                     self._set(d, "unverifiable", {"reason": "test error", "error": sanitize(res["error"])})
                 continue
-            self._apply(d, res, by_id, started, len(rows))
+            if self.cfg.decision == "code":
+                self._apply_code(d, res, by_id, started, len(rows))
+            else:
+                self._apply(d, res, by_id, started, len(rows))
         if failed:
             self._formalize([self.store.get("vmem", i) for i in failed], "repair", errors=failed)
         return len(todo)
@@ -382,6 +455,74 @@ class Verifier:
         self._set(d, new, {"verdict": v, "evidence": d["evidence"], "n_support": len(res["support"]),
                            "n_contradict": len(res["contradict"]), "classes": d["eval"]["classes"],
                            "rule_version": d["eval"]["rule_version"]})
+
+    # ------------------------------------------------------------------ decision by code (decision="code")
+    def code_status(self, d: dict, comp: dict, all_: dict, new: dict | None, indep: set, prev: str) -> str:
+        """The status the measurements justify, by the fixed rule of memlab/evidence_test.py.
+        reports / predictions: every unit agrees -> verified, one disagrees -> refuted (facts and pairs are exact
+        statements about named measurements); a group comparison -> verified / refuted when significant.
+        generalizations: significant against (all data or new data) -> refuted; significant on the measurements made
+        after the claim with >= k independent agents -> established; significant on the new measurements, or on all
+        with the new ones pointing the same way -> supported; significant only on the measurements that suggested it
+        -> hypothesis; otherwise open (contested if it was shown as true)."""
+        a = self.cfg.alpha
+        if d["kind"] in ("report", "prediction"):
+            if all_["n"] == 0:
+                return "unsupported" if d["kind"] == "report" else "open"
+            if comp["form"] in ("facts", "pairs"):
+                return "refuted" if all_["disagree"] else "verified"
+            return "verified" if all_["p_for"] < a else "refuted" if all_["p_against"] < a else "open"
+        if all_["p_against"] < a or (new and new["p_against"] < a):
+            return "refuted"
+        if not self.cfg.layers:
+            if all_["p_for"] < a:
+                return "established"
+        elif new and new["p_for"] < a and len(indep) >= max(1, self.cfg.min_independent_agents):
+            return "established"
+        elif new and (new["p_for"] < a or (all_["p_for"] < a and new["p_for"] <= new["p_against"])):
+            return "supported"
+        elif all_["p_for"] < a:
+            return "hypothesis"
+        return "contested" if prev in ASSERTED or prev == "contested" else "open"
+
+    def _apply_code(self, d: dict, comp: dict, by_id: dict, started: dict, n_obs: int) -> None:
+        from .evidence_test import involved, restrict, stat
+        if comp["form"] == "untestable":
+            self._set(d, "unverifiable", {"reason": "untestable", "note": comp.get("note")})
+            return
+        ids = involved(comp)
+        cls = dict(zip(ids, self.classify(d, ids, by_id, started)))
+        all_ = stat(comp, by_id)
+        new_ids = {i for i, c in cls.items() if c != "E"}
+        sub = restrict(comp, new_ids) if d["kind"] == "generalization" else None
+        new = stat(sub, by_id) if sub else None
+        if new is not None and new["n"] == 0:
+            new = None
+        used_new = set(new["agree"] + new["disagree"]) if new else set()
+        indep = {by_id[i].get("agent") for i in used_new if cls.get(i) == "I"}
+        indep.discard(None)
+        status = self.code_status(d, comp, all_, new, indep, d["status"])
+        a = self.cfg.alpha
+        if d["kind"] == "generalization" or comp["form"] in ("groups", "fail_rate"):
+            v = "supported" if all_["p_for"] < a else "contradicted" if all_["p_against"] < a else "insufficient"
+        else:
+            v = "contradicted" if all_["disagree"] else "supported" if all_["agree"] else "insufficient"
+        d["evidence"] = ("none" if all_["n"] == 0 else {"supported": "favourable",
+                                                        "contradicted": "contradictory"}.get(v, "insufficient"))
+        num = lambda x: round(x, 4) if isinstance(x, float) else x
+        stats = {k: num(x) for k, x in all_.items() if k not in ("agree", "disagree")}
+        if new:
+            stats.update({f"new_{k}": num(x) for k, x in new.items() if k in ("n", "p_for", "p_against")})
+        d["eval"] = {"n_obs": n_obs, "verdict": v, "form": comp["form"], "in_scope": len(ids),
+                     "support": all_["agree"], "contradict": all_["disagree"],
+                     "classes": {"support": "".join(cls.get(i, "E") for i in all_["agree"]),
+                                 "contradict": "".join(cls.get(i, "E") for i in all_["disagree"])},
+                     "independent_agents": sorted(indep), "stats": stats, "note": comp.get("note"),
+                     "rule_version": (d.get("rule") or {}).get("version"), "t": self.clock()}
+        self._set(d, status, {"verdict": v, "evidence": d["evidence"], "n_support": len(all_["agree"]),
+                              "n_contradict": len(all_["disagree"]), "classes": d["eval"]["classes"],
+                              "p_for": stats.get("p_for"), "new_p_for": stats.get("new_p_for"),
+                              "rule_version": d["eval"]["rule_version"]})
 
     def _set(self, d: dict, status: str, info: dict) -> None:
         old = d["status"]

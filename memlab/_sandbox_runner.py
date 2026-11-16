@@ -29,6 +29,9 @@ def main() -> None:
         df = pd.DataFrame(data["rows"])
         if "id" in df.columns:
             df["id"] = df["id"].astype(str)
+            df.index = list(df["id"])          # frame.index, iterrows() and idxmax() give measurement ids
+        env["ids"] = _ids
+        env["pairs"] = _pairs
     except ImportError:
         df = data["rows"]
     try:
@@ -68,6 +71,28 @@ def main() -> None:
         print(json.dumps(plain(out), default=str))
     except Exception as exc:  # reported to the judge, which may rewrite its test
         print(json.dumps({"error": f"{type(exc).__name__}: {exc}"}))
+
+
+BASE_COLUMNS = {"id", "entity", "value", "status", "agent", "t", "evidence", "started_at"}
+
+
+def _ids(frame):
+    """The measurement ids of the rows of a DataFrame (or of a boolean mask's selected rows)."""
+    return [str(i) for i in frame["id"]]
+
+
+def _pairs(frame_a, frame_b, vary=None):
+    """[[id_a, id_b], ...]: rows of frame_a and frame_b equal on every descriptor column except those in `vary`
+    (by default, the descriptor columns whose values differ between the two frames)."""
+    desc = [c for c in frame_a.columns if c not in BASE_COLUMNS]
+    if vary is None:
+        vary = [c for c in desc if not set(frame_a[c].dropna()) & set(frame_b[c].dropna())]
+    vary = [vary] if isinstance(vary, str) else list(vary)
+    on = [c for c in desc if c not in vary]
+    a = frame_a[["id"] + on].rename(columns={"id": "id_a"})
+    b = frame_b[["id"] + on].rename(columns={"id": "id_b"})
+    m = a.merge(b, on=on) if on else a.merge(b, how="cross")
+    return [[str(x), str(y)] for x, y in zip(m["id_a"], m["id_b"]) if str(x) != str(y)]
 
 
 def _run_one(code, fn, df, base_env):

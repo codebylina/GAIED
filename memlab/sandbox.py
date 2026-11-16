@@ -19,17 +19,18 @@ import sys
 RUNNER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_sandbox_runner.py")
 
 
-class TestError(Exception):
-    pass
+from .evidence_test import TestError, parse as parse_comparison
 
 
 def run_test(code: str, rows: list[dict], timeout_s: float) -> dict:
     return validate(_run(code, rows, timeout_s, "test"), {str(r["id"]) for r in rows})
 
 
-def run_many(codes: dict[str, str], rows: list[dict], timeout_s: float) -> dict[str, dict]:
+def run_many(codes: dict[str, str], rows: list[dict], timeout_s: float, form: str = "verdict") -> dict[str, dict]:
     """Run several tests on the same table in one child process. Returns, per key, either the
-    validated result or {"error": "..."}; one failing test does not affect the others."""
+    validated result or {"error": "..."}; one failing test does not affect the others.
+    form: "verdict" (the test returns its evidence and its own verdict) or "comparison" (the test returns what the
+    memory predicts, in one of the forms of memlab.evidence_test, and the code decides)."""
     if not codes:
         return {}
     payload = json.dumps({"codes": codes, "rows": rows, "fn": "test"}, default=str)
@@ -52,6 +53,9 @@ def run_many(codes: dict[str, str], rows: list[dict], timeout_s: float) -> dict[
             out[k] = r
             continue
         try:
+            if form == "comparison":
+                out[k] = parse_comparison(r, known, by_entity)
+                continue
             v = validate(r, known, by_entity)
             v["verdict"] = str(r.get("verdict", "")).lower()
             out[k] = v

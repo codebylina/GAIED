@@ -82,7 +82,7 @@ def test_fact_verified_unsupported_refuted():
 # --------------------------------------------------------------------------- generalizations
 def _generalization(**vcfg):
     store, adapter, v, clock = setup(**vcfg)
-    for e in a0_designs()[:2] + others()[:3]:
+    for e in a0_designs()[:4] + others()[:4]:
         observe(adapter, store, clock, e, "a1")
     v.register("g", "- Option A0 increases the outcome compared with the other options of slot A.", "a1")
     while v.step():
@@ -97,11 +97,12 @@ def test_exploratory_evidence_only_gives_a_hypothesis():
 
 def test_confirmation_then_independent_confirmation():
     store, adapter, v, clock = _generalization()
-    observe(adapter, store, clock, a0_designs()[2], "a1")          # after the memory, same author
+    observe(adapter, store, clock, a0_designs()[4], "a1")          # after the memory, same author
     while v.step():
         pass
     assert v.status_of(["g"])["g"]["status"] == "supported"
-    observe(adapter, store, clock, a0_designs()[3], "a2")          # after the memory, another agent
+    for e in a0_designs()[5:7]:                                    # after the memory, another agent
+        observe(adapter, store, clock, e, "a2")
     while v.step():
         pass
     d = v.status_of(["g"])["g"]
@@ -110,7 +111,7 @@ def test_confirmation_then_independent_confirmation():
 
 def test_contradiction_refutes():
     store, adapter, v, clock = setup()
-    for e in a0_designs()[:2] + others()[:3]:
+    for e in a0_designs()[:4] + others()[:4]:
         observe(adapter, store, clock, e, "a1")
     v.register("g", "- Option A0 decreases the outcome compared with the other options of slot A.", "a1")
     while v.step():
@@ -132,7 +133,7 @@ def freeze(v, mem_id, code, kind="generalization"):
 
 
 def test_verdict_without_evidence_is_insufficient():
-    store, adapter, v, clock = setup()
+    store, adapter, v, clock = setup(decision="llm")
     observe(adapter, store, clock, others()[0], "a1")
     v.register("g", "x", "a1")
     freeze(v, "g", "def test(df):\n    return {'in_scope': [], 'support': [], 'contradict': [], 'verdict': 'supported'}")
@@ -161,9 +162,9 @@ def test_repair_error_does_not_leak_values():
 def test_tampered_rule_is_not_run():
     store, adapter, v, clock = _generalization()
     d = v.store.get("vmem", "g")
-    d["code"] = d["code"].replace(">=", ">")                     # changed after it was frozen
+    d["code"] = d["code"].replace("'higher'", "'lower'", 1)       # changed after it was frozen
     v.store.put("vmem", "g", d)
-    observe(adapter, store, clock, a0_designs()[2], "a2")
+    observe(adapter, store, clock, a0_designs()[4], "a2")
     v._evaluate()
     assert v.status_of(["g"])["g"]["status"] == "unverifiable"
 
@@ -191,10 +192,10 @@ def test_memory_id_or_hard_coded_ids_send_the_test_to_repair():
 # --------------------------------------------------------------------------- pre-registration
 def test_rule_is_written_from_the_claim_time_window_only():
     store, adapter, v, clock = setup()
-    for e in a0_designs()[:2] + others()[:3]:
+    for e in a0_designs()[:4] + others()[:4]:
         observe(adapter, store, clock, e, "a1")
     t_claim = clock()
-    for e in a0_designs()[2:4]:                                   # measured after the claim, before formalization
+    for e in a0_designs()[4:6]:                                   # measured after the claim, before formalization
         observe(adapter, store, clock, e, "a2")
     v.register("g", "- Option A0 increases the outcome compared with the other options of slot A.", "a1",
                written_at=t_claim)
@@ -207,7 +208,7 @@ def test_rule_is_written_from_the_claim_time_window_only():
 
 def test_posthoc_ablation_rewrites_the_rule_after_new_data():
     store, adapter, v, clock = _generalization(preregistered=False)
-    observe(adapter, store, clock, a0_designs()[2], "a2")
+    observe(adapter, store, clock, a0_designs()[4], "a2")
     while v.step():
         pass
     d = v.status_of(["g"])["g"]
@@ -223,12 +224,13 @@ def _show(store, clock, agent, mem_id):
 def test_informed_replication_is_not_independent():
     store, adapter, v, clock = _generalization()
     _show(store, clock, "a2", "g")                               # a2 reads the claim, then tests it
-    observe(adapter, store, clock, a0_designs()[2], "a2")
+    for e in a0_designs()[4:7]:
+        observe(adapter, store, clock, e, "a2")
     while v.step():
         pass
     d = v.status_of(["g"])["g"]
     assert d["status"] == "supported" and "R" in d["eval"]["classes"]["support"] and "I" not in d["eval"]["classes"]["support"], d["eval"]
-    observe(adapter, store, clock, a0_designs()[3], "a3")       # a3 never saw it
+    observe(adapter, store, clock, a0_designs()[7], "a3")       # a3 never saw it
     while v.step():
         pass
     d = v.status_of(["g"])["g"]
@@ -238,7 +240,8 @@ def test_informed_replication_is_not_independent():
 def test_agent_independence_ablation_ignores_exposure():
     store, adapter, v, clock = _generalization(independence="agent")
     _show(store, clock, "a2", "g")
-    observe(adapter, store, clock, a0_designs()[2], "a2")
+    for e in a0_designs()[4:7]:
+        observe(adapter, store, clock, e, "a2")
     while v.step():
         pass
     assert v.status_of(["g"])["g"]["status"] == "established"
@@ -259,7 +262,7 @@ def test_prediction_without_measurement_is_open_report_is_unsupported():
     observe(adapter, store, clock, others()[0], "a1")
     e = a0_designs()[0]
     code = ("def test(df):\n    r = df[df['entity'] == '" + e + "']\n"
-            "    return {'in_scope': list(r['id']), 'support': list(r['id']), 'contradict': [], 'verdict': 'supported'}")
+            "    return {'facts': [{'id': i, 'status': 'ok', 'value': None} for i in ids(r)]}")
     for mid, kind in (("p", "prediction"), ("r", "report")):
         v.register(mid, "x", "a1")
         freeze(v, mid, code, kind)
@@ -273,14 +276,13 @@ def test_prediction_without_measurement_is_open_report_is_unsupported():
 
 def test_asserted_then_insufficient_is_contested():
     store, adapter, v, clock = _generalization()
-    observe(adapter, store, clock, a0_designs()[2], "a1")
+    observe(adapter, store, clock, a0_designs()[4], "a1")
     while v.step():
         pass
     assert v.status_of(["g"])["g"]["status"] == "supported"
     n = store.log_len("obs_log")
-    freeze(v, "g", "def test(df):\n    return {'in_scope': list(df['id']), 'support': [], 'contradict': [], "
-                   "'verdict': 'insufficient'}")
-    observe(adapter, store, clock, others()[3], "a1")
+    freeze(v, "g", "def test(df):\n    return {'groups': {'higher': ids(df)[:1], 'lower': ids(df)[1:2]}}")
+    observe(adapter, store, clock, others()[5], "a1")
     v._evaluate()
     d = v.status_of(["g"])["g"]
     assert d["status"] == "contested" and d["evidence"] == "insufficient" and n < store.log_len("obs_log")
@@ -307,7 +309,7 @@ def test_briefing_sections_and_notice():
                       backend=backend)
     mem.verifier.clock = clock
     mem.clock = clock
-    for e in a0_designs()[:2] + others()[:3]:
+    for e in a0_designs()[:4] + others()[:4]:
         rec = ENV.run(e, "a1")
         rec["ended_at"] = clock()
         mem.ingest(rec)
@@ -320,6 +322,74 @@ def test_briefing_sections_and_notice():
     assert "TO TEST" in text and "KNOWN FALSE" in text, text
     assert {i["asserted"] for i in items} == {None, False}
     assert len(mem.briefing("a2", "plan", "option", 1)) <= 3000
+
+
+# --------------------------------------------------------------------------- decision by code
+def test_code_decision_without_evidence_is_open():
+    store, adapter, v, clock = setup()
+    observe(adapter, store, clock, others()[0], "a1")
+    v.register("g", "x", "a1")
+    freeze(v, "g", "def test(df):\n    return {'groups': {'higher': [], 'lower': ids(df)}}")
+    v._evaluate()
+    d = v.status_of(["g"])["g"]
+    assert d["eval"]["verdict"] == "insufficient" and d["status"] == "open" and d["evidence"] == "none", d
+
+
+def test_one_comparison_never_establishes():
+    """The lax case seen with Qwen: a single matched pair, then an independent agent's single pair."""
+    from memlab.evidence_test import binom_tail
+    assert binom_tail(4, 4) > 0.05 and binom_tail(5, 5) < 0.05       # 5 agreeing disjoint pairs are needed
+    store, adapter, v, clock = setup()
+    a0, a1 = a0_designs()[0], a0_designs()[0].replace("A0", "A1")
+    observe(adapter, store, clock, a0, "a1")
+    observe(adapter, store, clock, a1, "a1")
+    v.register("g", "x", "a1")
+    freeze(v, "g", "def test(df):\n    ok = df[df['status'] == 'ok']\n"
+                   "    return {'pairs': pairs(ok[ok['slot_A'] == 0], ok[ok['slot_A'] == 1], vary=['slot_A'])}")
+    v._evaluate()
+    assert v.status_of(["g"])["g"]["status"] == "open"
+    b = a0.replace("C0", "C1") if "C0" in a0 else a0.replace("C1", "C0").replace("C2", "C0")
+    observe(adapter, store, clock, b, "a2")
+    observe(adapter, store, clock, b.replace("A0", "A1"), "a2")
+    v._evaluate()
+    d = v.status_of(["g"])["g"]
+    assert d["status"] != "established" and d["eval"]["stats"]["n"] == 2, d["eval"]
+
+
+def test_pairs_are_disjoint_and_ids_from_the_index_are_valid():
+    from memlab.evidence_test import parse, stat
+    by_id = {"a": {"status": "ok", "value": 3.0}, "b": {"status": "ok", "value": 1.0},
+             "c": {"status": "ok", "value": 2.0}, "d": {"status": "failed", "value": None}}
+    comp = parse({"pairs": [["a", "b"], ["a", "c"], ["c", "b"], ["c", "d"]]}, set(by_id))
+    s = stat(comp, by_id)
+    assert s["n"] == 1 and s["k_for"] == 1             # a-b used; a-c and c-b reuse a row; c-d has a failure
+    store, adapter, v, clock = setup()
+    for e in others()[:3]:
+        observe(adapter, store, clock, e, "a1")
+    v.register("g", "x", "a1")
+    freeze(v, "g", "def test(df):\n    ok = df[df['status'] == 'ok']\n"
+                   "    return {'groups': {'higher': list(ok.index[:1]), 'lower': [i for i, r in ok.iterrows()][1:]}}")
+    v._evaluate()
+    assert v.status_of(["g"])["g"]["eval"]["in_scope"] == 3
+
+
+def test_values_in_place_of_ids_are_refused_with_a_hint():
+    from memlab.evidence_test import TestError, parse
+    from memlab.verifier import repair_hint
+    try:
+        parse({"groups": {"higher": [1.25], "lower": []}}, {"m1"})
+        raise AssertionError("accepted a value")
+    except TestError as exc:
+        assert "number" in str(exc) and "ids(frame)" in repair_hint(str(exc))
+    assert "iterrows" in repair_hint("TypeError: string indices must be integers, not 'str'")
+
+
+def test_fact_value_at_the_precision_written():
+    from memlab.evidence_test import parse, stat
+    by_id = {"m": {"status": "ok", "value": 2.6728152}}
+    ok = lambda v: stat(parse({"facts": [{"id": "m", "status": "ok", "value": v}]}, {"m"}), by_id)["agree"] == ["m"]
+    assert ok("2.673") and ok("2.672") and ok("2.67") and not ok("2.68") and not ok("2.6750")
+    assert not stat(parse({"facts": [{"id": "m", "status": "failed"}]}, {"m"}), by_id)["agree"]
 
 
 if __name__ == "__main__":

@@ -16,6 +16,17 @@ temps.
 | L1 atomes | affirmations tirées du journal, avec leur source ; test pré-enregistré ; statut selon les classes E/C/R/I | le LLM propose, le code décide | `memlab/distiller.py`, `memlab/verifier.py` |
 | L2 établi | sélection (jamais un résumé) des généralisations `established` puis `supported` | le code | `memlab/evidence_memory.py` |
 
+**Qui décide (depuis la v1.1).** Le test écrit par le LLM ne rend plus de verdict : il dit seulement *sur quelles
+mesures* porte l'affirmation et *ce qu'elle prédit*, sous une de quatre formes (`memlab/evidence_test.py`) :
+paires appariées (`pairs`), deux groupes (`groups`), taux d'échec (`fail_rate`), faits (`facts`). Le code compare
+ensuite la prédiction aux mesures avec la même règle pour toutes les affirmations : test du signe sur des paires
+disjointes, Mann-Whitney, Fisher exact, et pour un fait la valeur écrite = la valeur mesurée arrondie ou tronquée à
+la précision écrite. Seule constante : le seuil de signification `alpha` = 0,05 (convention). Conséquences : une
+seule comparaison n'établit jamais rien (il faut au moins 5 paires concordantes), les mesures contre comptent
+autant que les mesures pour, `established` exige un effet significatif sur les mesures faites *après*
+l'affirmation, dont au moins un agent indépendant. L'ancienne règle (le LLM écrit sa propre décision) reste comme
+ablation : `"verification": {"decision": "llm"}` (condition `evidence_llmrule`).
+
 **Coordination exacte.** Avant chaque expérience, le registre dit si l'entité est déjà mesurée (la valeur est
 rendue sans calcul), a déjà échoué (`invalid`, ou trop d'erreurs), ou est en cours chez un autre agent (on
 attend son résultat). Sinon, l'agent la réserve ; la réservation est renouvelée pendant le calcul et expire si
@@ -96,6 +107,9 @@ campagne (mesuré : dernière recherche à 146 s, première écriture terminée 
 - Le test de chaque affirmation est écrit en un seul appel par le LLM. Sa qualité se mesure par l'accord avec
   l'évaluateur de vérité et par l'audit manuel (`bench/audit_tests.py`). L'agent de vérification viendra en v2.
 - Seule l'exposition directe à un atome est tracée pour la classe R.
+- Pas de correction pour tests multiples (les affirmations arrivent une à une) : avec beaucoup d'affirmations,
+  environ 5 % des affirmations sans effet réel peuvent passer le seuil.
+- Le LLM peut encore mal choisir les mesures (mauvais groupe de référence) : c'est ce que mesure l'audit manuel.
 - La proximité avec la requête est un simple classement lexical (BM25) : la recherche n'est pas étudiée ici.
 - Dans GAIED, l'évaluateur de vérité n'existe pas : GAIED mesure la coordination, le coût et la découverte.
 

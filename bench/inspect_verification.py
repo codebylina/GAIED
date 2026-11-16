@@ -43,6 +43,10 @@ def main(directory: str, pattern: str = "") -> None:
             if ev:
                 print(f"  verdict={ev.get('verdict')} in_scope={ev.get('in_scope')} for={len(ev.get('support', []))} "
                       f"against={len(ev.get('contradict', []))} classes={ev.get('classes')} note={str(ev.get('note'))[:150]}")
+                if ev.get("form"):
+                    sx = ev.get("stats") or {}
+                    print(f"  form={ev['form']} test={sx.get('test')} n={sx.get('n')} p_for={sx.get('p_for')} "
+                          f"p_against={sx.get('p_against')} new_n={sx.get('new_n')} new_p_for={sx.get('new_p_for')}")
             if reason or err:
                 print("  why:   ", reason, "|", (err or "")[:400].replace("\n", " / "))
             for line in (x.get("code") or (x.get("rules") or [{}])[-1].get("code", "") or "").splitlines()[:14]:

@@ -24,6 +24,7 @@ import json
 import math
 import os
 import random
+import re
 import statistics as st
 from collections import defaultdict
 
@@ -32,6 +33,14 @@ from bench.oracle import Oracle
 from memlab.llm import LLM, LLMUsage
 
 ASSERTED_LAYERS = ("supported", "established", "verified", "accepted", "stored", "live")
+
+
+def statement_kind(text: str, env: SyntheticEnv) -> str:
+    """'report' when the statement names a complete design and a number (an outcome measured), 'generalization'
+    otherwise. A fixed text rule, the same for every condition, so that conditions showing mostly raw results
+    (Mem0) and conditions showing mostly generalizations can be compared kind by kind."""
+    full = r"\b" + "-".join(rf"{s}\d+" for s in env.slots) + r"\b"
+    return "report" if re.search(full, text) and re.search(r"-?\d+\.\d+", text) else "generalization"
 
 
 def regret_curve(obs: list[dict], env: SyntheticEnv, optimum: float) -> list[float]:
@@ -165,6 +174,7 @@ def run_metrics(d: dict, oracle: Oracle | None) -> dict:
                 measured[o["entity"]].append(o["value"])
         run_key = f"{m['scenario']}|{m['condition']}|{m['seed']}"
         imp_total = imp_false = hyp_total = hyp_false = 0
+        by_kind = defaultdict(lambda: [0, 0])          # kind -> [impressions shown as true or false, wrong ones]
         texts = {}
         for b in br:
             for it in b["items"]:
@@ -182,12 +192,21 @@ def run_metrics(d: dict, oracle: Oracle | None) -> dict:
                     continue
                 imp_total += 1
                 imp_false += (truth != bool(it["asserted"]))
+                kk = by_kind[statement_kind(t, env)]
+                kk[0] += 1
+                kk[1] += (truth != bool(it["asserted"]))
         m["false_exposure"] = imp_false / imp_total if imp_total else math.nan
         m["knowledge_impressions"] = imp_total
         m["true_impressions"] = imp_total - imp_false
         m["false_share_unasserted"] = hyp_false / hyp_total if hyp_total else math.nan
+        for kind in ("report", "generalization"):
+            n_k, f_k = by_kind[kind]
+            m[f"impressions_{kind}"] = n_k
+            m[f"true_impressions_{kind}"] = n_k - f_k
+            m[f"false_exposure_{kind}"] = f_k / n_k if n_k else math.nan
         # distinct memories the agents were shown, with their final status
         tp = fp = fn = 0
+        kind_pr = defaultdict(lambda: [0, 0])          # kind -> [asserted and true, asserted]
         by_layer = defaultdict(lambda: [0, 0])
         for k in mem.get("knowledge", []):
             truth = oracle.truth(env, k["text"], measured, run_key)
@@ -197,6 +216,10 @@ def run_metrics(d: dict, oracle: Oracle | None) -> dict:
             by_layer[layer][0] += truth
             by_layer[layer][1] += 1
             asserted = layer in ASSERTED_LAYERS
+            if asserted:
+                kp = kind_pr[statement_kind(k["text"], env)]
+                kp[0] += bool(truth)
+                kp[1] += 1
             tp += asserted and truth
             fp += asserted and not truth
             fn += (not asserted) and truth
@@ -206,6 +229,10 @@ def run_metrics(d: dict, oracle: Oracle | None) -> dict:
         m["final_recall"] = tp / (tp + fn) if tp + fn else math.nan
         pr, rc = m["final_precision"], m["final_recall"]
         m["final_f1"] = 2 * pr * rc / (pr + rc) if pr == pr and rc == rc and pr + rc else math.nan
+        for kind in ("report", "generalization"):
+            t_k, n_k = kind_pr[kind]
+            m[f"final_precision_{kind}"] = t_k / n_k if n_k else math.nan
+            m[f"asserted_{kind}"] = n_k
         for layer, (t, n) in by_layer.items():
             m[f"precision_{layer}"] = t / n if n else math.nan
         if ver:   # the verifier's verdicts against the evaluator, on every memory it decided

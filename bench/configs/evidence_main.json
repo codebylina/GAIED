@@ -103,6 +103,14 @@
   {
    "name": "falda",
    "memory": "falda"
+  },
+  {
+   "name": "evidence_llmrule",
+   "memory": "evidence",
+   "pull": true,
+   "verification": {
+    "decision": "llm"
+   }
   }
  ],
  "name": "evidence_main",
