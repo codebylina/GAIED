@@ -70,11 +70,13 @@ def build_mem0(storage_dir: str, collection: str, scripted=None):
 
 
 def _same_thinking_as_agents(m) -> None:
-    """Qwen's thinking set as for the agents, and a context window large enough for Mem0's prompts:
-    its extraction prompt alone is about 36,000 characters (about 9,000 tokens), more than the agents'
-    8192-token window, and Ollama would silently cut it. MEM0_NUM_CTX (default 16384) sets it."""
+    """Qwen's thinking and context window set as for the agents. Mem0's extraction prompt alone is about 36,000
+    characters (about 9,000 tokens), so every call of a run uses a 16384-token window (NUM_CTX, default 16384).
+    The SAME window for every call matters: Ollama reloads the model to change it, and only when the model is idle,
+    so with a different window Mem0's writes waited until the agents had finished (all writes after the last search).
+    MEM0_NUM_CTX overrides it for Mem0 only (not advised)."""
     think = os.environ.get("OLLAMA_THINK", "false").lower()
-    num_ctx = int(os.environ.get("MEM0_NUM_CTX", "16384"))
+    num_ctx = int(os.environ.get("MEM0_NUM_CTX") or os.environ.get("NUM_CTX") or "16384")
     chat = m.llm.client.chat
 
     def patched(*a, **kw):

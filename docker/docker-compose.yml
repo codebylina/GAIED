@@ -59,6 +59,7 @@ services:
       N_XTB_WORKERS: "1"
       STABLE_REPORTS: "60"              # stop after 60 reports (30 min) without a new molecule: the LLM is slow on CPU
       FLOWCEPT_SETTINGS_PATH: /app/docker/flowcept_settings.yaml
+      NUM_CTX: ${NUM_CTX:-16384}                  # one context size for every LLM call (agents and memories)
       FALDA_URL: http://falda:8077                # FALDA gateway, for MEMORY_CONDITION=falda
       PYTHONPATH: /app:/app/docker                # so that local_llm.py is found
     volumes:

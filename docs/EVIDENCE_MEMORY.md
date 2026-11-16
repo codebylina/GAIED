@@ -83,6 +83,14 @@ ou ne contiennent pas (cohérence avec les mesures, pas vérité chimique).
 
 Tests sans LLM : `python tests/test_evidence.py`, `python tests/test_verifier.py`, `python tests/test_memlab.py`.
 
+## Réglage commun : une seule taille de contexte
+
+Tous les appels au LLM d'un essai (agents, Mem0, distillateurs, vérificateur) utilisent le même contexte,
+`NUM_CTX` = 16384 tokens par défaut (la consigne d'extraction de Mem0 fait à elle seule environ 9 000 tokens).
+Ollama ne change de contexte qu'en rechargeant le modèle quand il est libre : avec 8192 pour les agents et 16384
+pour Mem0, toutes les écritures de Mem0 attendaient la fin des agents, et Mem0 ne montrait rien pendant la
+campagne (mesuré : dernière recherche à 146 s, première écriture terminée à 162 s).
+
 ## Limites connues (v1)
 
 - Le test de chaque affirmation est écrit en un seul appel par le LLM. Sa qualité se mesure par l'accord avec

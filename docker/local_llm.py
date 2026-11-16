@@ -18,7 +18,7 @@ Environment variables:
   --- Ollama ---
   OLLAMA_URL     (default http://localhost:11434)
   OLLAMA_THINK   "false" (default) / "true" / any other value = send nothing
-  NUM_CTX        context size (default 8192)
+  NUM_CTX        context size (default 16384; one size for every call, see memlab/mem0_memory.py)
   --- Online API (OpenAI format) ---
   LLM_BASE_URL   e.g. https://api.openai.com/v1
   LLM_API_KEY    the key (put it in docker/.env, never in Git)
@@ -104,7 +104,7 @@ class OllamaLLM:
             "options": {
                 "temperature": self.temperature,
                 "num_predict": int(os.environ.get("NUM_PREDICT", "1024")),
-                "num_ctx": int(os.environ.get("NUM_CTX", "8192")),
+                "num_ctx": int(os.environ.get("NUM_CTX", "16384")),
             },
         }
         think = os.environ.get("OLLAMA_THINK", "false").lower()

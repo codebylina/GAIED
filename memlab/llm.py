@@ -80,7 +80,7 @@ class LLM:
                    "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
                    "options": {"temperature": self.temperature,
                                "num_predict": int(max_tokens or os.environ.get("NUM_PREDICT", "1024")),
-                               "num_ctx": int(os.environ.get("NUM_CTX", "8192"))}}
+                               "num_ctx": int(os.environ.get("NUM_CTX", "16384"))}}
         think = os.environ.get("OLLAMA_THINK", "false").lower()
         if think in ("true", "false"):
             payload["think"] = think == "true"
@@ -154,4 +154,4 @@ def long_output_tokens() -> int:
     """Token limit for answers that contain code (judge, oracle): JUDGE_MAX_TOKENS, or half of the
     context window. NUM_PREDICT (1024 by default) is meant for the agents' short answers and cuts
     tests in the middle."""
-    return int(os.environ.get("JUDGE_MAX_TOKENS") or int(os.environ.get("NUM_CTX", "8192")) // 2)
+    return int(os.environ.get("JUDGE_MAX_TOKENS") or int(os.environ.get("NUM_CTX", "16384")) // 2)
