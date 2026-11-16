@@ -21,9 +21,23 @@ rendue sans calcul), a déjà échoué (`invalid`, ou trop d'erreurs), ou est en
 attend son résultat). Sinon, l'agent la réserve ; la réservation est renouvelée pendant le calcul et expire si
 l'agent plante.
 
-**Ce que reçoit un agent**, dans un seul budget de caractères : le Goal ; les consignes de l'agent d'analyse ;
-les avis de retrait ; les expériences exactes de l'équipe ; L2 ; les atomes de L1 proches de sa requête, rangés
-par statut.
+**Recherche, comme FALDA** (`memlab/retrieval.py`) : vecteurs `nomic-embed-text` sur le texte brut + BM25, fusion
+des rangs (RRF, k = 60), 10 résultats par collection (les valeurs par défaut de FALDA). Collections cherchées :
+le registre (L0) et les atomes (L1 et L2). Le résultat est mis dans le prompt, rangé par couche et par statut, dans
+un budget de caractères identique pour toutes les conditions.
+
+**Toujours montrés** (courts, nécessaires à chaque étape) : le Goal, les consignes de l'agent d'analyse qui
+concernent l'agent, les avis de retrait.
+
+**Outils pour l'agent** (banc synthétique) : `lookup(design)` (état exact d'un design dans le registre),
+`best_results()` (meilleurs résultats de l'équipe), `search_memory(query)` (recherche hybride dans les expériences
+et les connaissances). Chaque réponse est journalisée comme ce que l'agent a vu (pour les classes de preuves et
+l'exposition). Dans GAIED, pas d'outils pour l'instant : il faudrait modifier le graphe d'Amal (le nœud
+`tool_calling` envoie tous les appels d'outils à xTB).
+
+**Différence voulue avec FALDA** : les messages bruts ne sont pas mis dans les prompts. Ce qui vient du texte des
+agents passe par L1, avec un statut ; sinon une affirmation réfutée reviendrait par son message d'origine.
+Réglage `show_messages` pour les montrer quand même (étiquetés « non vérifiés »).
 
 ## Conditions (`bench/configs/evidence_*.json`)
 

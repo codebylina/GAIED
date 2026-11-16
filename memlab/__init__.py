@@ -38,7 +38,11 @@ def make_memory(kind: str, store: Store, adapter: DomainAdapter, cfg: MemoryConf
         verifier = kw.get("verifier")
         if verifier is None and ev.get("verify", True) and ev.get("knowledge", True):
             verifier = Verifier(store, adapter, kw.get("llm"), VerificationConfig(**(kw.get("verification") or {})))
-        return EvidenceMemory(store, adapter, cfg, llm=kw.get("llm"), verifier=verifier, registry_cfg=reg, **ev)
+        llm = kw.get("llm")
+        if llm is not None and getattr(llm, "provider", None) == "scripted" and "embedder" not in ev:
+            from .retrieval import Embedder
+            ev["embedder"] = Embedder(store, provider="scripted")
+        return EvidenceMemory(store, adapter, cfg, llm=llm, verifier=verifier, registry_cfg=reg, **ev)
     raise ValueError(f"unknown memory kind: {kind}")
 
 

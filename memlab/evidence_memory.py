@@ -12,11 +12,15 @@ Evidence-grounded layered memory for teams of scientific agents.
   L2 established  a SELECTION (never a summary) of the generalizations the measurements support, established
                 first. It changes only when statuses change, so a refuted atom leaves it at once.
 
-What an agent receives (one budget, the same for every condition): the Goal; active directives (written by an
-analysis agent); notices about knowledge it was shown as true and that has since been demoted; exact team
-results from the registry (best results, experiments in progress, failures with their cause); L2; and the L1
-atoms relevant to its query, grouped by status. Before an experiment runs, the registry is consulted exactly
-(already measured, failed before, in progress).
+Retrieval, as in FALDA (memlab/retrieval.py: dense + BM25, reciprocal-rank fusion, 10 results per collection):
+the memory searches its collections with the agent's query -- the experiment registry (L0) and the atoms (L1 and
+L2) -- and puts what it finds in the prompt, grouped by layer and status, within one character budget that is the
+same for every condition. Always shown, because they are small and every step needs them: the Goal, the
+directives that concern the agent (written by an analysis agent), and notices about knowledge it was shown as
+established and that has since been demoted. The agent can also query the memory itself with tools
+(search_memory, lookup, best_results). Raw journal messages are not put in prompts: what reaches an agent from
+the text the agents wrote goes through L1, with a status (show_messages=True shows them, labelled unchecked).
+Before an experiment runs, the registry is consulted exactly (already measured, failed before, in progress).
 
 Variants (for the comparisons): verify=False shows every atom as team knowledge without status (the LLM proposes,
 nothing decides); knowledge=False keeps only L0 and the coordination (no atoms at all).
@@ -28,7 +32,7 @@ import time
 from .base import Decision, Memory, select_within_budget
 from .distiller import Distiller
 from .registry import Registry, RegistryConfig
-from .textrank import rank
+from .retrieval import DEFAULT_LIMIT, Embedder, hybrid
 from .verifier import ASSERTED, Verifier
 
 L2_STATUSES = ("established", "supported")
@@ -39,8 +43,11 @@ class EvidenceMemory(Memory):
 
     def __init__(self, store, adapter, cfg, llm=None, clock=time.time, verifier: Verifier | None = None,
                  verify: bool = True, knowledge: bool = True, journal_nodes=("conclude",),
-                 registry_cfg: RegistryConfig | None = None) -> None:
+                 registry_cfg: RegistryConfig | None = None, embedder: Embedder | None = None,
+                 limit: int = DEFAULT_LIMIT, show_messages: bool = False) -> None:
         super().__init__(store, adapter, cfg, llm=llm, clock=clock)
+        self.embedder = embedder if embedder is not None else Embedder(store)
+        self.limit, self.show_messages = limit, show_messages
         self.registry = Registry(store, adapter, registry_cfg, clock=clock)
         self.knowledge, self.journal_nodes = knowledge, tuple(journal_nodes)
         self.verifier = verifier if (verify and knowledge) else None
@@ -120,81 +127,130 @@ class EvidenceMemory(Memory):
             extra += "; only the measurements that suggested it"
         return text + extra + "]"
 
-    def _registry_section(self) -> list[tuple]:
-        """(id, asserted, line, text) items of the exact team records, in priority order."""
-        items = []
-        for r in self.registry.best():
-            items.append((r["id"], None, f"- {r['entity']}: {r['value']:.4g} (by {r['owner']})", r["entity"]))
-        for r in self.registry.running():
-            items.append((f"run:{r['entity']}", None, f"- {r['entity']}: being measured by {r['agent']}", r["entity"]))
-        for r in self.registry.failures():
-            why = "invalid, do not propose again" if r["state"] == "invalid" else "experiment error"
-            err = f": {r['error'][:80]}" if r.get("error") else ""
-            name = r["entity"][4:] if r["entity"].startswith("raw:") else r["entity"]
-            items.append((f"fail:{r['entity']}", None, f"- {name}: {why}{err}", name))
-        # interleave best results and failures so a small budget keeps both kinds
-        best = [i for i in items if not i[0].startswith(("run:", "fail:"))]
-        rest = [i for i in items if i[0].startswith(("run:", "fail:"))]
+    # ---- collections searched by the memory
+    def _experiment_docs(self) -> list[tuple]:
+        """(id, asserted, line, text) per registry entity; the line is also the searched text."""
         out = []
-        for k in range(max(len(best), len(rest))):
-            out += best[k:k + 1] + rest[k:k + 1]
+        running = {r["entity"]: r["agent"] for r in self.registry.running()}
+        for doc in self.store.all("registry"):
+            e = doc["entity"]
+            name = e[4:] if e.startswith("raw:") else e
+            v = self.registry.view(e)
+            if v["state"] == "measured":
+                line = f"- {name}: {v['value']:.4g} (measured by {v['owner']})"
+            elif v["state"] == "invalid":
+                line = f"- {name}: invalid, do not propose again" + (f" ({v['error'][:80]})" if v.get("error") else "")
+            elif v["state"] == "error":
+                line = f"- {name}: the experiment failed" + (f" ({v['error'][:80]})" if v.get("error") else "")
+            else:
+                continue
+            out.append((f"exp:{e}", None, line, name))
+        for e, agent in running.items():
+            if not self.store.get("registry", e):
+                out.append((f"run:{e}", None, f"- {e}: being measured by {agent}", e))
         return out
 
-    def briefing(self, agent, node, query, iteration):
-        budget = self.cfg.briefing_budget_chars
-        if budget <= 0:
-            return ""
-        head_lines = self.goal_lines()
+    def _search(self, query: str, items: list[tuple]) -> list[tuple]:
+        by_id = {c[0]: c for c in items}
+        return [by_id[i] for i in hybrid(self.embedder, query, [(c[0], c[2]) for c in items], self.limit)]
+
+    def _head(self, agent: str) -> list[str]:
+        lines = self.goal_lines()
         dirs = self._directives(agent)
         if dirs:
-            head_lines += ["DIRECTIVES:"] + dirs
-        head_lines += self._notices(agent)
-        head, _ = self.fit(head_lines, budget)
-        sections = [("TEAM EXPERIMENTS (exact records; best results first):", self._registry_section())]
-        if self.knowledge:
-            sections += self._knowledge_sections(query or self.adapter.goal.text)
-        keep = select_within_budget(head, [(t, s) for t, s in sections], lambda c: c[2], budget)
-        lines, items = [head], []
+            lines += ["DIRECTIVES:"] + dirs
+        return lines + self._notices(agent)
+
+    def _render(self, agent, node, iteration, head_lines, sections, budget) -> str:
+        head, _ = self.fit(head_lines, budget) if head_lines else ("", 0)
+        keep = select_within_budget(head, sections, lambda c: c[2], budget)
+        lines, items = ([head] if head else []), []
         for title, sec in sections:
             sel = [c for c in sec if id(c) in keep]
             if sel:
                 lines.append(title)
                 for c in sel:
                     lines.append(c[2])
-                    kind = "result" if title.startswith("TEAM EXPERIMENTS") else "claim"
-                    items.append({"id": c[0], "kind": kind, "asserted": c[1], "text": c[3]})
+                    kind = "result" if c[0].startswith(("exp:", "run:")) else "message" if c[0].startswith("msg:") else "claim"
+                    items.append({"id": c[0][4:] if kind == "message" else c[0], "kind": kind, "asserted": c[1],
+                                  "text": c[3]})
         text = "\n".join(lines)
         self.log_briefing(agent, node, iteration, items, text)
         return text
+
+    def _sections(self, query: str) -> list[tuple[str, list]]:
+        sections = [("TEAM EXPERIMENTS (exact records):", self._search(query, self._experiment_docs()))]
+        if self.knowledge:
+            sections += self._knowledge_sections(query)
+            if self.show_messages:
+                msgs = [(f"msg:{m['id']}", None, f"- [{m['agent']}] {m['text'][:300]}", m["text"])
+                        for m in self.store.read_log("journal")]
+                sections.append(("MESSAGES OF THE TEAM (not checked):", self._search(query, msgs)))
+        return sections
+
+    def briefing(self, agent, node, query, iteration):
+        budget = self.cfg.briefing_budget_chars
+        if budget <= 0:
+            return ""
+        return self._render(agent, node, iteration, self._head(agent), self._sections(query or self.adapter.goal.text),
+                            budget)
 
     def _knowledge_sections(self, query: str) -> list[tuple[str, list]]:
         atoms = {a["id"]: a for a in self.store.all("atoms")}
         if not atoms:
             return []
         status = self._status()
-        order = rank(query, [(i, (status.get(i) or {}).get("scoped") or a["text"]) for i, a in atoms.items()])
         if not self.verifier:      # no verification: everything the LLM proposed is team knowledge
-            return [("TEAM KNOWLEDGE:", [(i, True, f"- {atoms[i]['text']}", atoms[i]["text"]) for i in order])]
+            hits = self._search(query, [(i, True, f"- {a['text']}", a["text"]) for i, a in atoms.items()])
+            return [("TEAM KNOWLEDGE:", hits)]
         st = lambda i: (status.get(i) or {}).get("status", "pending")      # noqa: E731
         kind = lambda i: (status.get(i) or {}).get("kind")                  # noqa: E731
         txt = lambda i: (status.get(i) or {}).get("scoped") or atoms[i]["text"]  # noqa: E731
-
-        def item(i, asserted):
-            return (i, asserted, f"- {self._label(atoms[i], status.get(i))}", txt(i))
-
-        l2 = [i for i in atoms if kind(i) == "generalization" and st(i) in L2_STATUSES]
-        l2.sort(key=lambda i: (st(i) != "established",
-                               -len(((status[i].get("eval") or {}).get("independent_agents")) or []),
-                               -len(((status[i].get("eval") or {}).get("support")) or [])))
+        asserted = {i: (True if st(i) in L2_STATUSES and kind(i) == "generalization" else
+                        False if st(i) == "refuted" else None) for i in atoms}
+        hits = self._search(query, [(i, asserted[i], f"- {self._label(atoms[i], status.get(i))}", txt(i))
+                                    for i in atoms if not (kind(i) in ("report", "prediction") and st(i) == "verified")])
         return [
-            ("ESTABLISHED KNOWLEDGE (supported by the team's measurements):", [item(i, True) for i in l2]),
+            ("ESTABLISHED KNOWLEDGE (supported by the team's measurements):",
+             [c for c in hits if c[1] is True]),
             ("TO TEST (not confirmed by new measurements yet):",
-             [item(i, None) for i in order if st(i) in ("hypothesis", "open", "contested", "pending")]),
-            ("KNOWN FALSE (contradicted by measurements):", [item(i, False) for i in order if st(i) == "refuted"]),
+             [c for c in hits if st(c[0]) in ("hypothesis", "open", "contested", "pending")]),
+            ("KNOWN FALSE (contradicted by measurements):", [c for c in hits if c[1] is False]),
             ("NO MEASUREMENT ON RECORD (reported results the registry does not contain):",
-             [item(i, None) for i in order if st(i) == "unsupported"]),
-            ("CANNOT BE CHECKED AGAINST MEASUREMENTS:", [item(i, None) for i in order if st(i) == "unverifiable"]),
+             [c for c in hits if st(c[0]) == "unsupported"]),
+            ("CANNOT BE CHECKED AGAINST MEASUREMENTS:", [c for c in hits if st(c[0]) == "unverifiable"]),
         ]
+
+    # ---- tools: the agent queries the memory itself
+    def tool_specs(self):
+        specs = [{"name": "lookup", "description": "Exact record of one design: its measured value, its failure "
+                  "and the cause, or that a teammate is measuring it.", "args": {"design": "the design"}},
+                 {"name": "best_results", "description": "The team's best measured designs, best first.", "args": {}},
+                 {"name": "search_memory", "description": "Search the team's experiments and knowledge for a "
+                  "question or a topic.", "args": {"query": "your question"}}]
+        return specs
+
+    def call_tool(self, agent, name, args):
+        budget = self.cfg.briefing_budget_chars or 2000
+        if name == "lookup":
+            raw = str(args.get("design", ""))
+            e = self.registry.key(raw)
+            v = self.registry.view(e)
+            holder = self.store.lease_holder(self.registry.lease(e))
+            line = (f"- {raw}: {v['value']:.4g} (measured by {v['owner']})" if v["state"] == "measured" else
+                    f"- {raw}: invalid, do not propose again ({v.get('error')})" if v["state"] == "invalid" else
+                    f"- {raw}: the experiment failed ({v.get('error')})" if v["state"] == "error" else
+                    f"- {raw}: being measured by {holder}" if holder else f"- {raw}: never measured")
+            return self._render(agent, "tool:lookup", -1, [], [("RECORD:", [(f"exp:{e}", None, line, raw)])], budget)
+        if name == "best_results":
+            rows = [(f"exp:{r['entity']}", None, f"- {r['entity']}: {r['value']:.4g} (measured by {r['owner']})",
+                     r["entity"]) for r in self.registry.best()[:self.limit]]
+            return self._render(agent, "tool:best_results", -1, [], [("BEST RESULTS OF THE TEAM:", rows)], budget) \
+                or "No measured design yet."
+        if name == "search_memory":
+            q = str(args.get("query", "")) or self.adapter.goal.text
+            return self._render(agent, "tool:search_memory", -1, [], self._sections(q), budget) or "Nothing found."
+        return "unknown tool"
 
     def _notices(self, agent: str) -> list[str]:
         """Knowledge this agent was shown as true and that has since lost that status."""

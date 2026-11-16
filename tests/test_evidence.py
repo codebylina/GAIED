@@ -177,6 +177,34 @@ def test_budget_is_respected():
     assert len(mem.briefing("a2", "plan", "option", 0)) <= 600
 
 
+def test_retrieval_finds_relevant_records_only():
+    mem, store, clock = memory(knowledge=False)
+    mem.limit = 2
+    for e in others()[:6]:
+        run(mem, clock, e, "a1")
+    target = others()[3]
+    text = mem.briefing("a2", "plan", f"what about {target}", 0)
+    exp = [i for i in store.read_log("briefings")[-1]["items"] if i["kind"] == "result"]
+    assert target in text and len(exp) <= 2
+
+
+def test_tools_lookup_best_and_search_are_logged():
+    mem, store, clock = memory()
+    names = {t["name"] for t in mem.tool_specs()}
+    assert names == {"lookup", "best_results", "search_memory"}
+    run(mem, clock, others()[0], "a1")
+    assert "measured by a1" in mem.call_tool("a2", "lookup", {"design": others()[0]})
+    assert "never measured" in mem.call_tool("a2", "lookup", {"design": a0()[0]})
+    assert others()[0] in mem.call_tool("a2", "best_results", {})
+    for e in a0()[:2] + others()[1:3]:
+        run(mem, clock, e, "a1")
+    mem.submit_conclusion("a1", "- " + FALSE, 0)
+    settle(mem)
+    out = mem.call_tool("a2", "search_memory", {"query": "option A0 slot A"})
+    assert "KNOWN FALSE" in out
+    assert store.read_log("briefings")[-1]["node"] == "tool:search_memory"
+
+
 def test_replay_judges_an_unverified_campaign():
     import json
     import tempfile

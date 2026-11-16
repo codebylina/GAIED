@@ -15,7 +15,8 @@
  "agent": {
   "refill_rounds": 1,
   "max_conclusions": 2,
-  "wait_timeout_s": 0
+  "wait_timeout_s": 0,
+  "pull_rounds": 2
  },
  "n_agents": 3,
  "iterations": 4,
@@ -48,11 +49,13 @@
    "memory": "evidence",
    "evidence": {
     "verify": false
-   }
+   },
+   "pull": true
   },
   {
    "name": "evidence",
-   "memory": "evidence"
+   "memory": "evidence",
+   "pull": true
   }
  ],
  "name": "evidence_quick",

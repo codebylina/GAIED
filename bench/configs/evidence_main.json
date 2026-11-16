@@ -15,7 +15,8 @@
  "agent": {
   "refill_rounds": 1,
   "max_conclusions": 2,
-  "wait_timeout_s": 0
+  "wait_timeout_s": 0,
+  "pull_rounds": 2
  },
  "n_agents": 4,
  "iterations": 8,
@@ -55,39 +56,45 @@
    "memory": "evidence",
    "evidence": {
     "knowledge": false
-   }
+   },
+   "pull": true
   },
   {
    "name": "evidence_unverified",
    "memory": "evidence",
    "evidence": {
     "verify": false
-   }
+   },
+   "pull": true
   },
   {
    "name": "evidence",
-   "memory": "evidence"
+   "memory": "evidence",
+   "pull": true
   },
   {
    "name": "evidence_nolayers",
    "memory": "evidence",
    "verification": {
     "layers": false
-   }
+   },
+   "pull": true
   },
   {
    "name": "evidence_agentindep",
    "memory": "evidence",
    "verification": {
     "independence": "agent"
-   }
+   },
+   "pull": true
   },
   {
    "name": "evidence_posthoc",
    "memory": "evidence",
    "verification": {
     "preregistered": false
-   }
+   },
+   "pull": true
   },
   {
    "name": "mem0",
