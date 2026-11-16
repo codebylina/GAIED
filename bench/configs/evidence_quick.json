@@ -56,6 +56,10 @@
    "name": "evidence",
    "memory": "evidence",
    "pull": true
+  },
+  {
+   "name": "mem0",
+   "memory": "mem0"
   }
  ],
  "name": "evidence_quick",
