@@ -168,6 +168,26 @@ def test_tampered_rule_is_not_run():
     assert v.status_of(["g"])["g"]["status"] == "unverifiable"
 
 
+def test_design_keys_are_mapped_and_in_scope_completed():
+    from memlab.sandbox import validate
+    out = validate({"in_scope": ["A0-B1"], "support": ["m3"], "contradict": [], "verdict": "supported"},
+                   {"m1", "m2", "m3"}, {"A0-B1": ["m1", "m2"]})
+    assert out["in_scope"] == ["m1", "m2", "m3"]
+
+
+def test_memory_id_or_hard_coded_ids_send_the_test_to_repair():
+    from memlab.verifier import static_problem
+    assert static_problem("def test(df):\n    return {'in_scope': ['a-12'], 'verdict': 'supported'}", "a-12")
+    assert static_problem("x = df[df['id'] == '0123456789abcdef0123456789abcdef']", "g")
+    assert static_problem("x = df[df['entity'] == 'A0-B1-C2']", "g") is None
+    store, adapter, v, clock = setup()
+    observe(adapter, store, clock, others()[0], "a1")
+    v.register("g", "- something odd", "a1")
+    freeze(v, "g", "def test(df):\n    return {'in_scope': ['g'], 'support': ['g'], 'contradict': [], 'verdict': 'supported'}")
+    v._evaluate()
+    assert any(j["step"] == "repair" for j in store.read_log("v_journal"))
+
+
 # --------------------------------------------------------------------------- pre-registration
 def test_rule_is_written_from_the_claim_time_window_only():
     store, adapter, v, clock = setup()

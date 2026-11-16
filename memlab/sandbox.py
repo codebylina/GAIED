@@ -42,6 +42,9 @@ def run_many(codes: dict[str, str], rows: list[dict], timeout_s: float) -> dict[
     except Exception as exc:
         return {k: {"error": f"sandbox failure: {exc}"} for k in codes}
     known = {str(r["id"]) for r in rows}
+    by_entity: dict[str, list[str]] = {}
+    for r in rows:
+        by_entity.setdefault(str(r.get("entity")), []).append(str(r["id"]))
     out = {}
     for k in codes:
         r = raw.get(k) or {"error": "no result"}
@@ -49,7 +52,7 @@ def run_many(codes: dict[str, str], rows: list[dict], timeout_s: float) -> dict[
             out[k] = r
             continue
         try:
-            v = validate(r, known)
+            v = validate(r, known, by_entity)
             v["verdict"] = str(r.get("verdict", "")).lower()
             out[k] = v
         except TestError as exc:
@@ -80,23 +83,30 @@ def _run(code: str, rows: list[dict], timeout_s: float, fn: str) -> dict:
     return out
 
 
-def validate(out: dict, known_ids: set[str]) -> dict:
+def validate(out: dict, known_ids: set[str], by_entity: dict[str, list[str]] | None = None) -> dict:
+    """Check a test's answer. Two forms keep their meaning and are normalized: a design key in place of its
+    measurement ids (all the measurements of that design), and support/contradict ids missing from in_scope
+    (added to it). Anything else that is not a measurement id is an error."""
+    by_entity = by_entity or {}
     res = {}
     for key in ("in_scope", "support", "contradict"):
         vals = out.get(key) or []
         if not isinstance(vals, list):
-            raise TestError(f"'{key}' must be a list of observation ids")
-        ids = [str(v) for v in vals]
-        unknown = [i for i in ids if i not in known_ids]
-        if unknown:
-            raise TestError(f"'{key}' contains unknown observation ids: {unknown[:5]}")
+            raise TestError(f"'{key}' must be a list of values of df['id']")
+        ids = []
+        for v in (str(x) for x in vals):
+            if v in known_ids:
+                ids.append(v)
+            elif v in by_entity:
+                ids.extend(by_entity[v])
+            else:
+                raise TestError(f"'{key}' contains {v!r}, which is not a value of df['id']: list the ids of the "
+                                f"measurement rows (df['id']), never the memory's id")
         res[key] = sorted(set(ids))
     overlap = set(res["support"]) & set(res["contradict"])
     if overlap:
         raise TestError(f"observations both support and contradict: {sorted(overlap)[:5]}")
-    outside = (set(res["support"]) | set(res["contradict"])) - set(res["in_scope"])
-    if outside:
-        raise TestError(f"support/contradict ids outside in_scope: {sorted(outside)[:5]}")
+    res["in_scope"] = sorted(set(res["in_scope"]) | set(res["support"]) | set(res["contradict"]))
     stats = out.get("stats") or {}
     res["stats"] = {str(k): (v if isinstance(v, (int, float, str, bool)) or v is None else str(v))
                     for k, v in (stats.items() if isinstance(stats, dict) else [])}

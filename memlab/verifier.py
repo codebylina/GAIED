@@ -67,20 +67,34 @@ designs like the ones measured, not a causal law. Keep its meaning and its direc
 its opposite.
 
 The test receives df, a pandas DataFrame with one row per measurement (columns listed below). It returns:
-{"in_scope": [ids the memory is about], "support": [ids in scope that agree], "contradict": [ids in scope
-that disagree], "stats": {a few numbers}, "verdict": "supported" | "contradicted" | "insufficient",
-"note": "one sentence"}.
-The verdict MUST be computed inside the test by a decision rule you write now, from the statement alone.
-You only see the measurements that existed when the memory was written; the test will be re-run, unchanged,
-on every later measurement, so the rule must be right for data you have not seen. For a generalization,
-compare the designs it is about with a reference group, preferably designs equal on the other descriptors,
-so that other features do not explain the difference; demand enough evidence for the noise of the
-measurements, and return "insufficient" otherwise. For a report or a prediction, compare with the measured
-value at the precision the memory states.
+{"in_scope": [...], "support": [...], "contradict": [...], "stats": {a few numbers},
+"verdict": "supported" | "contradicted" | "insufficient", "note": "one sentence"}.
+in_scope, support and contradict are lists of values of df['id'] (the measurement rows the memory is about, those
+that agree, those that disagree). Never put the memory's id (the "### ..." name) in them.
+Select rows by conditions on the columns, never by listing measurement ids: the test will be re-run, unchanged, on
+every later measurement. A generalization selects by descriptors (slots, features), so it also covers designs that
+do not exist yet; a report or a prediction about named designs selects them by their entity key. The verdict MUST be computed inside the test by a decision rule you write now, from the statement alone;
+you only see the measurements that existed when the memory was written, so the rule must be right for data you have
+not seen. For a generalization, compare the designs it is about with a reference group: designs equal on the other
+descriptors when such pairs exist, otherwise all the other measured designs (say which in "note"); demand enough
+evidence for the noise of the measurements, and return "insufficient" otherwise. For a report or a prediction,
+compare with the measured value at the precision the memory states.
 Use only the columns listed. pandas is pd, numpy is np. Keep each test short: no comments, no prints."""
 
-REPAIR_NOTE = ("YOUR TEST FAILED TO RUN: {error}\nYOUR TEST:\n{code}\nFix the error only: keep the same kind, "
-               "the same scoped statement and the same decision rule.")
+REPAIR_NOTE = ("YOUR TEST FAILED: {error}\nYOUR TEST:\n{code}\nFix the error only: keep the same kind, the same "
+               "scoped statement and the same decision rule. Remember: in_scope, support and contradict list values of "
+               "df['id']; rows are selected by conditions on the columns, never by measurement ids.")
+
+_LITERAL_ID = re.compile(r"""['"][0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}['"]""")
+
+
+def static_problem(code: str, mem_id: str) -> str | None:
+    """Problems visible in the code itself, which would make a test unable to judge later measurements."""
+    if mem_id and re.search(r"""['"]""" + re.escape(mem_id) + r"""['"]""", code):
+        return "the test uses the memory's id; list values of df['id'] instead"
+    if _LITERAL_ID.search(code):
+        return "the test selects measurements by their ids; select rows by conditions on the columns instead"
+    return None
 
 TEXT_SYSTEM = """You review the memories of a team of research agents. For EACH memory below, judge from its
 wording and from the other memories whether it is likely true. Write one line per memory:
@@ -290,7 +304,10 @@ class Verifier:
         self._update_exposure()
         rows = self._rows()
         bad = {d["id"] for d in todo if not d.get("rule") or sha(d["code"]) != d["rule"]["sha256"]}
-        results = run_many({d["id"]: d["code"] for d in todo if d["id"] not in bad}, rows, self.cfg.test_timeout_s)
+        static = {d["id"]: p for d in todo if d["id"] not in bad and (p := static_problem(d["code"], d["id"]))}
+        results = run_many({d["id"]: d["code"] for d in todo if d["id"] not in bad and d["id"] not in static},
+                           rows, self.cfg.test_timeout_s)
+        results.update({i: {"error": p} for i, p in static.items()})
         by_id = {r["id"]: r for r in rows}
         started = {str(o["id"]): float(o.get("started_at") or o["t"]) for o in self.store.all("obs")}
         failed = {}
