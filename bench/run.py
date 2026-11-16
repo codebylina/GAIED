@@ -108,6 +108,8 @@ def run_one(cfg: dict, scenario: dict, cond: dict, seed: int) -> dict:
 
 
 def main() -> None:
+    import logging
+    logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     ap = argparse.ArgumentParser()
     ap.add_argument("config")
     ap.add_argument("--only", default="", help="scenario/condition filter, e.g. deceptive/mem0")

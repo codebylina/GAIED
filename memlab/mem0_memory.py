@@ -277,7 +277,11 @@ class Mem0Memory(Memory):
             hits = self.backend.search(query or self.adapter.goal.text, self.top_k)
         except Exception as exc:
             logger.warning("mem0 search failed: %s", exc)
+            self.store.append("mem0_search_errors", {"t": self.clock(), "agent": agent, "node": node,
+                                                     "error": repr(exc)[:500]})
             hits = []
+        self.store.append("mem0_search_hits", {"t": self.clock(), "agent": agent, "node": node, "hits": len(hits),
+                                               "query_chars": len(query or "")})
         head, _ = self.fit(self.goal_lines(), budget)
         lines, items, used = [head, "MEMORIES OF THE TEAM (Mem0):"], [], len(head) + 30
         for h in hits:
@@ -310,6 +314,8 @@ class Mem0Memory(Memory):
         out = {}
         if isinstance(self.backend, LocalMem0):
             out["mem0_ops"] = self.backend.ops
+            out["mem0_search_errors"] = self.store.read_log("mem0_search_errors")
+            out["mem0_search_hits"] = self.store.read_log("mem0_search_hits")
             out["mem0_features"] = self.backend.features()
             try:
                 out["mem0_memories"] = self.backend.all()

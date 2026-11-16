@@ -1,0 +1,42 @@
+{
+ "env": {
+  "n_slots": 5,
+  "n_options": 4,
+  "main_scale": 1.0,
+  "interaction_scale": 0.5,
+  "n_interactions": 3,
+  "noise_sd": 0.3,
+  "n_forbidden": 6,
+  "duration_s": 0.0
+ },
+ "memory_defaults": {
+  "briefing_budget_chars": 2000
+ },
+ "agent": {
+  "refill_rounds": 1,
+  "max_conclusions": 2,
+  "wait_timeout_s": 0,
+  "pull_rounds": 2
+ },
+ "n_agents": 3,
+ "iterations": 4,
+ "batch_size": 3,
+ "steward_idle_s": 0.5,
+ "scenarios": [
+  {
+   "name": "adversarial",
+   "adversary": 0,
+   "n_false": 3
+  }
+ ],
+ "conditions": [
+  {
+   "name": "mem0",
+   "memory": "mem0"
+  }
+ ],
+ "name": "mem0_check",
+ "seeds": [
+  1
+ ]
+}
