@@ -36,7 +36,12 @@ par statut.
 | `evidence` | la mémoire complète |
 | `evidence_nolayers`, `evidence_agentindep`, `evidence_posthoc` | ablations (classes de preuves, exposition, pré-enregistrement) |
 
-La comparaison avec FALDA d'origine se fait dans GAIED, avec la branche `falda-baseline`.
+Ordre prévu :
+1. **Étape 1, l'idée marche-t-elle ?** `none`, `evidence_unverified`, `evidence`. `evidence_quick.json` (1 graine,
+   2 scénarios) pour vérifier que tout tourne, puis `evidence_step1.json` (3 graines, 4 scénarios).
+2. **Étape 2, références** : `mem0` (banc synthétique) et FALDA d'origine (GAIED, branche `falda-baseline`).
+3. **Étape 3, ablations** : `registry_only`, `evidence_nolayers`, `evidence_agentindep`, `evidence_posthoc`
+   (`evidence_main.json`).
 
 ## Lancer (machine distante, depuis `D:\Research\GAIED\docker`)
 

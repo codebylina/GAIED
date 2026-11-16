@@ -44,13 +44,6 @@
    }
   },
   {
-   "name": "registry_only",
-   "memory": "evidence",
-   "evidence": {
-    "knowledge": false
-   }
-  },
-  {
    "name": "evidence_unverified",
    "memory": "evidence",
    "evidence": {
