@@ -51,11 +51,20 @@ docker compose run --rm --no-deps -e LLM_PROVIDER=ollama -e OLLAMA_URL=http://ho
 docker compose run --rm --no-deps -e LLM_PROVIDER=ollama -e OLLAMA_URL=http://host.docker.internal:11434 -e OLLAMA_MODEL=qwen3.5:9b -e LLM_MODEL=qwen3.5:9b gaied python -m bench.analyze results/evidence_quick --reference evidence
 ```
 
-GAIED :
+GAIED, étape 1 (une campagne par condition et par répétition, mêmes graines ; répéter avec `_r2`, `_r3`) :
 ```powershell
-docker compose run --rm --no-deps -e OLLAMA_URL=http://host.docker.internal:11434 -e OLLAMA_MODEL=qwen3.5:9b -e LLM_MODEL=qwen3.5:9b -e MEMORY_CONDITION=evidence -e MEMORY_EXPORT=results/gaied/evidence_r1.json -e NO_IMPROVEMENT_TOLERANCE=0 -e PARSL_MAX_WORKERS=4 -e "SEEDS=CNC(N)=O,CNC(N)=O,CC1=C(O)N=C(O)N1,CC1=C(O)N=C(O)N1" -e MAX_ITERATIONS=10 gaied
-docker compose run --rm --no-deps gaied python -m bench.analyze_gaied results/gaied
+docker compose run --rm --no-deps -e OLLAMA_URL=http://host.docker.internal:11434 -e OLLAMA_MODEL=qwen3.5:9b -e LLM_MODEL=qwen3.5:9b -e MEMORY_CONDITION=none -e MEMORY_EXPORT=results/gaied_step1/none_r1.json -e NO_IMPROVEMENT_TOLERANCE=0 -e PARSL_MAX_WORKERS=4 -e "SEEDS=CNC(N)=O,CNC(N)=O,CC1=C(O)N=C(O)N1,CC1=C(O)N=C(O)N1" -e MAX_ITERATIONS=10 gaied
 ```
+puis la même commande avec `MEMORY_CONDITION=evidence_unverified` (`evidence_unverified_r1.json`) et
+`MEMORY_CONDITION=evidence` (`evidence_r1.json`). Ensuite le rejeu de vérification (GAIED n'a pas d'évaluateur de
+vérité : le même vérificateur rejuge tous les atomes avec toutes les mesures de la campagne) et l'analyse :
+```powershell
+docker compose run --rm --no-deps -e OLLAMA_URL=http://host.docker.internal:11434 -e OLLAMA_MODEL=qwen3.5:9b -e LLM_MODEL=qwen3.5:9b gaied sh -c "python -m bench.replay_verify results/gaied_step1/*.json"
+docker compose run --rm --no-deps gaied python -m bench.analyze_gaied results/gaied_step1
+```
+Mesures GAIED : doublons, échecs relancés, calculs évités, meilleure molécule, coût ; et pour les connaissances,
+`share_shown_true_bad` = part des affirmations montrées comme vraies que les mesures de la campagne contredisent
+ou ne contiennent pas (cohérence avec les mesures, pas vérité chimique).
 
 Tests sans LLM : `python tests/test_evidence.py`, `python tests/test_verifier.py`, `python tests/test_memlab.py`.
 

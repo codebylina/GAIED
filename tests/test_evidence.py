@@ -177,6 +177,24 @@ def test_budget_is_respected():
     assert len(mem.briefing("a2", "plan", "option", 0)) <= 600
 
 
+def test_replay_judges_an_unverified_campaign():
+    import json
+    import tempfile
+    from bench.analyze_gaied import knowledge_metrics
+    from bench.replay_verify import replay
+    mem, store, clock = memory(verify=False)
+    for e in a0()[:2] + others()[:3]:
+        run(mem, clock, e, "a1")
+    mem.submit_conclusion("a1", "- " + FALSE, 0)
+    settle(mem)
+    mem.briefing("a2", "plan", "option A0 slot A", 1)
+    path = tempfile.mktemp(suffix=".json")
+    json.dump(mem.export(), open(path, "w"), default=str)
+    replay(path, llm=LLM(provider="scripted", scripted=ScriptedLLM(ENV)), adapter=SyntheticAdapter(ENV))
+    m = knowledge_metrics(json.load(open(path)))
+    assert m["status_source_replay"] == 1 and m["impressions_shown_true"] == 1 and m["impressions_shown_true_bad"] == 1, m
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in sorted(globals().items()):

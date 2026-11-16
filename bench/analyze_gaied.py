@@ -42,6 +42,46 @@ def metrics(d: dict) -> dict:
     for c in (d.get("extra") or {}).get("claims", []):
         layers[c["layer"]] += 1
     m.update({f"claims_{k}": v for k, v in layers.items()})
+    m.update(knowledge_metrics(d))
+    return m
+
+
+BAD = ("refuted", "unsupported", "contested")
+ASSERTED = ("verified", "supported", "established", "accepted")
+
+
+def knowledge_metrics(d: dict) -> dict:
+    """Evidence memory: atoms, their statuses and what the agents were shown. GAIED has no truth evaluator, so a
+    claim counts as wrong when the campaign's own measurements contradict it or do not contain the result it
+    reports, according to the replayed verification (bench/replay_verify.py) when present, else the run's."""
+    ex = d.get("extra") or {}
+    atoms = ex.get("atoms")
+    if atoms is None:
+        return {}
+    m = {"journal_messages": len(ex.get("journal", [])), "atoms": len(atoms),
+         "restatements": sum(len(a.get("restatements", [])) for a in atoms)}
+    run = {x["id"]: x for x in (ex.get("verification") or {}).get("verified_memories", [])}
+    for st_ in ("established", "supported", "hypothesis", "open", "contested", "refuted", "unsupported",
+                "verified", "unverifiable", "pending"):
+        if run:
+            m[f"run_{st_}"] = sum(x["status"] == st_ for x in run.values())
+    if run:
+        lags = [x["history"][0]["t"] - x["registered_at"] for x in run.values() if x.get("history")]
+        m["verif_lag_s"] = st.mean(lags) if lags else math.nan
+    final = {k: v["status"] for k, v in ((d.get("replay") or {}).get("statuses") or {}).items()}
+    source = "replay" if final else "run"
+    if not final:
+        final = {k: x["status"] for k, x in run.items()}
+    if not final:
+        return m
+    imp = [i for b in d.get("briefings", []) for i in b["items"] if i.get("kind") == "claim" and i["id"] in final]
+    shown_true = [i for i in imp if i.get("asserted")]
+    m["impressions_shown_true"] = len(shown_true)
+    m["impressions_shown_true_bad"] = sum(final[i["id"]] in BAD for i in shown_true)
+    m["share_shown_true_bad"] = m["impressions_shown_true_bad"] / len(shown_true) if shown_true else math.nan
+    m["atoms_bad_final"] = sum(s in BAD for s in final.values())
+    m["atoms_asserted_final"] = sum(s in ASSERTED for s in final.values())
+    m["status_source_replay"] = 1 if source == "replay" else 0
     return m
 
 
