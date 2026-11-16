@@ -77,12 +77,18 @@ class ResearchAgent:
         else:
             base += ' Answer only with JSON: {"proposals": ["<design>", ...]}'
         transcript = base
-        for _ in range(self.pull_rounds + 1):
+        for r in range(self.pull_rounds + 2):
             answer = self._ask(transcript)
             d = extract_json(answer)
             if isinstance(d, dict) and d.get("tool") and tools:
-                out = self.memory.call_tool(self.name, str(d["tool"]), d.get("args") or {})
-                transcript += f"\n\nYOU ASKED: {json.dumps(d)}\nMEMORY ANSWER:\n{out}"
+                if r < self.pull_rounds:
+                    out = self.memory.call_tool(self.name, str(d["tool"]), d.get("args") or {})
+                    transcript += f"\n\nYOU ASKED: {json.dumps(d)}\nMEMORY ANSWER:\n{out}"
+                    if r + 1 < self.pull_rounds:
+                        continue
+                # no query left: the next answer must be the proposals
+                transcript += ('\n\nYou cannot query the memory any more. Answer only with JSON: '
+                               '{"proposals": ["<design>", ...]}')
                 continue
             props = d.get("proposals") if isinstance(d, dict) else d if isinstance(d, list) else None
             if not props:

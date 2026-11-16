@@ -64,6 +64,10 @@ def run_metrics(d: dict, oracle: Oracle | None) -> dict:
     m["repeated_failures"] = frep
     dec = [x for b in mem.get("decisions", []) for x in b["decisions"]]
     m["avoided_by_memory"] = sum(x["action"] in ("known", "failed_before", "in_progress") for x in dec)
+    tools = [b for b in mem.get("briefings", []) if str(b.get("node", "")).startswith("tool:")]
+    m["tool_calls"] = len(tools)
+    for name in ("lookup", "best_results", "search_memory"):
+        m[f"tool_{name}"] = sum(b["node"] == f"tool:{name}" for b in tools)
     # ---------------------------------------------------------------- discovery
     curve = regret_curve(obs, env, d["optimum"])
     valid = [c for c in curve if not math.isnan(c)]
