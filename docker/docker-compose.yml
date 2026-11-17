@@ -3,19 +3,49 @@
 #
 # Start:  docker compose up -d redis ollama
 #         docker compose exec ollama ollama pull qwen3.5:4b
-#         docker compose run --rm gaied
-# With MongoDB: add --profile mongo
+#         docker compose run --rm gaied                                   # MEMORY_MODE=structured by default
+#
+# Shared memory configurations (MEMORY_MODE): none | basic | structured | structured+analysis
+#   docker compose run --rm -e MEMORY_MODE=none gaied                       # original GAIED (baseline)
+# Online analysis (configuration 4): Flowcept MQ + MongoDB + the analysis service
+#   docker compose --profile analysis up -d redis mongo analysis
+#   docker compose run --rm -e MEMORY_MODE=structured+analysis \
+#       -e FLOWCEPT_SETTINGS_PATH=/app/docker/flowcept_settings_online.yaml gaied
+# With MongoDB only: --profile mongo
+
+x-gaied-env: &gaied-env
+  REDIS_HOST: redis
+  MQ_HOST: redis                    # Flowcept MQ (online settings only)
+  KVDB_HOST: redis
+  MONGO_HOST: mongo
+  # --- LLM choice: "ollama" (local) or "openai" (online API, key in docker/.env) ---
+  LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+  LLM_MODEL: ${LLM_MODEL:-}                   # empty = OLLAMA_MODEL below
+  LLM_BASE_URL: ${LLM_BASE_URL:-}
+  LLM_API_KEY: ${LLM_API_KEY:-}
+  LLM_SEND_TEMPERATURE: ${LLM_SEND_TEMPERATURE:-true}
+  OLLAMA_URL: http://ollama:11434
+  OLLAMA_MODEL: qwen3.5:4b          # qwen3.5:9b with 16 GB of RAM or more
+  OLLAMA_THINK: "false"             # thinking mode off: much faster on CPU
+  NUM_PREDICT: "1024"
+  # --- shared memory ---
+  MEMORY_MODE: ${MEMORY_MODE:-structured}       # none | basic | structured | structured+analysis
+  MEMORY_NAMESPACE: ${MEMORY_NAMESPACE:-gaied}  # same name for the agents and the analysis service
+  MEMORY_BUDGET_TOKENS: "700"       # size of the memory part of a prompt
+  MEMORY_LESSONS: "true"            # conclusions -> checkable knowledge proposals (one LLM call when useful)
+  MEMORY_LESSON_MIN_NEW: "3"        # new results needed before extracting knowledge again
+  PYTHONPATH: /app:/app/docker                # so that local_llm.py and the memory are found
 
 services:
   redis:
     image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes"]   # on-disk persistence (AOF)
+    command: ["redis-server", "--appendonly", "yes"]   # on-disk persistence (AOF): the memory survives restarts
     ports: ["6379:6379"]
     volumes: [redis-data:/data]
 
   mongo:
     image: mongo:7
-    profiles: ["mongo"]                                # started only with --profile mongo
+    profiles: ["mongo", "analysis"]                    # Flowcept database for the online analysis
     ports: ["27017:27017"]
     volumes: [mongo-data:/data/db]
 
@@ -31,25 +61,30 @@ services:
     working_dir: /app
     shm_size: 1gb
     environment:
-      REDIS_HOST: redis
-      # --- LLM choice: "ollama" (local) or "openai" (online API, key in docker/.env) ---
-      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
-      LLM_MODEL: ${LLM_MODEL:-}                   # empty = OLLAMA_MODEL below
-      LLM_BASE_URL: ${LLM_BASE_URL:-}
-      LLM_API_KEY: ${LLM_API_KEY:-}
-      LLM_SEND_TEMPERATURE: ${LLM_SEND_TEMPERATURE:-true}
-      OLLAMA_URL: http://ollama:11434
-      OLLAMA_MODEL: qwen3.5:4b          # qwen3.5:9b with 16 GB of RAM or more
-      OLLAMA_THINK: "false"             # thinking mode off: much faster on CPU
-      NUM_PREDICT: "1024"
+      <<: *gaied-env
       SEEDS: "CNC(N)=O"                 # one agent per seed; "CNC(N)=O,CNC(N)=O" to test duplicates
       MAX_ITERATIONS: "3"
       N_XTB_WORKERS: "1"
       STABLE_REPORTS: "60"              # stop after 60 reports (30 min) without a new molecule: the LLM is slow on CPU
-      FLOWCEPT_SETTINGS_PATH: /app/docker/flowcept_settings.yaml
-      PYTHONPATH: /app:/app/docker                # so that local_llm.py is found
+      FLOWCEPT_SETTINGS_PATH: ${FLOWCEPT_SETTINGS_PATH:-/app/docker/flowcept_settings.yaml}
     volumes:
       - ..:/app                                   # the whole GAIED folder
+
+  analysis:                             # online provenance & memory analysis (independent of the agents)
+    build: .
+    profiles: ["analysis"]
+    user: root
+    depends_on: [redis, mongo]
+    working_dir: /app
+    restart: unless-stopped             # restarts resume pending work (consumer group + watermark in Redis)
+    command: ["python", "-m", "analysis", "run"]
+    environment:
+      <<: *gaied-env
+      FLOWCEPT_SETTINGS_PATH: /app/docker/flowcept_settings_online.yaml
+      ANALYSIS_PERIOD_S: "15"
+      ANALYSIS_LLM: ${ANALYSIS_LLM:-false}        # true: LLM hypotheses for new findings (unverified)
+    volumes:
+      - ..:/app
 
 volumes:
   redis-data:

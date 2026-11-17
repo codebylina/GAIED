@@ -96,6 +96,7 @@ def main(path: str | None) -> int:
     llm_total_s, llm_calls, empty_tool_calls, sims, sim_errors = 0.0, 0, 0, 0, 0
     xtb_runs = Counter()   # canonical molecule -> number of actual xTB computations
     tool_calls = Counter()  # canonical molecule -> number of tool requests by the LLM
+    mem_ops = Counter()     # [memory] shared-memory operations recorded in the provenance
 
     for r in records:
         st = r.get("subtype")
@@ -103,6 +104,10 @@ def main(path: str | None) -> int:
         dur = None
         if r.get("started_at") and r.get("ended_at"):
             dur = r["ended_at"] - r["started_at"]
+
+        if st == "memory":   # [memory] reuse / wait / blocked / context / knowledge proposal
+            mem_ops[r.get("activity_id", "")] += 1
+            continue
 
         if st == "langgraph_node":
             name = (r.get("custom_metadata") or {}).get("node_name") or r.get("activity_id")
@@ -153,6 +158,9 @@ def main(path: str | None) -> int:
         print(f"xTB computations         : {sum(xtb_runs.values())} for {len(xtb_runs)} distinct molecules")
         print(f"DUPLICATE computations   : {wasted}" + (
             "  (" + ", ".join(f"{m} ×{n}" for m, n in sorted(dup.items(), key=lambda x: -x[1])) + ")" if dup else ""))
+    if mem_ops:   # [memory]
+        print("-" * 60)
+        print("Shared memory operations : " + ", ".join(f"{k}={v}" for k, v in sorted(mem_ops.items())))
     return 0
 
 

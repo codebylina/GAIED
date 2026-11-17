@@ -23,8 +23,14 @@
     ou une API au format OpenAI (`LLM_PROVIDER=openai`, clé dans `docker/.env`).
   - `apply_patches.py`, `patch_stop_rule.py` : correctifs déjà appliqués (ne pas relancer).
   - `summarize_prov.py` : résume la provenance de la dernière campagne.
-- Mémoire : **pas encore de mémoire sur cette branche** (version naïve retirée le 14 nov., gardée sur
-  la branche `archive/naive-memory-v1` ; la version EVIDENT est sur la branche `evident-memory`).
+- Mémoire (branche `Four-layer-memory`) : doc complète dans `docs/ARCHITECTURE.md`.
+  `memory/` = mémoire partagée à quatre couches (M1 résultats, M2 expérience/diagnostics, M3 connaissance
+  avec statut épistémique, M4 consignes), coordination (verrous Lua, `get_or_compute`, relances), cycle de
+  vie, recherche/contexte, adaptateur Flowcept (`provenance.py`), CLI `python -m memory`.
+  `analysis/` = service d'analyse en ligne indépendant (`python -m analysis run`), pas une couche.
+  `memory/integrations/gaied.py` = crochets `[memory]`, choisis par `MEMORY_MODE`
+  (`none` | `basic` = prototype naïf `memory/baseline/naive.py` | `structured` | `structured+analysis`).
+  Expériences : `experiments/run_experiments.py`. Tests : `tests/test_*.py` (sans LLM ni xTB).
 - `output/flowcept_buffer_*.jsonl` : provenance de chaque campagne.
 
 ## Modifications déjà faites au code d'Amal (marquées `[gaied-docker ...]`)
@@ -41,7 +47,8 @@ Toujours depuis `C:\Users\pc\Documents\Research\GAIED\docker`, en respectant les
 docker compose up -d redis ollama
 docker compose run --rm gaied                                   # une campagne
 docker compose run --rm gaied python docker/summarize_prov.py   # résumé de la provenance
-docker compose exec redis redis-cli KEYS "mem:*"                # voir la mémoire dans Redis
+docker compose run --rm gaied python -m memory show             # voir les quatre couches
+docker compose --profile analysis up -d redis mongo analysis     # service d'analyse en ligne
 ```
 - Le dossier GAIED est monté dans le conteneur (`..:/app`) : modifier un `.py` ne demande PAS de
   reconstruire l'image. Reconstruire (`docker compose build gaied`) seulement si le Dockerfile change.
