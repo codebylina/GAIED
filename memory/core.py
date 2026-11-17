@@ -85,6 +85,14 @@ class SharedMemory:
             self._to_flowcept(f"memory.{kind}", {"entity": entity, "condition": condition},
                               {k: v for k, v in data.items()}, time.time())
 
+    def register_agent(self, method: str, params: dict | None, workflows: dict | None = None,
+                       campaign_id: str | None = None) -> None:
+        """Announce the agent (and its Flowcept workflow ids and campaign) to the analysis service."""
+        if campaign_id:
+            self.store.r.sadd(self.store.k("campaigns"), campaign_id)
+        self.store.emit("agent", agent=self.agent, workflows={**(workflows or {}), "method": method,
+                                                              "params": params or {}}, campaign_id=campaign_id)
+
     # ------------------------------------------------------------------ results and failures
     def record_result(self, raw: str, *, method: str, params: dict | None, value: float | None = None,
                       negative_detail: str | None = None, task_id: str | None = None,

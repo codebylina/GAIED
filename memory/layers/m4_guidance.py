@@ -45,7 +45,10 @@ class GuidanceMemory:
                 trigger: dict | None = None, memory_refs: list[str] | None = None,
                 provenance: list[dict] | None = None, limitations: str = "", status: str = "active",
                 priority: int = 1, ttl_s: float | None = None, source: str = "analysis",
-                baseline: dict | None = None) -> tuple[GuidanceRecord, bool]:
+                baseline: dict | None = None, key: str | None = None) -> tuple[GuidanceRecord, bool]:
+        """Publish guidance. `key` (default: kind + actions + targets + condition) identifies "the same"
+        guidance: issuing it again refreshes the existing item (actions and text may be updated, the
+        history keeps the previous versions) instead of creating a new one."""
         targets = targets or ["all"]
         actions = actions or [{"type": "free_text"}]
         now = time.time()
@@ -54,7 +57,7 @@ class GuidanceMemory:
                              memory_refs=memory_refs or [], provenance=provenance or [], status=status,
                              priority=priority, source=source, baseline=baseline or {}, created_by=by,
                              expires_at=now + ttl_s if ttl_s else None,
-                             key=self.key_of(kind, actions, targets, condition, text))
+                             key=key or self.key_of(kind, actions, targets, condition, text))
         stored, created = self.s.add(rec, actor=by, reason=f"published by {source}")
         if not created:
             if stored.status in ("retired", "ineffective"):
@@ -65,6 +68,7 @@ class GuidanceMemory:
                 r.provenance = (r.provenance + (provenance or []))[-50:]
                 r.expires_at = now + ttl_s if ttl_s else r.expires_at
                 r.trigger = {**r.trigger, "reissued": r.trigger.get("reissued", 0) + 1}
+                r.actions, r.text = actions, text
             stored = self.s.update("M4", stored.id, refresh, by, "issued again (evidence merged)")
             return stored, False
         if stored.status in LIVE:
