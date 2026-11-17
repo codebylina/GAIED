@@ -269,28 +269,32 @@ class Detectors:
 
     # ------------------------------------------------------------------ 7. unused knowledge
     def unused_knowledge(self) -> list[Finding]:
-        """Supported / validated knowledge that agents never received, or received and acted against."""
+        """Supported / validated knowledge that no agent received although the team kept working, or that an
+        agent received and then acted against (only decisions made AFTER it first saw the item count)."""
         out = []
         for k in self.m.knowledge.active(self.cfg.condition, ("validated", "supported")):
             claim = k.claim or {}
-            usage = self.m.store.usage(k.id)
-            if not usage.get("retrieved"):
-                out.append(Finding(
-                    "unused_knowledge", signature_of("never_retrieved", k.id),
-                    f"knowledge never shown to agents: {k.statement}",
-                    [f"{k.status} knowledge {k.id} has not been retrieved by any agent"], severity="low",
-                    memory_refs=[f"M3:{k.id}"], explanations=["ranked below other items in the prompt budget"],
-                    guidance={"kind": "recommendation", "targets": ["all"], "nodes": ["plan", "update"],
-                              "text": f"Team knowledge ({k.status}): {k.statement}",
-                              "actions": [{"type": "use_knowledge", "knowledge_id": k.id}]}))
+            seen = self.m.first_seen(k.id)
+            if not seen:
+                after = sum(len(self.st.timeline(a, since=k.updated_at)) for a in self.st.agents())
+                if after >= 2 * self.cfg.min_decisions:
+                    out.append(Finding(
+                        "unused_knowledge", signature_of("never_retrieved", k.id),
+                        f"knowledge never shown to agents: {k.statement}",
+                        [f"{k.status} knowledge {k.id} was not retrieved by any agent during the last {after} decisions"],
+                        severity="low", memory_refs=[f"M3:{k.id}"],
+                        explanations=["ranked below other items in the prompt budget"],
+                        guidance={"kind": "recommendation", "targets": ["all"], "nodes": ["plan", "update"],
+                                  "text": f"Team knowledge ({k.status}): {k.statement}",
+                                  "actions": [{"type": "use_knowledge", "knowledge_id": k.id}]}))
                 continue
             if claim.get("type") != "feature_effect":
                 continue
             harmful = (claim.get("effect") == "lower") == (self.m.domain.direction == "max")
             region = {"feature": claim["feature"], "op": claim.get("op", ">"), "value": claim.get("value", 0)}
             test = OPS.get(region["op"], operator.gt)
-            for agent in self.st.agents():
-                recent = self.recent(agent)
+            for agent, t_seen in seen.items():
+                recent = self.st.timeline(agent, since=t_seen)[-self.cfg.window:]
                 if len(recent) < self.cfg.min_decisions:
                     continue
                 inside = [d["entity"] for d in recent
@@ -300,8 +304,8 @@ class Detectors:
                     what = "keeps exploring the region it says to avoid" if harmful else "never explores the region it recommends"
                     out.append(Finding(
                         "unused_knowledge", signature_of("ignored", k.id, agent), f"{agent} {what}: {k.statement}",
-                        [f"{len(inside)}/{len(recent)} of its recent proposals are in the region {region}"],
-                        severity="medium", agents=[agent], memory_refs=[f"M3:{k.id}"],
+                        [f"after receiving it, {len(inside)}/{len(recent)} of its proposals are in the region {region}"],
+                        severity="medium", agents=[agent], memory_refs=[f"M3:{k.id}"], metrics={"share": round(share, 1)},
                         guidance={"kind": "instruction", "targets": [agent], "nodes": ["plan", "tool_calling", "update"],
                                   "text": f"Use the team's {k.status} knowledge: {k.statement}",
                                   "actions": [{"type": "avoid_region" if harmful else "prefer_region", **region}]}))

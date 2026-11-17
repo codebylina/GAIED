@@ -92,6 +92,10 @@ async def main() -> int:
             print('All agents completed.')
         except (KeyboardInterrupt, asyncio.CancelledError):
             print('\nShutting down agents...')
+        finally:  # [memory] summary of the shared memory
+            from dataclasses import asdict
+            from memory.integrations.gaied import report
+            report(asdict(XTBConfig()), os.environ.get('FLOWCEPT_CAMPAIGN_ID'))
 
     return 0
 
@@ -138,6 +142,7 @@ if __name__ == '__main__':
     exit_code = 1
     with Flowcept() as flowcept:
         os.environ['FLOWCEPT_CAMPAIGN_ID'] = flowcept.campaign_id
+        print(f'Flowcept campaign: {flowcept.campaign_id}')  # [memory] read by experiments/run_experiments.py
         import flowcept.agents.academy.academy_plugin as _ap
         perf_csv = _ap._PERF_CSV_PATH or f'provenance_perf_{flowcept.campaign_id[:8]}.csv'
         os.environ['FLOWCEPT_PERF_CSV'] = perf_csv

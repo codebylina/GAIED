@@ -172,10 +172,18 @@ class SharedMemory:
         for layer in ("M2", "M3"):
             for rid in shown[layer]:
                 self.store.use(rid, "retrieved")
+        now = time.time()
+        for layer in ("M2", "M3", "M4"):
+            for rid in shown[layer]:      # first time this agent saw this item (for "unused knowledge")
+                self.store.r.hsetnx(self.store.k("seen", rid), self.agent, now)
         self.store.emit("context", agent=self.agent, node=node, condition=cond, shown=shown, chars=len(text))
         self._to_flowcept("memory.context", {"node": node, "condition": cond},
                           {"shown": shown, "chars": len(text)}, t0)
         return text, shown
+
+    def first_seen(self, rec_id: str) -> dict[str, float]:
+        """agent -> time it first received this memory item in a prompt."""
+        return {a: float(t) for a, t in self.store.r.hgetall(self.store.k("seen", rec_id)).items()}
 
     def acknowledge(self, shown: dict) -> None:
         """The LLM call that received this context completed."""

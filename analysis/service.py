@@ -191,7 +191,10 @@ class AnalysisService:
             return []
         out = []
         for f in self.detectors.all():
-            fp = hashlib.sha1(json.dumps([f.summary, f.facts, f.metrics], sort_keys=True, default=str).encode()).hexdigest()
+            # fed back again only when the finding changed materially (severity, rounded metrics)
+            rounded = {k: (round(v, 1) if isinstance(v, float) else v) for k, v in f.metrics.items()}
+            fp = hashlib.sha1(json.dumps([f.severity, rounded, sorted(f.entities)[:20]], sort_keys=True,
+                                         default=str).encode()).hexdigest()
             key = self.m.store.k("an", "fp", f.signature)
             if self.m.store.r.get(key) == fp:
                 continue

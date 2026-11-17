@@ -5,6 +5,7 @@ import logging
 import os
 import sys
 from concurrent.futures import ProcessPoolExecutor
+from dataclasses import asdict  # [memory]
 from dataclasses import dataclass
 from dataclasses import field
 from io import StringIO
@@ -412,6 +413,31 @@ class XTBSimulationAgent(Agent):
         import uuid as _uuid
         self.agent_name = f'{self.search_state.seed}#{_uuid.uuid4().hex[:6]}'
 
+        # [memory] shared memory of the team, selected by MEMORY_MODE (none = original GAIED). Memory
+        # operations are written to this agent's Flowcept provenance and linked to its workflows/campaign.
+        from memory.integrations import gaied as _gaied_memory
+        self.xtb_params = asdict(self.config)
+        self.memory = _gaied_memory.for_agent(
+            self.agent_name, self.xtb_params, campaign_id,
+            sink=self._academy_interceptor.intercept_task if self._academy_interceptor else None,
+            prov_context=self._prov_ids,
+            workflows={'academy': getattr(self._academy_interceptor, '_workflow_id', None),
+                       'langgraph': getattr(self._lg_interceptor, '_workflow_id', None)},
+        )
+        logger.warning('Shared memory: %s for agent %s', self.memory.name, self.agent_name)
+
+    def _prov_ids(self) -> dict:  # [memory] Flowcept ids that link memory records to the provenance
+        ids = {}
+        if self._academy_interceptor is not None:
+            try:
+                from flowcept.agents.academy.academy_plugin import _current_action_task_id
+                ids['parent_task_id'] = _current_action_task_id.get(None)
+            except Exception:
+                pass
+            ids['workflow_id'] = self._academy_interceptor._workflow_id
+            ids['campaign_id'] = self._academy_interceptor._campaign_id
+        return {k: v for k, v in ids.items() if v}
+
     async def agent_on_shutdown(self) -> None:
         if self._lg_interceptor is not None:
             try:
@@ -494,7 +520,7 @@ class XTBSimulationAgent(Agent):
                     parent_task_id, workflow_id, campaign_id,
                 )
 
-        ionization_energy = await _run_xtb()
+        ionization_energy = await self.memory.compute(smiles, _run_xtb)  # [memory] reuse / wait / claim -> compute
         self.molecule_cache[smiles] = ionization_energy
         return ionization_energy
 
@@ -520,7 +546,7 @@ class XTBSimulationAgent(Agent):
             'status': 'ERROR' if error else 'FINISHED',
             'started_at': started_at,
             'ended_at': ended_at,
-            'used': {'smiles': smiles},
+            'used': {'smiles': smiles, 'xtb_config': asdict(self.config)},  # [memory] parameters of the experiment
             'generated': {'ionization_energy': result} if result is not None else None,
             'stderr': str(error) if error else None,
             'custom_metadata': {
@@ -579,10 +605,12 @@ class XTBSimulationAgent(Agent):
                         content=(
                             'Look for molecules with high ionization energy '
                             f'starting with the molecule {state.seed}'
+                            + self.memory.context('plan', f'high ionization energy {state.seed}')  # [memory]
                         ),
                     ),
                 ],
             )
+            self.memory.acknowledge()  # [memory]
 
             logger.info(f'Planner: {response}')
 
@@ -599,6 +627,10 @@ class XTBSimulationAgent(Agent):
             previously_simulated = ' '.join(
                 state.simulated_molecules.keys(),
             )
+            team_known = self.memory.known()  # [memory] molecules of the whole team (measured, negative, running)
+            if team_known:
+                previously_simulated = ' '.join(dict.fromkeys([*state.simulated_molecules, *team_known]))
+            memory_text = self.memory.context('tool_calling', str(state.plan))  # [memory]
             response = await self.llm_with_tools.ainvoke(
                 [
                     SystemMessage(
@@ -617,10 +649,12 @@ class XTBSimulationAgent(Agent):
                             f'Plan: {state.plan}\n\n'
                             f'Simulated Molecules: {previously_simulated} '
                             'Do not repeat those molecules in the tool calls.'
+                            + memory_text  # [memory]
                         ),
                     ),
                 ],
             )
+            self.memory.acknowledge()  # [memory]
             logger.info(f'Tool Calling: {response}')
             while len(response.tool_calls) == 0:
                 logger.warning('Tool calling agent did not call tools!')
@@ -658,6 +692,7 @@ class XTBSimulationAgent(Agent):
                     ],
                 )
 
+            self.memory.after_proposals([c['args']['smiles'] for c in response.tool_calls])  # [memory] guidance compliance
             return SearchState(
                 seed=state.seed,
                 plan=state.plan,
@@ -736,6 +771,8 @@ class XTBSimulationAgent(Agent):
                 ],
             )
             logger.info(f'Conclusions: {response}')
+            await self.memory.learn(response.content, self.generation_llm,  # [memory] knowledge proposals
+                                    state.simulated_molecules)
             new_state = SearchState(
                 seed=state.seed,
                 plan=response.content,
@@ -773,10 +810,12 @@ class XTBSimulationAgent(Agent):
                             f'{results_str}\n\n'
                             'Conclusions:\n'
                             f'\t{conclusions}'
+                            + self.memory.context('critique', str(state.plan))  # [memory] problems + contested knowledge
                         ),
                     ),
                 ],
             )
+            self.memory.acknowledge()  # [memory]
             logger.info(f'Critique: {response}')
             return SearchState(
                 seed=state.seed,
@@ -822,10 +861,12 @@ class XTBSimulationAgent(Agent):
                             f'\t{conclusions}\n\n'
                             'Critique:\n'
                             f'\t{state.critique}'
+                            + self.memory.context('update', str(state.critique))  # [memory] new results + instructions
                         ),
                     ),
                 ],
             )
+            self.memory.acknowledge()  # [memory]
             logger.info(f'Update: {response}')
 
             return SearchState(
