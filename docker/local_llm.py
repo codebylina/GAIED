@@ -23,6 +23,8 @@ Environment variables:
   LLM_BASE_URL   e.g. https://api.openai.com/v1
   LLM_API_KEY    the key (put it in docker/.env, never in Git)
   LLM_SEND_TEMPERATURE  "true" (default); "false" for models that enforce it (e.g. some GPT-5)
+  --- Tests ---
+  LLM_PROVIDER=scripted  deterministic answers, no model: checks the whole pipeline in minutes
   --- Common ---
   NUM_PREDICT    maximum number of generated tokens (default 1024)
 """
@@ -146,9 +148,45 @@ class OllamaLLM:
     # ------------------------------------------------------------------ API
     async def ainvoke(self, messages: list) -> _LLMResponse:
         chat = self._to_chat_messages(messages)
+        if self.provider == "scripted":
+            content = scripted_answer(chat, bool(self._tools))
+            if self._tools:
+                return _LLMResponse(content=content, tool_calls=self._parse_tool_calls(content))
+            return _LLMResponse(content=content)
         post = self._post_openai if self.provider == "openai" else self._post_ollama
         content = await asyncio.to_thread(post, chat)
         content = _THINK_RE.sub("", content).strip()
         if self._tools:
             return _LLMResponse(content=content, tool_calls=self._parse_tool_calls(content))
         return _LLMResponse(content=content)
+
+
+# ---------------------------------------------------------------------------------------------- scripted model
+# Molecules proposed by the scripted model, in order; "C1CC" and "C1CCN" are invalid SMILES (technical failures).
+SCRIPTED_POOL = ["NC(N)=O", "NC(=O)C(=O)N", "C1CC", "O=C1NC(=O)NC1=O", "C1CCN", "CC(N)=O", "NC#N",
+                 "O=C1NCC(=O)N1", "OC(=O)C(=O)O", "N#CC#N", "CC(=O)NC(N)=O", "NC(=O)NC(N)=O"]
+
+
+def scripted_answer(chat: list[dict], tools: bool) -> str:
+    system = next((m["content"] for m in chat if m["role"] == "system"), "")
+    user = "\n".join(m["content"] for m in chat if m["role"] == "user")
+    if tools:
+        per_call = int(os.environ.get("SCRIPTED_PROPOSALS", "3"))
+        picks = [s for s in SCRIPTED_POOL if f" {s} " not in f" {user.replace(',', ' ')} "][:per_call]
+        return json.dumps({"tool_calls": [{"name": "compute_ionization_energy", "args": {"smiles": s}}
+                                          for s in picks]})
+    if "Synthesize any conclusions" in system:
+        rows = re.findall(r"^(\S+)\t\t(-?[0-9.]+)\s*$", user, re.M)
+        text = "Conclusion: the measured molecules differ in ionization energy."
+        if "KNOWLEDGE" in system and rows:
+            items = [{"statement": f"The ionization energy of {s} is above {float(v) - 1:.2f} eV",
+                      "kind": "finding", "epistemic_status": "observation", "scope": "GFN2-xTB",
+                      "supporting_molecules": [s], "contradicting_molecules": [], "uncertainty": "single run"}
+                     for s, v in rows[:2]]
+            text += "\n\nKNOWLEDGE\n" + json.dumps(items)
+        return text
+    if "Critique" in system:
+        return "Critique: the campaign explores few chemical families."
+    if "Update the given plan" in system:
+        return "Updated plan: simulate further small polar molecules."
+    return "Plan: start from the seed and simulate small polar molecules with several nitrogen atoms."

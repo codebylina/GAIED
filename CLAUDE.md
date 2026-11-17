@@ -23,8 +23,12 @@
     ou une API au format OpenAI (`LLM_PROVIDER=openai`, clé dans `docker/.env`).
   - `apply_patches.py`, `patch_stop_rule.py` : correctifs déjà appliqués (ne pas relancer).
   - `summarize_prov.py` : résume la provenance de la dernière campagne.
-- Mémoire : **pas encore de mémoire sur cette branche** (version naïve retirée le 14 nov., gardée sur
-  la branche `archive/naive-memory-v1` ; la version EVIDENT est sur la branche `evident-memory`).
+- Mémoire (branche `prov-memory-analysis`) : paquet `pgmem/` = mémoire partagée M1-M4 dans Redis avec références
+  vers Flowcept, agent d'analyse indépendant (`python -m pgmem.analyzer`, service Docker `analyzer`, profil
+  `analysis`), accroches `[pgmem]` dans `mol_design_agents.py`. `PGMEM_MODE` = off | basic | structured | full.
+  Tout est décrit dans `docs/PGMEM.md` (exigences du cahier, décisions techniques, questions ouvertes, essai rapide).
+  Tests : `tests/test_pgmem.py`, `tests/test_pgmem_agent_loop.py`, `tests/test_pgmem_flowcept.py`.
+  `LLM_PROVIDER=scripted` (+ `OLLAMA_MODEL=scripted`) = LLM simulé pour les essais rapides.
 - `output/flowcept_buffer_*.jsonl` : provenance de chaque campagne.
 
 ## Modifications déjà faites au code d'Amal (marquées `[gaied-docker ...]`)

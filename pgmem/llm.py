@@ -1,0 +1,99 @@
+"""
+LLM access for the analysis agent: the same client as GAIED's agents (docker/local_llm.py: Ollama or an OpenAI-format
+API), or a scripted model (LLM_PROVIDER=scripted) for fast tests without any model.
+
+The analysis agent uses the LLM only where interpretation is needed; everything it returns is labelled a candidate.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import re
+
+EXPLAIN_FAILURES = """You analyze failed simulations of a molecular design workflow.
+Given molecules whose computation failed with the same error class, give a candidate explanation of what they have in
+common and one short piece of advice for the agents. You only propose; nothing you say is taken as a confirmed cause.
+Answer with ONLY a JSON object: {"explanation": "...", "advice": "..."}"""
+
+JUDGE_RESULT = """You compare a new experimental result with statements of the team's scientific knowledge.
+For each statement, say whether the new result supports it, contradicts it, or is unrelated to it, with a one-sentence
+reason. Only say "contradicts" when the result is inside the statement's scope and goes against it.
+Answer with ONLY a JSON object: {"verdicts": [{"id": "<statement id>", "relation": "supports|contradicts|unrelated",
+"reason": "..."}]}"""
+
+SUGGEST_DIRECTION = """You advise a computational chemistry agent whose recent iterations did not improve its best
+result. Using the team's results, failures and knowledge given below, suggest one concrete change of direction.
+Answer with ONLY a JSON object: {"advice": "..."}"""
+
+DRAFT_PROCEDURE = """From several experiences of a molecular design workflow that show the same pattern, write one
+reusable procedure for future agents. Be specific; state its limits.
+Answer with ONLY a JSON object: {"kind": "procedure|strategy|recommendation", "text": "...", "trigger": "...",
+"preconditions": "...", "actions": "...", "expected_outcome": "...", "limitations": "..."}"""
+
+_JSON = re.compile(r"\{.*\}", re.S)
+
+
+def parse_json(text: str) -> dict:
+    m = _JSON.search(text or "")
+    if not m:
+        return {}
+    try:
+        d = json.loads(m.group(0))
+        return d if isinstance(d, dict) else {}
+    except ValueError:
+        return {}
+
+
+class AnalysisLLM:
+    def __init__(self, provider: str | None = None) -> None:
+        self.provider = (provider or os.environ.get("LLM_PROVIDER", "ollama")).lower()
+        self.calls = 0
+        self._client = None
+
+    def _real(self):
+        if self._client is None:
+            from local_llm import OllamaLLM          # docker/local_llm.py, on PYTHONPATH in the container
+            self._client = OllamaLLM(model=os.environ.get("LLM_MODEL") or os.environ.get("OLLAMA_MODEL") or "")
+        return self._client
+
+    def ask(self, system: str, user: str) -> str:
+        self.calls += 1
+        if self.provider == "scripted":
+            return scripted(system, user)
+        from langchain.messages import HumanMessage, SystemMessage
+        resp = asyncio.run(self._real().ainvoke([SystemMessage(content=system), HumanMessage(content=user)]))
+        return resp.content
+
+    def ask_json(self, system: str, user: str) -> dict:
+        return parse_json(self.ask(system, user))
+
+
+def scripted(system: str, user: str) -> str:
+    """Deterministic answers for tests: shape-correct, content derived from the input."""
+    if system == EXPLAIN_FAILURES:
+        return json.dumps({"explanation": "The failing molecules share the error class reported by the workflow.",
+                           "advice": "Avoid proposing molecules similar to the failing ones."})
+    if system == JUDGE_RESULT:
+        ids = re.findall(r"\[(m3:[0-9a-f]+)\]", user)
+        val = re.search(r"value: (-?[0-9.]+)", user)
+        verdicts = []
+        for i in ids:
+            m = re.search(rf"\[{re.escape(i)}\][^\n]*?(above|below) (-?[0-9.]+)", user)
+            if m and val:
+                v, thr = float(val.group(1)), float(m.group(2))
+                ok = v > thr if m.group(1) == "above" else v < thr
+                verdicts.append({"id": i, "relation": "supports" if ok else "contradicts", "reason": "scripted"})
+            else:
+                verdicts.append({"id": i, "relation": "unrelated", "reason": "scripted"})
+        return json.dumps({"verdicts": verdicts})
+    if system == SUGGEST_DIRECTION:
+        return json.dumps({"advice": "Explore a different scaffold than the last iterations (scripted advice)."})
+    if system == DRAFT_PROCEDURE:
+        return json.dumps({"kind": "procedure", "text": "Avoid molecules that repeatedly fail with this error class.",
+                           "trigger": "a proposed molecule resembles molecules that failed with this error class",
+                           "preconditions": "the error class has been observed at least twice",
+                           "actions": "replace the molecule by one without the shared feature",
+                           "expected_outcome": "no new failure of this class",
+                           "limitations": "based only on the failures observed in this memory"})
+    return "{}"

@@ -165,6 +165,20 @@ class XTBConfig:
 
 def _compute_energy_sync(config: XTBConfig, smiles: str) -> float:
     """Run the ionization potential computation."""
+    return _compute_energy_info(config, smiles)[0]  # [pgmem] same computation, conditions returned separately
+
+
+def xtb_conditions(config: XTBConfig) -> dict:  # [pgmem] experimental conditions of a computation
+    return {'method': 'GFN2-xTB', 'accuracy': config.accuracy, 'fmax': config.search_fmax,
+            'max_steps': config.search_steps, 'rdkit_seed': 1}
+
+
+def _compute_energy_info(config: XTBConfig, smiles: str) -> tuple[float, dict]:  # [pgmem]
+    """The original computation, also returning its conditions and whether the optimization converged."""
+    steps = config.search_steps
+    if os.environ.get('PGMEM_FAULTS'):  # [pgmem] controlled evaluation only
+        from pgmem import faults
+        steps = faults.before(smiles, steps)
 
     # Make the initial geometry
     xyz = _generate_initial_xyz(smiles)
@@ -180,7 +194,7 @@ def _compute_energy_sync(config: XTBConfig, smiles: str) -> float:
     # to handle interfaces to XTB
     atoms.calc = calc
     dyn = LBFGSLineSearch(atoms, logfile=None)
-    dyn.run(fmax=config.search_fmax, steps=config.search_steps)
+    converged = dyn.run(fmax=config.search_fmax, steps=steps)  # [pgmem] keep the convergence flag
 
     neutral_energy = atoms.get_potential_energy()
 
@@ -189,7 +203,13 @@ def _compute_energy_sync(config: XTBConfig, smiles: str) -> float:
     atoms.set_initial_charges(charges)
     charged_energy = atoms.get_potential_energy()
 
-    return charged_energy - neutral_energy
+    value = charged_energy - neutral_energy
+    if os.environ.get('PGMEM_FAULTS'):  # [pgmem] controlled evaluation only
+        from pgmem import faults
+        value = faults.after(smiles, value)
+    info = {**xtb_conditions(config), 'converged': bool(converged),  # [pgmem]
+            'opt_steps': int(getattr(dyn, 'nsteps', -1))}
+    return value, info
 
 
 def _compute_energy_with_prov(
@@ -213,9 +233,10 @@ def _compute_energy_with_prov(
     started_at = _time.time()
     result = None
     error = None
+    info = None
     try:
-        result = _compute_energy_sync(config, smiles)
-        return result
+        result, info = _compute_energy_info(config, smiles)  # [pgmem]
+        return result, info
     except Exception as exc:
         error = exc
         raise
@@ -355,8 +376,17 @@ class XTBSimulationAgent(Agent):
                     elapsed_ms = round((_time.perf_counter() - t_llm) * 1000, 2)
 
                     t_prov = _time.perf_counter()
+                    from pgmem.agent_client import CURRENT_NODE, CURRENT_AGENT  # [pgmem]
+                    _tid = str(__import__('uuid').uuid4())  # [pgmem]
+                    try:
+                        result._prov = {'task_id': _tid, 'subtype': 'llm_call',  # [pgmem]
+                                        'workflow_id': getattr(_interceptor_ref, '_workflow_id', None),
+                                        'campaign_id': campaign_id}
+                    except Exception:
+                        pass
                     try:
                         _interceptor_ref.intercept_task({
+                            'task_id': _tid,  # [pgmem]
                             'activity_id': f'SomeAPI_llm/{self_llm.model}',
                             'subtype': 'llm_call',
                             'status': 'FINISHED',
@@ -371,7 +401,8 @@ class XTBSimulationAgent(Agent):
                                 'response': result.content,
                                 'tool_calls': result.tool_calls,
                             },
-                            'custom_metadata': {'elapsed_ms': elapsed_ms},
+                            'custom_metadata': {'elapsed_ms': elapsed_ms,  # [pgmem] agent and node
+                                                'agent': CURRENT_AGENT.get(), 'node': CURRENT_NODE.get()},
                         })
                     except Exception:
                         pass
@@ -412,6 +443,13 @@ class XTBSimulationAgent(Agent):
         import uuid as _uuid
         self.agent_name = f'{self.search_state.seed}#{_uuid.uuid4().hex[:6]}'
 
+        self.memory = None  # [pgmem] shared memory (PGMEM_MODE); never required for the workflow to run
+        try:
+            from pgmem.agent_client import from_env as _pgm_from_env
+            self.memory = _pgm_from_env(self.agent_name)
+        except Exception as exc:
+            logger.warning('Shared memory unavailable, continuing without it: %s', exc)
+
     async def agent_on_shutdown(self) -> None:
         if self._lg_interceptor is not None:
             try:
@@ -443,6 +481,12 @@ class XTBSimulationAgent(Agent):
         """
         if smiles in self.molecule_cache:
             return self.molecule_cache[smiles]
+        memory = getattr(self, 'memory', None)  # [pgmem] experiment selection: existing result
+        if memory is not None:
+            reused = memory.lookup(smiles, xtb_conditions(self.config))
+            if reused is not None:
+                self.molecule_cache[smiles] = reused
+                return reused
 
         # Capture the current Academy action task_id so the Parsl task can be
         # linked back to it via parent_task_id in the provenance graph.
@@ -460,14 +504,14 @@ class XTBSimulationAgent(Agent):
 
         loop = asyncio.get_event_loop()
 
-        async def _run_xtb(task_id: str | None = None) -> float:
+        async def _run_xtb(task_id: str | None = None) -> tuple[float, dict | None]:  # [pgmem] + conditions
             import time as _time
             import uuid as _uuid
             task_id = task_id or str(_uuid.uuid4())
             started_at = _time.time()
-            result, error = None, None
+            result, error, info = None, None, None
             try:
-                result = await loop.run_in_executor(
+                result, info = await loop.run_in_executor(  # [pgmem] value and conditions
                     self.pool,
                     _compute_energy_with_prov,
                     self.config,
@@ -477,7 +521,7 @@ class XTBSimulationAgent(Agent):
                     campaign_id,
                     task_id,
                 )
-                return result
+                return result, info
             except Exception as exc:
                 error = exc
                 raise
@@ -491,10 +535,19 @@ class XTBSimulationAgent(Agent):
                 # it is only injected by FlowceptAcademyPlugin.start(), not used here.
                 self._record_xtb_task(
                     task_id, smiles, started_at, _time.time(), result, error,
-                    parent_task_id, workflow_id, campaign_id,
+                    parent_task_id, workflow_id, campaign_id, info,
                 )
 
-        ionization_energy = await _run_xtb()
+        import uuid as _uuid
+        xtb_task_id = str(_uuid.uuid4())  # [pgmem] shared by the provenance record and the memory entry
+        try:
+            ionization_energy, info = await _run_xtb(xtb_task_id)
+        except Exception as exc:
+            if memory is not None:  # [pgmem] technical failure -> M2
+                memory.record_failure(smiles, str(exc), xtb_task_id, workflow_id, campaign_id)
+            raise
+        if memory is not None:  # [pgmem] observation -> M1, linked to the Flowcept task
+            memory.record_result(smiles, ionization_energy, info or {}, xtb_task_id, workflow_id, campaign_id)
         self.molecule_cache[smiles] = ionization_energy
         return ionization_energy
 
@@ -509,6 +562,7 @@ class XTBSimulationAgent(Agent):
         parent_task_id: str | None,
         workflow_id: str | None,
         campaign_id: str | None,
+        info: dict | None = None,  # [pgmem] conditions and convergence of the computation
     ) -> None:
         """Write the provenance record of one xTB computation (subtype parsl_task)."""
         if self._academy_interceptor is None:
@@ -521,7 +575,8 @@ class XTBSimulationAgent(Agent):
             'started_at': started_at,
             'ended_at': ended_at,
             'used': {'smiles': smiles},
-            'generated': {'ionization_energy': result} if result is not None else None,
+            'generated': ({'ionization_energy': result, 'conditions': info}  # [pgmem] + conditions
+                          if result is not None else None),
             'stderr': str(error) if error else None,
             'custom_metadata': {
                 'agent': getattr(self, 'agent_name', None),
@@ -551,7 +606,22 @@ class XTBSimulationAgent(Agent):
         search space.
         """
 
+        memory = getattr(self, 'memory', None)  # [pgmem]
+
+        def _pgm(node: str, query: str = '') -> str:  # [pgmem] memory section of a node's prompt
+            from pgmem.agent_client import CURRENT_NODE, CURRENT_AGENT
+            CURRENT_NODE.set(node)
+            CURRENT_AGENT.set(getattr(self, 'agent_name', None))
+            if memory is None:
+                return ''
+            try:
+                return memory.context(node, query)
+            except Exception as exc:
+                logger.warning('Shared memory read failed: %s', exc)
+                return ''
+
         async def plan(state: SearchState) -> SearchState:
+            mem_ctx = _pgm('plan', state.seed)  # [pgmem]
             response = await self.reasoning_llm.ainvoke(
                 [
                     SystemMessage(
@@ -579,6 +649,7 @@ class XTBSimulationAgent(Agent):
                         content=(
                             'Look for molecules with high ionization energy '
                             f'starting with the molecule {state.seed}'
+                            + mem_ctx  # [pgmem]
                         ),
                     ),
                 ],
@@ -599,6 +670,12 @@ class XTBSimulationAgent(Agent):
             previously_simulated = ' '.join(
                 state.simulated_molecules.keys(),
             )
+            _pgm('tool_calling')  # [pgmem]
+            if memory is not None:  # [pgmem] experiment selection: the team's results and failures
+                try:
+                    previously_simulated += memory.explored()
+                except Exception as exc:
+                    logger.warning('Shared memory read failed: %s', exc)
             response = await self.llm_with_tools.ainvoke(
                 [
                     SystemMessage(
@@ -658,6 +735,11 @@ class XTBSimulationAgent(Agent):
                     ],
                 )
 
+            if memory is not None:  # [pgmem] proposals, for the analysis agent
+                try:
+                    memory.record_proposals([c['args']['smiles'] for c in response.tool_calls])
+                except Exception as exc:
+                    logger.warning('Shared memory write failed: %s', exc)
             return SearchState(
                 seed=state.seed,
                 plan=state.plan,
@@ -704,6 +786,7 @@ class XTBSimulationAgent(Agent):
             )
 
         async def conclude(state: SearchState) -> SearchState:
+            _pgm('conclude')  # [pgmem]
             results_str = '\n'.join(
                 f'{molecule}\t\t{energy}'
                 for molecule, energy in state.simulated_molecules.items()
@@ -723,6 +806,7 @@ class XTBSimulationAgent(Agent):
                             'conclusions if they are wrong. For each '
                             'conclusion, output a concise, stand-alone '
                             'statement. Return only the new conclusions.'
+                            + (memory.conclude_instruction() if memory is not None else '')  # [pgmem]
                         ),
                     ),
                     HumanMessage(
@@ -736,6 +820,12 @@ class XTBSimulationAgent(Agent):
                 ],
             )
             logger.info(f'Conclusions: {response}')
+            if memory is not None:  # [pgmem] proposed knowledge (M3) and this attempt (M2)
+                try:
+                    response.content = memory.record_conclusion(
+                        response.content, state.plan, getattr(response, '_prov', None))
+                except Exception as exc:
+                    logger.warning('Shared memory write failed: %s', exc)
             new_state = SearchState(
                 seed=state.seed,
                 plan=response.content,
@@ -748,6 +838,7 @@ class XTBSimulationAgent(Agent):
             return new_state
 
         async def critique(state: SearchState) -> SearchState:
+            mem_ctx = _pgm('critique', state.plan[:2000])  # [pgmem]
             results_str = '\n'.join(
                 f'{molecule}\t\t{energy}'
                 for molecule, energy in state.simulated_molecules.items()
@@ -773,6 +864,7 @@ class XTBSimulationAgent(Agent):
                             f'{results_str}\n\n'
                             'Conclusions:\n'
                             f'\t{conclusions}'
+                            + mem_ctx  # [pgmem]
                         ),
                     ),
                 ],
@@ -788,6 +880,7 @@ class XTBSimulationAgent(Agent):
             )
 
         async def update(state: SearchState) -> SearchState:
+            mem_ctx = _pgm('update', state.critique[:2000])  # [pgmem]
             results_str = '\n'.join(
                 f'{molecule}\t\t{energy}'
                 for molecule, energy in state.simulated_molecules.items()
@@ -822,6 +915,7 @@ class XTBSimulationAgent(Agent):
                             f'\t{conclusions}\n\n'
                             'Critique:\n'
                             f'\t{state.critique}'
+                            + mem_ctx  # [pgmem]
                         ),
                     ),
                 ],

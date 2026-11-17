@@ -46,10 +46,40 @@ services:
       MAX_ITERATIONS: "3"
       N_XTB_WORKERS: "1"
       STABLE_REPORTS: "60"              # stop after 60 reports (30 min) without a new molecule: the LLM is slow on CPU
-      FLOWCEPT_SETTINGS_PATH: /app/docker/flowcept_settings.yaml
+      FLOWCEPT_SETTINGS_PATH: ${FLOWCEPT_SETTINGS_PATH:-/app/docker/flowcept_settings.yaml}
       PYTHONPATH: /app:/app/docker                # so that local_llm.py is found
+      # --- shared memory (pgmem): off | basic | structured | full (full = with the analysis agent's guidance) ---
+      PGMEM_MODE: ${PGMEM_MODE:-off}
+      PGMEM_NAMESPACE: ${PGMEM_NAMESPACE:-default}
     volumes:
       - ..:/app                                   # the whole GAIED folder
+
+  # Independent analysis agent (provenance + shared memory). Start it before a campaign:
+  #   docker compose --profile analysis up -d --no-deps analyzer
+  # Post-execution report:  docker compose run --rm --no-deps analyzer python -m pgmem.analyzer --post
+  analyzer:
+    build: .
+    profiles: ["analysis"]
+    user: root
+    working_dir: /app
+    command: ["python", "-m", "pgmem.analyzer"]
+    environment:
+      REDIS_HOST: redis
+      PGMEM_MODE: full
+      PGMEM_NAMESPACE: ${PGMEM_NAMESPACE:-default}
+      PGMEM_ANALYZER_LLM: ${PGMEM_ANALYZER_LLM:-true}
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3.5:4b}
+      OLLAMA_THINK: "false"
+      NUM_PREDICT: "1024"
+      FLOWCEPT_SETTINGS_PATH: ${FLOWCEPT_SETTINGS_PATH:-/app/docker/flowcept_settings.yaml}
+      PYTHONPATH: /app:/app/docker
+    volumes:
+      - ..:/app
 
 volumes:
   redis-data:
