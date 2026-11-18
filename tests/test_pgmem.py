@@ -141,6 +141,29 @@ def test_recurring_failure_class_gives_a_procedure_linked_to_its_experiences_and
     assert any(g.procedure_id == procs[0].id and g.target == "a2" for g in s.all_guidance())
 
 
+
+def test_own_results_computed_after_the_proposal_are_not_counted_as_already_measured():
+    """Real campaign: the analysis agent read the proposals after the agent had stored their results."""
+    cfg, s, an = setup()
+    a1 = client(s, cfg, "a1")
+    a1.record_result("CCO", 9.5, {**COND, "converged": True}, "t1", "w1", "c1")
+    a1.record_proposals(["CCO", "CCCO", "CCCCO"])            # CCO was known when proposed, the others were not
+    a1.record_result("CCCO", 9.4, {**COND, "converged": True}, "t2", "w1", "c1")
+    a1.record_result("CCCCO", 9.3, {**COND, "converged": True}, "t3", "w1", "c1")
+    drain(an)                                                # proposals processed only now
+    d = diagnoses(s, "repeated_proposals")
+    assert len(d) == 1 and "1 already measured" in d[0].text and "CCCO" not in d[0].text, d[0].text
+
+
+def test_procedure_fields_given_as_lists_by_the_llm_are_stored_as_text():
+    cfg, s, an = setup()
+    pid = an._store_procedure("k", [], {"text": "Fix", "trigger": ["a", "b"], "preconditions": {"x": 1},
+                                        "actions": ["check ring closures", "re-propose"], "expected_outcome": "ok",
+                                        "limitations": None})
+    m4 = s.all("M4")[0]
+    assert pid and m4.data["actions"] == "check ring closures; re-propose" and m4.data["trigger"] == "a; b"
+    assert m4.data["preconditions"] == "x: 1" and m4.data["limitations"] == ""
+
 def test_invalid_artifact_identifies_affected_knowledge_and_downstream_tasks():
     src = FakeSource()
     src.index.add({"task_id": "t1", "subtype": "tool_call", "activity_id": "compute_ionization_energy",

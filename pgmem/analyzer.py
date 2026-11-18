@@ -44,6 +44,15 @@ log = logging.getLogger("pgmem.analyzer")
 ME = "analysis-agent"
 
 
+
+def _as_text(v) -> str:
+    """LLM answers sometimes give a list or an object where the schema expects text."""
+    if isinstance(v, (list, tuple)):
+        return "; ".join(_as_text(x) for x in v if x not in (None, ""))
+    if isinstance(v, dict):
+        return "; ".join(f"{k}: {_as_text(x)}" for k, x in v.items())
+    return "" if v is None else str(v)
+
 class Analyzer:
     def __init__(self, store: MemoryStore, cfg: Config, llm: AnalysisLLM | None = None, source=None,
                  consumer: str | None = None) -> None:
@@ -303,8 +312,10 @@ class Analyzer:
         if not d.get("actions") or self.s.by_key("M4", key):
             return None
         kind = d.get("kind") if d.get("kind") in ("procedure", "strategy", "recommendation") else "procedure"
-        m4 = procedure(kind, d.get("text", ""), d.get("trigger", ""), d.get("preconditions", ""), d["actions"],
-                       d.get("expected_outcome", ""), d.get("limitations", ""), [e.id for e in episodes], ME,
+        f = {k: _as_text(d.get(k, "")) for k in ("text", "trigger", "preconditions", "actions",
+                                                  "expected_outcome", "limitations")}
+        m4 = procedure(kind, f["text"], f["trigger"], f["preconditions"], f["actions"],
+                       f["expected_outcome"], f["limitations"], [e.id for e in episodes], ME,
                        key=key, prov_refs=[r for e in episodes for r in e.prov_refs][:20],
                        campaign_id=self.cfg.campaign_id)
         pid, _ = self.s.add(m4)
@@ -317,8 +328,10 @@ class Analyzer:
     def _on_proposals(self, p: dict) -> None:
         agent, keys = p.get("agent", ""), list(p.get("keys", []))
         # inefficient exploration: proposing what the team already measured or saw fail
-        known = [k for k in keys if self.s.by_key("M1", k)]
-        failed = [k for k in keys if any(e.kind == "failure" for e in self.s.by_key("M2", k))]
+        # snapshot taken by the agent at proposal time (events from older clients: recomputed now)
+        known = list(p["known"]) if "known" in p else [k for k in keys if self.s.by_key("M1", k)]
+        failed = list(p["failed"]) if "failed" in p else \
+            [k for k in keys if any(e.kind == "failure" for e in self.s.by_key("M2", k))]
         if known or failed:
             refs = [e.id for k in known + failed for e in self.s.by_key("M1", k) + self.s.by_key("M2", k)][:20]
             did, new = self._diagnose("repeated_proposals", f"{agent}|{p.get('iteration')}",

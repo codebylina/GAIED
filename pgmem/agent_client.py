@@ -95,7 +95,12 @@ class MemoryClient:
         keys = [chem.canonical(s) for s in smiles_list]
         self._iter_proposals = keys
         self._best_start = self.best
-        self.s.emit("proposals", {"agent": self.agent, "iteration": self.iteration, "keys": keys})
+        # what the memory already holds when the proposals are made; the analysis agent reads the event later,
+        # after this agent's own new results are stored, so it must not recompute this itself
+        known = [k for k in keys if self.s.by_key("M1", k)]
+        failed = [k for k in keys if any(e.kind == "failure" for e in self.s.by_key("M2", k))]
+        self.s.emit("proposals", {"agent": self.agent, "iteration": self.iteration, "keys": keys,
+                                  "known": known, "failed": failed})
 
     # ------------------------------------------------------------------ execution
     def record_result(self, smiles: str, value: float, conditions: dict, task_id: str | None,
