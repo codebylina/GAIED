@@ -48,7 +48,7 @@ ME = "analysis-agent"
 def _as_text(v) -> str:
     """LLM answers sometimes give a list or an object where the schema expects text."""
     if isinstance(v, (list, tuple)):
-        return "; ".join(_as_text(x) for x in v if x not in (None, ""))
+        return "; ".join(_as_text(x).strip().rstrip(".") for x in v if x not in (None, ""))
     if isinstance(v, dict):
         return "; ".join(f"{k}: {_as_text(x)}" for k, x in v.items())
     return "" if v is None else str(v)
