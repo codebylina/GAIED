@@ -95,12 +95,12 @@ Non vérifié :
 
 ## Essai rapide sur le PC distant (depuis `D:\Research\GAIED\docker`)
 
-Le LLM simulé et le vrai xTB : quelques minutes.
+Le LLM simulé et le vrai xTB : quelques minutes. `SCRIPTED_DELAY_S=2` fait attendre le LLM simulé 2 s par réponse ; sans ce délai, les agents finissent avant que les consignes de l'agent d'analyse leur parviennent.
 
 ```powershell
 docker compose run --rm --no-deps -e REDIS_HOST=redis gaied python tests/test_pgmem.py
 docker compose --profile analysis run -d --rm --no-deps --name pgmem-analyzer -e PGMEM_NAMESPACE=quick1 -e LLM_PROVIDER=scripted -e OLLAMA_MODEL=scripted analyzer
-docker compose run --rm --no-deps -e PGMEM_MODE=full -e PGMEM_NAMESPACE=quick1 -e LLM_PROVIDER=scripted -e OLLAMA_MODEL=scripted -e "SEEDS=CNC(N)=O,CNC(N)=O" -e MAX_ITERATIONS=2 -e STABLE_REPORTS=2 gaied
+docker compose run --rm --no-deps -e PGMEM_MODE=full -e PGMEM_NAMESPACE=quick1 -e LLM_PROVIDER=scripted -e OLLAMA_MODEL=scripted -e SCRIPTED_DELAY_S=2 -e "SEEDS=CNC(N)=O,CNC(N)=O" -e MAX_ITERATIONS=3 -e STABLE_REPORTS=2 gaied
 docker compose run --rm --no-deps -e PGMEM_NAMESPACE=quick1 gaied python -m pgmem.show
 docker compose run --rm --no-deps -e PGMEM_NAMESPACE=quick1 -e LLM_PROVIDER=scripted -e OLLAMA_MODEL=scripted analyzer python -m pgmem.analyzer --post
 docker stop pgmem-analyzer

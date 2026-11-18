@@ -25,6 +25,7 @@ Environment variables:
   LLM_SEND_TEMPERATURE  "true" (default); "false" for models that enforce it (e.g. some GPT-5)
   --- Tests ---
   LLM_PROVIDER=scripted  deterministic answers, no model: checks the whole pipeline in minutes
+                         (SCRIPTED_DELAY_S: seconds to wait per answer, to imitate a real model)
   --- Common ---
   NUM_PREDICT    maximum number of generated tokens (default 1024)
 """
@@ -149,6 +150,8 @@ class OllamaLLM:
     async def ainvoke(self, messages: list) -> _LLMResponse:
         chat = self._to_chat_messages(messages)
         if self.provider == "scripted":
+            # SCRIPTED_DELAY_S: seconds per answer, to imitate a real model's latency in quick tests
+            await asyncio.sleep(float(os.environ.get("SCRIPTED_DELAY_S", "0")))
             content = scripted_answer(chat, bool(self._tools))
             if self._tools:
                 return _LLMResponse(content=content, tool_calls=self._parse_tool_calls(content))
