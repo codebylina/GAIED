@@ -72,6 +72,21 @@ implémentées.
 Limites constatées (real3) : « appliquée » ne vérifie que la liste de molécules, pas le reste du message ; le
 verdict d'efficacité est donné une seule fois, sur une itération (voir les questions ouvertes).
 
+## Journal des campagnes réelles (Qwen 3.5 9B, vrai xTB, PC distant)
+
+Chaque constat est rangé dans une de trois cases : **traité automatiquement** par les règles existantes (preuve pour
+le papier), **pas couvert** (type de problème général : nouvelle règle générale, décidée ensemble), **bug** du code
+(corrigé). Les campagnes de développement ci-dessous ne servent pas à l'évaluation : le code a changé entre elles.
+
+| Campagne | Traité automatiquement | Pas couvert | Bug corrigé |
+|---|---|---|---|
+| real1 (2 graines ; coupée par `STABLE_REPORTS=2`) | Consignes remises ; un agent ignore « ne repropose pas ces SMILES invalides » : noté non appliqué ; M3 rempli par Qwen avec types et statuts | — | Propositions comparées à la mémoire trop tard (fausses « already measured ») ; champs de procédure en liste |
+| real2 (coupée) | Vraies repropositions détectées (7) ; échecs SMILES diagnostiqués ; explication candidate fausse mais étiquetée `candidate_explanation` ; procédure M4 tirée de 2 expériences | Le même échec diagnostiqué deux fois (mémoire et provenance) | Format des actions de procédure |
+| real3 (complète, 3 itérations) | Réutilisation d'un résultat d'un autre agent ; cycle complet des consignes (6 appliquées, 5 efficaces, 1 non efficace) ; preuve contraire ajoutée sans écraser ; calcul triple détecté ; repropositions arrêtées après la consigne ciblée | Calculs simultanés en double → **verrou ajouté (accord)** ; test « appliquée » inadapté aux consignes sur les SMILES → test RDKit des propositions (proposé, à confirmer) ; efficacité jugée une seule fois ; statut épistémique déclaré par l'agent non réexaminé ; procédure non réessayée si la réponse du LLM est inutilisable | Preuves des connaissances sur une molécule en échec ; texte trompeur des erreurs de tâches ; unités des consignes ; réponses inutilisables du LLM non journalisées |
+
+Problèmes d'exploitation (pas du système) : Ollama arrêté (real2, 1er essai) ; `STABLE_REPORTS=2` donné par erreur
+dans les commandes (real1, real2).
+
 ## Questions ouvertes (à trancher par toi)
 
 1. **M1 : toutes les mesures, ou une sélection ?** Ton deuxième message demandait de ne pas stocker chaque mesure ;
