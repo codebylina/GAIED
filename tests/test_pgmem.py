@@ -209,28 +209,12 @@ def test_lock_waiter_gets_the_failure_and_an_expired_lock_is_taken_over():
     assert len([e for e in s.all("M2") if e.kind == "failure"]) == 1      # not computed (nor failed) twice
 
     async def crashed():
-        _, tok = await a1.claim_or_wait("CCCC", COND)          # a1 "crashes": never releases, stops renewing
-        a1._renewers.pop(tok).cancel()
+        _, tok = await a1.claim_or_wait("CCCC", COND)          # a1 "crashes": never releases
         return await a3.claim_or_wait("CCCC", COND, poll_s=0.1)
     v, tok3 = asyncio.run(crashed())
     assert v is None and tok3                                    # a3 computes once the lock expired
 
 
-
-def test_lock_is_renewed_while_the_computation_runs():
-    import asyncio
-    cfg, s, _ = setup()
-    cfg.claim_ttl_s = 3                                          # renewed every second
-    a1 = client(s, cfg, "a1")
-
-    async def run():
-        _, tok = await a1.claim_or_wait("CCO", COND)
-        await asyncio.sleep(5)                                   # longer than the lifetime: still held
-        held = s.r.exists(s._k("claim", "CCO"))
-        a1.release("CCO", tok)
-        return held, tok
-    held, tok = asyncio.run(run())
-    assert held and not s.r.exists(s._k("claim", "CCO")) and tok not in a1._renewers
 
 def test_no_lock_when_disabled():
     import asyncio

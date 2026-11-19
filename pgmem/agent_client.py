@@ -59,7 +59,6 @@ def from_env(agent_name: str) -> "MemoryClient | None":
 class MemoryClient:
     def __init__(self, store: MemoryStore, cfg: Config, agent: str) -> None:
         self.s, self.cfg, self.agent = store, cfg, agent
-        self._renewers: dict = {}               # lock token -> task renewing the lock while computing
         self.best: float | None = None          # this agent's best value, to describe each attempt's outcome
         self.iteration = 0
         self._iter_results: list[str] = []
@@ -97,8 +96,6 @@ class MemoryClient:
 
     # ------------------------------------------------------------------ coordination (lock per molecule)
     _RELEASE = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end"
-    _RENEW = ("if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('expire', KEYS[1], ARGV[2]) "
-              "else return 0 end")
 
     def _claim_key(self, key: str) -> str:
         return self.s._k("claim", key)
@@ -131,26 +128,11 @@ class MemoryClient:
                     return value, None
                 if waited:        # the lock expired or was released without a stored result
                     self._waited(key, t0, "computes")
-                self._renewers[token] = asyncio.ensure_future(self._renew(key, token))
                 return None, token
             waited = True
 
-    async def _renew(self, key: str, token: str) -> None:
-        """Keep the lock alive while this computation runs (it expires soon after the agent stops)."""
-        while True:
-            await asyncio.sleep(max(1.0, self.cfg.claim_ttl_s / 3))
-            try:
-                if not self.s.r.eval(self._RENEW, 1, self._claim_key(key), f"{self.agent}|{token}",
-                                     self.cfg.claim_ttl_s):
-                    return
-            except Exception as exc:  # noqa: BLE001 - the lock then simply expires
-                log.warning("lock renewal failed for %s: %s", key, exc)
-
     def release(self, smiles: str, token: str | None) -> None:
         if token:
-            task = self._renewers.pop(token, None)
-            if task is not None:
-                task.cancel()
             self.s.r.eval(self._RELEASE, 1, self._claim_key(chem.canonical(smiles)), f"{self.agent}|{token}")
 
     def _waited(self, key: str, t0: float, outcome: str) -> None:

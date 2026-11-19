@@ -52,7 +52,7 @@ implémentées.
 | Bloc `KNOWLEDGE` (JSON) demandé à la fin de `conclude` quand la mémoire est structurée, puis retiré du texte | Pour que l'agent propose ses connaissances sous une forme exploitable |
 | Une consigne non appliquée n'est pas jugée efficace ou non | L'effet ne lui est pas attribuable |
 | **Verrou par molécule (demandé par toi après real3)** : avant de calculer, l'agent pose `pgmem:{namespace}:claim:{molécule}` dans Redis (pris une seule fois) ; un autre appel pour la même molécule attend le résultat (ou l'échec) au lieu de recalculer ; verrou libéré après l'enregistrement du résultat | Empêche les calculs simultanés en double (`O=C1C(F)=C(F)N1C(F)(F)F` calculée 3 fois dans real3). Actif dans `basic`, `structured` et `full` (comme la réutilisation des résultats), désactivable : `PGMEM_CLAIMS=false` |
-| Le verrou vit `PGMEM_CLAIM_TTL_S` (120 s) et il est renouvelé tant que le calcul tourne | Nécessaire : un agent arrêté (Ctrl+C) ou planté ne bloque une molécule que 2 minutes au plus, quelle que soit la durée d'un calcul. Le rapport compte les attentes (`coordination`) |
+| Le verrou expire après `PGMEM_CLAIM_TTL_S` (600 s) | Nécessaire : un agent planté ne doit pas bloquer une molécule ; 600 s dépasse largement un calcul xTB de ces molécules. Le rapport compte les attentes (`coordination`) |
 | Modes `PGMEM_MODE` : `off`, `basic`, `structured`, `full` | Ce sont les quatre conditions de comparaison du cahier |
 | `tool_calling` : au plus `TOOL_CALL_RETRIES` (3) nouvelles demandes quand le LLM ne donne aucun appel d'outil lisible, puis l'itération continue sans simulation (marqué `[gaied-docker fix]`) | La boucle d'origine ne s'arrête jamais si le LLM continue sans appel d'outil : l'agent reste bloqué jusqu'à la fin de la campagne (cause probable de l'arrêt de l'agent 1 dans lock1) |
 | Changements dans le code d'Amal, marqués `[pgmem]` | Conditions et convergence du calcul xTB enregistrées dans la provenance ; agent et nœud écrits dans chaque appel LLM ; accroches mémoire |
@@ -83,6 +83,9 @@ implémentées.
   (real3 : une généralisation fausse enregistrée comme `observation`). Les preuves pour et contre restent attachées.
 - Un même échec peut donner deux diagnostics, l'un depuis la mémoire, l'autre depuis la provenance Flowcept.
 - « Appliquée » reste une mesure du comportement visible ; on ne voit pas ce que l'agent a « vérifié ».
+- Les preuves « pour » et « contre » d'une connaissance sont les molécules que l'agent cite ; rien ne vérifie
+  qu'elles soutiennent l'énoncé (lock2 : un échec cité comme preuve d'un énoncé faux). L'agent d'analyse ne compare
+  M3 qu'aux nouveaux résultats.
 
 Après ces corrections, la version des campagnes d'évaluation est figée par un tag git ; ensuite, seuls les vrais
 bugs sont corrigés, et notés ici.
@@ -99,7 +102,7 @@ le papier), **pas couvert** (type de problème général : nouvelle règle gén�
 | real2 (coupée) | Vraies repropositions détectées (7) ; échecs SMILES diagnostiqués ; explication candidate fausse mais étiquetée `candidate_explanation` ; procédure M4 tirée de 2 expériences | Le même échec diagnostiqué deux fois (mémoire et provenance) | Format des actions de procédure |
 | real3 (complète, 3 itérations) | Réutilisation d'un résultat d'un autre agent ; cycle complet des consignes (6 appliquées, 5 efficaces, 1 non efficace) ; preuve contraire ajoutée sans écraser ; calcul triple détecté ; repropositions arrêtées après la consigne ciblée | Calculs simultanés en double → **verrou ajouté (accord)** ; efficacité jugée une seule fois, statut épistémique non réexaminé → **limites documentées** | Preuves des connaissances sur une molécule en échec ; texte trompeur des erreurs de tâches ; unités des consignes ; réponses inutilisables du LLM non journalisées ; test « appliquée » inadapté aux consignes sur les SMILES (→ test RDKit) ; procédure jamais réessayée si la réponse du LLM est inutilisable |
 
-| lock1 (même graine deux fois ; lancée deux fois dans le même espace, arrêtée à la main) | À vérifier dans une nouvelle campagne | — | L'agent 1 est resté 12 min sans nouvelle molécule (cause non établie : diagnostic non fait). Corrigé par précaution : retries bornés de `tool_calling` (boucle infinie connue du code d'origine) ; verrou de 120 s renouvelé au lieu de 600 s fixes (un verrou laissé par un arrêt bloquait 10 min) ; une itération sans proposition n'est plus comptée « consigne appliquée » |
+| lock1 (même graine deux fois ; lancée deux fois dans le même espace, arrêtée à la main) | À vérifier dans une nouvelle campagne | — | L'agent 1 est resté 12 min sans nouvelle molécule (cause non établie : diagnostic non fait). Corrigé par précaution : retries bornés de `tool_calling` (boucle infinie connue du code d'origine) ; une itération sans proposition n'est plus comptée « consigne appliquée » |
 
 | lock1, 3e campagne (même espace par erreur) | Les itérations sans appel d'outil se terminent (« An LLM call asked for tool calls returned none ») au lieu de bloquer l'agent ; consigne SMILES jugée par RDKit (non appliquée quand l'agent propose des SMILES invalides) ; procédure M4 créée | Une molécule dont l'échec est confirmé peut être reproposée et recalculée à une itération suivante (le verrou n'empêche que les calculs simultanés) | Statut de validation M4 : « appliquée 4 fois » comptait des remises non appliquées |
 
