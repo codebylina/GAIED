@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -49,7 +50,7 @@ class ProvenanceRecorder:
         self._thread.start()
 
     def _run(self) -> None:
-        with open(self.path, "a", encoding="utf-8") as fh:
+        with open(self.path, "w", encoding="utf-8") as fh:
             while not self._stop.is_set():
                 try:
                     m = self._ps.get_message(timeout=1.0)
@@ -130,7 +131,9 @@ def run_one(series: str, cfg: dict, scenario: str, condition: str, rep: int, out
     if os.path.exists(meta_path) and json.load(open(meta_path)).get("status") == "ok":
         print(f"skip {run_id} (done)")
         return json.load(open(meta_path))
-    os.makedirs(run_dir, exist_ok=True)
+    if os.path.isdir(run_dir):              # an interrupted run is started again from scratch
+        shutil.rmtree(run_dir)
+    os.makedirs(run_dir)
     sc, cond = SCENARIOS[scenario], CONDITIONS[condition]
     namespace = f"eval-{series}-{run_id}".replace("__", "-")
     store = MemoryStore.connect(REDIS_HOST, REDIS_PORT, namespace)

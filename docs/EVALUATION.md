@@ -73,7 +73,9 @@ docker compose run --rm --no-deps -e OLLAMA_URL=http://host.docker.internal:1143
 docker compose run --rm --no-deps gaied python -m evaluation.metrics results/eval/pilot
 ```
 
-The scripted check needs no model: `... gaied python -m evaluation.run_series smoke`. A series can be interrupted and
+The scripted check needs no model: `... gaied python -m evaluation.run_series smoke`. It checks the plumbing, not
+the science: the scripted model always proposes the same few molecules, so some scenarios are barely exercised (with
+the xTB stub of the tests, no optimization is ever cut short). A series can be interrupted and
 started again: finished runs are skipped. `--only` and `--scenarios` restrict a series.
 
 Each run leaves its files in `results/eval/<series>/<scenario>__<condition>__r<n>/`; `metrics` writes `runs.csv`
