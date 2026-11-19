@@ -165,6 +165,64 @@ def test_knowledge_about_a_failed_molecule_cites_the_failure():
     k = [e for e in s.all("M3") if "C1CC" in e.text][0]
     assert [ev["entry"] for ev in k.data["supporting_evidence"]] == [fid]
 
+
+def test_lock_one_computation_at_a_time_and_the_waiter_gets_the_result():
+    import asyncio
+    cfg, s, an = setup()
+    a1, a2 = client(s, cfg, "a1"), client(s, cfg, "a2")
+
+    async def run():
+        v1, tok = await a1.claim_or_wait("CCO", COND)          # a1 computes
+        assert v1 is None and tok
+        waiter = asyncio.create_task(a2.claim_or_wait("OCC", COND, poll_s=0.05))   # same molecule, other spelling
+        await asyncio.sleep(0.3)
+        assert not waiter.done()                                 # a2 waits instead of computing
+        a1.record_result("CCO", 9.5, {**COND, "converged": True}, "t1", "w1", "c1")
+        a1.release("CCO", tok)
+        return await waiter
+    assert asyncio.run(run()) == (9.5, None)
+    assert not s.r.exists(s._k("claim", "CCO"))
+    drain(an)
+    rep = an.post_execution()
+    assert rep["coordination"] == {"waits": 1, "result": 1, "failure": 0, "computes": 0}, rep["coordination"]
+
+
+def test_lock_waiter_gets_the_failure_and_an_expired_lock_is_taken_over():
+    import asyncio
+    cfg, s, _ = setup()
+    cfg.claim_ttl_s = 1
+    a1, a2, a3 = client(s, cfg, "a1"), client(s, cfg, "a2"), client(s, cfg, "a3")
+
+    async def failing():
+        _, tok = await a1.claim_or_wait("C1CC", COND)
+        waiter = asyncio.create_task(a2.claim_or_wait("C1CC", COND, poll_s=0.05))
+        await asyncio.sleep(0.2)
+        a1.record_failure("C1CC", "Parse failure for C1CC", "t1", None, "c1")
+        a1.release("C1CC", tok)
+        try:
+            await waiter
+            return None
+        except RuntimeError as exc:
+            return str(exc)
+    msg = asyncio.run(failing())
+    assert msg and "Parse failure" in msg and len(a2._iter_failures) == 1
+    assert len([e for e in s.all("M2") if e.kind == "failure"]) == 1      # not computed (nor failed) twice
+
+    async def crashed():
+        _, tok = await a1.claim_or_wait("CCCC", COND)          # a1 "crashes": never releases
+        return await a3.claim_or_wait("CCCC", COND, poll_s=0.1)
+    v, tok3 = asyncio.run(crashed())
+    assert v is None and tok3                                    # a3 computes once the lock expired
+
+
+def test_no_lock_when_disabled():
+    import asyncio
+    cfg, s, _ = setup()
+    cfg.claims = False
+    a1, a2 = client(s, cfg, "a1"), client(s, cfg, "a2")
+    assert asyncio.run(a1.claim_or_wait("CCO", COND)) == (None, None)
+    assert asyncio.run(a2.claim_or_wait("CCO", COND)) == (None, None)
+
 def test_procedure_fields_given_as_lists_by_the_llm_are_stored_as_text():
     cfg, s, an = setup()
     pid = an._store_procedure("k", [], {"text": "Fix", "trigger": ["a", "b"], "preconditions": {"x": 1},

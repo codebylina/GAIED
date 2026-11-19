@@ -51,8 +51,26 @@ implémentées.
 | « Répété » = au moins deux occurrences | Définition du mot, pas un seuil réglé |
 | Bloc `KNOWLEDGE` (JSON) demandé à la fin de `conclude` quand la mémoire est structurée, puis retiré du texte | Pour que l'agent propose ses connaissances sous une forme exploitable |
 | Une consigne non appliquée n'est pas jugée efficace ou non | L'effet ne lui est pas attribuable |
+| **Verrou par molécule (demandé par toi après real3)** : avant de calculer, l'agent pose `pgmem:{namespace}:claim:{molécule}` dans Redis (pris une seule fois) ; un autre appel pour la même molécule attend le résultat (ou l'échec) au lieu de recalculer ; verrou libéré après l'enregistrement du résultat | Empêche les calculs simultanés en double (`O=C1C(F)=C(F)N1C(F)(F)F` calculée 3 fois dans real3). Actif dans `basic`, `structured` et `full` (comme la réutilisation des résultats), désactivable : `PGMEM_CLAIMS=false` |
+| Le verrou expire après `PGMEM_CLAIM_TTL_S` (600 s) | Nécessaire : un agent planté ne doit pas bloquer une molécule ; 600 s dépasse largement un calcul xTB de ces molécules. Le rapport compte les attentes (`coordination`) |
 | Modes `PGMEM_MODE` : `off`, `basic`, `structured`, `full` | Ce sont les quatre conditions de comparaison du cahier |
 | Changements dans le code d'Amal, marqués `[pgmem]` | Conditions et convergence du calcul xTB enregistrées dans la provenance ; agent et nœud écrits dans chaque appel LLM ; accroches mémoire |
+
+## Suivi d'une consigne : remise, appliquée, efficace
+
+1. **Remise (`delivered`).** La consigne est ajoutée au prompt de l'agent visé (ou de tous, `*`) au prochain nœud
+   `plan`, `critique` ou `update` ; on note l'agent et l'heure. Une seule fois par agent.
+2. **Appliquée (`applied`).** Jugée sur les premières propositions de l'agent après la remise (`tool_calling`). La
+   consigne porte une liste de molécules à éviter (`avoid_keys`) : appliquée = aucune de ces molécules n'est
+   reproposée. Sans liste (par exemple un conseil de direction), ce n'est pas vérifiable : rien n'est écrit.
+3. **Efficace (`effective`).** Jugée à la fin de cette itération (`conclude`), sur ce que l'agent a fait depuis la
+   remise : efficace = aucune molécule de la liste recalculée et, si la consigne porte sur un type d'échec
+   (`failure_class`), aucun nouvel échec de ce type. Non appliquée ou non vérifiable : pas de verdict. Le résultat
+   est écrit dans M2 (`outcome`) et, si la consigne vient d'une procédure, dans les applications de cette procédure
+   M4.
+
+Limites constatées (real3) : « appliquée » ne vérifie que la liste de molécules, pas le reste du message ; le
+verdict d'efficacité est donné une seule fois, sur une itération (voir les questions ouvertes).
 
 ## Questions ouvertes (à trancher par toi)
 
@@ -60,7 +78,13 @@ implémentées.
    ton cahier initial parle d'observations « sélectionnées » sans critère. Pour l'instant, M1 reçoit chaque mesure
    terminée mais seulement ses champs scientifiques.
 2. **M2 : une tentative par itération ?** Même question : pour l'instant oui.
-3. **Mode en ligne et persistance.** En mode en ligne, Flowcept n'écrit plus le JSONL complet (vérifié). Une
+3. **Efficacité jugée une seule fois.** Dans real3, une consigne est notée efficace après l'itération 1, puis
+   l'agent a 3 échecs du même type à l'itération 2. Réévaluer à chaque itération en gardant l'historique ?
+4. **Procédure M4 jamais réessayée si la réponse du LLM est inutilisable** (real3 : aucune procédure). Réessayer au
+   prochain échec du même type, ou seulement le noter ?
+5. **Statut épistémique déclaré par l'agent.** L'agent d'analyse ne le réexamine pas (real3 : une généralisation
+   fausse enregistrée comme `observation`). Lui faire ajouter une note, sans écraser le statut ?
+6. **Mode en ligne et persistance.** En mode en ligne, Flowcept n'écrit plus le JSONL complet (vérifié). Une
    provenance durable demande alors MongoDB (profil `mongo`, non testé ici).
 
 ## Suggestions non implémentées (seulement avec ton accord)

@@ -482,8 +482,9 @@ class XTBSimulationAgent(Agent):
         if smiles in self.molecule_cache:
             return self.molecule_cache[smiles]
         memory = getattr(self, 'memory', None)  # [pgmem] experiment selection: existing result
+        claim = None                            # [pgmem] coordination: lock while this agent computes the molecule
         if memory is not None:
-            reused = memory.lookup(smiles, xtb_conditions(self.config))
+            reused, claim = await memory.claim_or_wait(smiles, xtb_conditions(self.config))
             if reused is not None:
                 self.molecule_cache[smiles] = reused
                 return reused
@@ -541,13 +542,17 @@ class XTBSimulationAgent(Agent):
         import uuid as _uuid
         xtb_task_id = str(_uuid.uuid4())  # [pgmem] shared by the provenance record and the memory entry
         try:
-            ionization_energy, info = await _run_xtb(xtb_task_id)
-        except Exception as exc:
-            if memory is not None:  # [pgmem] technical failure -> M2
-                memory.record_failure(smiles, str(exc), xtb_task_id, workflow_id, campaign_id)
-            raise
-        if memory is not None:  # [pgmem] observation -> M1, linked to the Flowcept task
-            memory.record_result(smiles, ionization_energy, info or {}, xtb_task_id, workflow_id, campaign_id)
+            try:
+                ionization_energy, info = await _run_xtb(xtb_task_id)
+            except Exception as exc:
+                if memory is not None:  # [pgmem] technical failure -> M2
+                    memory.record_failure(smiles, str(exc), xtb_task_id, workflow_id, campaign_id)
+                raise
+            if memory is not None:  # [pgmem] observation -> M1, linked to the Flowcept task
+                memory.record_result(smiles, ionization_energy, info or {}, xtb_task_id, workflow_id, campaign_id)
+        finally:
+            if memory is not None:  # [pgmem] released after the result or failure is stored
+                memory.release(smiles, claim)
         self.molecule_cache[smiles] = ionization_energy
         return ionization_energy
 

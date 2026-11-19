@@ -14,10 +14,13 @@ analysis agent.
 """
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import json
 import logging
 import re
+import time
+import uuid
 
 from . import chem
 from .config import Config
@@ -90,6 +93,51 @@ class MemoryClient:
                 self._iter_results.append(e.id)
                 return float(e.data["value"])
         return None
+
+    # ------------------------------------------------------------------ coordination (lock per molecule)
+    _RELEASE = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end"
+
+    def _claim_key(self, key: str) -> str:
+        return self.s._k("claim", key)
+
+    async def claim_or_wait(self, smiles: str, conditions: dict, poll_s: float = 1.0) -> tuple[float | None, str | None]:
+        """Before computing: (value, None) when the result exists or arrives while another computation of the same
+        molecule runs; (None, token) when this call holds the lock and must compute, then call release(); a failure
+        of the computation it waited for is raised as is. Without locks: (lookup result, None)."""
+        value = self.lookup(smiles, conditions)
+        if value is not None or not (self.cfg.claims and self.cfg.reuse_results):
+            return value, None
+        key, token, t0, waited = chem.canonical(smiles), uuid.uuid4().hex, time.time(), False
+        while True:
+            if waited:            # another call holds the lock: did its result or failure arrive?
+                await asyncio.sleep(poll_s)
+                value = self.lookup(smiles, conditions)
+                if value is not None:
+                    self._waited(key, t0, "result")
+                    return value, None
+                failed = [e for e in self.s.by_key("M2", key) if e.kind == "failure" and e.created_at >= t0]
+                if failed:
+                    self._iter_failures.append(failed[0].id)
+                    self._waited(key, t0, "failure")
+                    raise RuntimeError(f"{failed[0].data['outcome'].get('error', 'computation failed')} "
+                                       "(computed by another call)")
+            if self.s.r.set(self._claim_key(key), f"{self.agent}|{token}", nx=True, ex=self.cfg.claim_ttl_s):
+                value = None if waited else self.lookup(smiles, conditions)   # finished just before the lock
+                if value is not None:
+                    self.release(smiles, token)
+                    return value, None
+                if waited:        # the lock expired or was released without a stored result
+                    self._waited(key, t0, "computes")
+                return None, token
+            waited = True
+
+    def release(self, smiles: str, token: str | None) -> None:
+        if token:
+            self.s.r.eval(self._RELEASE, 1, self._claim_key(chem.canonical(smiles)), f"{self.agent}|{token}")
+
+    def _waited(self, key: str, t0: float, outcome: str) -> None:
+        self.s.emit("waited", {"agent": self.agent, "key": key, "seconds": round(time.time() - t0, 1),
+                               "outcome": outcome})
 
     def record_proposals(self, smiles_list: list[str]) -> None:
         keys = [chem.canonical(s) for s in smiles_list]

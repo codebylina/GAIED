@@ -502,6 +502,10 @@ class Analyzer:
         report["findings"] = [{"id": e.id, "rule": e.data["context"].get("rule"), "text": e.text,
                                "problem_type": e.data.get("problem_type"), "basis": e.data.get("basis"),
                                "occurrences": e.data["outcome"].get("occurrences")} for e in diags]
+        waits = [json.loads(f.get("payload") or "{}") for _, f in self.s.r.xrange(self.stream)
+                 if f.get("event") == "waited"]
+        report["coordination"] = {"waits": len(waits), **{o: sum(1 for w in waits if w.get("outcome") == o)
+                                                          for o in ("result", "failure", "computes")}}
         report["memory"] = {c: self.s.count(c) for c in ("M1", "M2", "M3", "M4")}
         report["llm_calls"] = getattr(self.llm, "calls", 0)
         return report
@@ -514,6 +518,7 @@ def write_report(report: dict, out_dir: str) -> str:
         json.dump(report, fh, indent=1, default=str)
     lines = [f"# Post-execution analysis ({report.get('namespace')})", "",
              f"- memory: {report.get('memory')}", f"- computations: {report.get('computations')}",
+             f"- coordination (waits for a molecule being computed): {report.get('coordination')}",
              f"- guidance: {report.get('guidance')}", f"- strategy: {report.get('strategy')}", "", "## Findings", ""]
     lines += [f"- [{f['problem_type']} / {f['basis']}] {f['text']} (x{f['occurrences']})"
               for f in report.get("findings", [])]

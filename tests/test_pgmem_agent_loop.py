@@ -102,6 +102,21 @@ def main() -> int:
         "guidance delivered to an agent during execution": any(g.delivered for g in store.all_guidance()),
         "guidance application was assessed": any(g.applied for g in store.all_guidance()),
     }
+    # two agents with the same seed at the same time: the lock must prevent simultaneous duplicate computations
+    ns2 = ns + "-parallel"
+    os.environ["PGMEM_NAMESPACE"] = ns2
+
+    async def both():
+        return await asyncio.gather(run_agent("CNC(N)=O", 2), run_agent("CNC(N)=O", 2))
+    asyncio.run(both())
+    store2 = MemoryStore.connect(cfg.redis_host, cfg.redis_port, ns2)
+    tasks = {e.key: len({r["task_id"] for r in e.prov_refs if r.get("task_id")}) for e in store2.all("M1")}
+    waits = [b for _, b in store2.r.xrange(store2._k("events")) if b.get("event") == "waited"]
+    print(f"   parallel run: {len(tasks)} molecules, computations per molecule {sorted(set(tasks.values()))}, "
+          f"{len(waits)} waits")
+    checks["parallel agents: each molecule computed once (lock)"] = bool(tasks) and max(tasks.values()) == 1
+    checks["parallel agents: no lock left behind"] = not list(store2.r.scan_iter(store2._k("claim", "*")))
+    store2.reset()
     print(f"two agents x 3 iterations in {dt:.1f} s; memory {report['memory']}; guidance {report['guidance']}")
     for e in m2:
         if e.kind == "diagnosis":

@@ -29,6 +29,9 @@
   Tout est décrit dans `docs/PGMEM.md` (exigences du cahier, décisions techniques, questions ouvertes, essai rapide).
   Tests : `tests/test_pgmem.py`, `tests/test_pgmem_agent_loop.py`, `tests/test_pgmem_flowcept.py`.
   `LLM_PROVIDER=scripted` (+ `OLLAMA_MODEL=scripted`) = LLM simulé pour les essais rapides.
+  Coordination : verrou par molécule dans Redis (`pgmem:{ns}:claim:{molécule}`), l'autre agent attend le résultat ;
+  `PGMEM_CLAIMS=false` pour le désactiver. Campagnes réelles : `real3` = première complète (3 itérations), ne pas
+  mettre `STABLE_REPORTS=2` avec Qwen (coupe les agents pendant qu'ils réfléchissent).
 - `output/flowcept_buffer_*.jsonl` : provenance de chaque campagne.
 
 ## Modifications déjà faites au code d'Amal (marquées `[gaied-docker ...]`)
