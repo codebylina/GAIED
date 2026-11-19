@@ -95,12 +95,15 @@ class Analyzer:
         if self.s.r.sismember(done, msg_id):
             self.s.r.xack(self.stream, self.group, msg_id)
             return False
+        t0 = time.time()
         try:
             self._on_event(fields.get("event", ""), json.loads(fields.get("payload") or "{}"))
         except Exception as exc:  # noqa: BLE001 - kept pending, retried later: no analysis work is lost
             self.stats["failed_attempts"] += 1
             log.warning("event %s left pending (%s: %s)", msg_id, type(exc).__name__, exc)
             return False
+        finally:   # overhead of the analysis agent, kept in Redis for the evaluation
+            self.s.r.hincrbyfloat(self.s._k("analyzer", "stats"), "event_seconds", time.time() - t0)
         self.s.r.sadd(done, msg_id)
         self.s.r.xack(self.stream, self.group, msg_id)
         self.stats["events"] += 1
@@ -114,9 +117,15 @@ class Analyzer:
 
     # ================================================================== dispatch
     def _on_event(self, event: str, p: dict) -> None:
-        handler = {"result": self._on_result, "failure": self._on_failure, "proposals": self._on_proposals,
-                   "attempt": self._on_attempt, "knowledge": self._on_knowledge}.get(event)
-        if handler:
+        """Analysis rules on memory events, and the tracking of guidance (kept in every configuration, since it is
+        how interventions are measured). Without the "memory" source (ablation) only the tracking runs."""
+        rules = "memory" in self.cfg.analysis_sources
+        handlers = {"result": [self._on_result] if rules else [],
+                    "failure": [self._on_failure] if rules else [],
+                    "knowledge": [self._on_knowledge] if rules else [],
+                    "proposals": ([self._on_proposals] if rules else []) + [self._track_application],
+                    "attempt": [self._track_effectiveness] + ([self._on_attempt] if rules else [])}
+        for handler in handlers.get(event, []):
             handler(p)
 
     # ================================================================== helpers
@@ -161,6 +170,7 @@ class Analyzer:
     def _llm_json(self, system: str, user: str) -> dict:
         if self.llm is None:
             return {}
+        self.s.r.hincrby(self.s._k("analyzer", "stats"), "llm_calls", 1)
         return self.llm.ask_json(system, user)       # an exception leaves the event pending
 
     # ================================================================== rules on memory events
@@ -329,7 +339,7 @@ class Analyzer:
         return self._store_procedure(key, episodes, self._draft_procedure(key, episodes))
 
     def _on_proposals(self, p: dict) -> None:
-        agent, keys = p.get("agent", ""), list(p.get("keys", []))
+        agent = p.get("agent", "")
         # inefficient exploration: proposing what the team already measured or saw fail (as known to the memory
         # when the proposals were made: the agent's own later results must not count)
         known, failed = list(p.get("known", [])), list(p.get("failed", []))
@@ -344,8 +354,11 @@ class Analyzer:
                             f"or seen fail ({', '.join(failed[:5]) or '-'}). Check the team's results before "
                             "proposing.", "workflow", "observed_fact", [did], [], target=agent,
                             check={"avoid_keys": known + failed})
-        # guidance tracking: was guidance delivered to this agent applied in these proposals?
-        # (no proposal at all, e.g. the LLM gave no tool call: nothing to judge yet)
+
+    def _track_application(self, p: dict) -> None:
+        """Was guidance delivered to this agent applied in these proposals? (No proposal at all, e.g. the LLM gave
+        no tool call: nothing to judge yet.)"""
+        agent, keys = p.get("agent", ""), list(p.get("keys", []))
         for g in self.s.all_guidance() if keys else []:
             if not any(d["agent"] == agent for d in g.delivered) or agent in g.applied:
                 continue
@@ -357,12 +370,9 @@ class Analyzer:
                 applied = (not (avoid & set(keys))) if avoid else None
             self.s.update_guidance(g.id, lambda x: x.applied.__setitem__(agent, applied))
 
-    def _on_attempt(self, p: dict) -> None:
+    def _track_effectiveness(self, p: dict) -> None:
+        """Guidance effectiveness, judged on what this agent did since the guidance was delivered."""
         agent = p.get("agent", "")
-        att = self.s.get(p["entry"])
-        if att is None:
-            return
-        # guidance effectiveness, judged on what this agent did since the guidance was delivered
         for g in self.s.all_guidance():
             deliveries = [d for d in g.delivered if d["agent"] == agent]
             if not deliveries or agent in g.effective or agent not in g.applied:
@@ -395,7 +405,9 @@ class Analyzer:
             oid, _ = self.s.add(out, dedup=False)
             if g.procedure_id:
                 self._record_application(g.procedure_id, agent, g.id, oid, effective, g.applied.get(agent))
-        # repeated unsuccessful strategy: this attempt and the previous one did not improve the agent's best
+    def _on_attempt(self, p: dict) -> None:
+        """Repeated unsuccessful strategy: this attempt and the previous one did not improve the agent's best."""
+        agent = p.get("agent", "")
         mine = sorted([e for e in self.s.by_key("M2", agent) if e.kind == "attempt"], key=lambda e: e.created_at)
         last = mine[-2:]
         if (len(last) == 2 and all(e.data["outcome"].get("improved") is False for e in last)
@@ -574,8 +586,9 @@ def main(argv: list[str] | None = None) -> None:
     if args.post and not campaign:
         campaign = latest_campaign(args.jsonl or cfg.jsonl_glob)
     cfg.campaign_id = campaign
-    source = make_source("jsonl" if args.post else cfg.provenance_source, cfg.redis_host, cfg.redis_port,
-                         args.jsonl or cfg.jsonl_glob, campaign, online=not args.post)
+    kind = "none" if "provenance" not in cfg.analysis_sources else ("jsonl" if args.post else cfg.provenance_source)
+    source = make_source(kind, cfg.redis_host, cfg.redis_port, args.jsonl or cfg.jsonl_glob, campaign,
+                         online=not args.post)
     an = Analyzer(store, cfg, source=source)
     if args.post:
         an.step(block_ms=10, retry_idle_ms=0)   # finish pending memory events first

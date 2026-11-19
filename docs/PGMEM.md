@@ -23,6 +23,7 @@ that the xTB conditions and the agent / node of each LLM call are added to exist
 | Domain helpers | `pgmem/chem.py` | Canonical SMILES, failure classes, deterministic cause confirmation, data-quality checks |
 | Fault injection | `pgmem/faults.py` | Known-truth scenarios for the evaluation (off unless `PGMEM_FAULTS` is set) |
 | Tools | `pgmem/show.py`, `pgmem/collect.py` | Print a memory; zip a namespace with its provenance and reports |
+| Evaluation | `evaluation/` | Conditions, scenarios, series runner and metrics (see `docs/EVALUATION.md`) |
 
 ## Memory model
 
@@ -143,6 +144,8 @@ process: the pool worker is a fork whose Flowcept buffer is never flushed), `[ga
 | `PGMEM_PROVENANCE` | `auto` | `auto` (online channel when Flowcept publishes online, else JSONL), `stream`, `jsonl`, `none` |
 | `PGMEM_JSONL_GLOB` | `output/flowcept_buffer_*.jsonl` | Flowcept files read by the analysis agent |
 | `PGMEM_FAULTS`, `PGMEM_FAULTS_LOG` | unset | fault injection (see `pgmem/faults.py`) and its ground-truth log |
+| `PGMEM_CONTEXT_CATEGORIES` | `M1,M2,M3,M4` | categories put in the agents' prompts (ablations) |
+| `PGMEM_ANALYSIS_SOURCES` | `memory,provenance` | sources the analysis agent analyzes (ablations; guidance tracking always runs) |
 | `TOOL_CALL_RETRIES` | `3` | retries when the LLM gives no tool call |
 | `LLM_PROVIDER=scripted` (+ `OLLAMA_MODEL=scripted`) | | scripted LLM for fast tests; `SCRIPTED_DELAY_S` imitates latency |
 

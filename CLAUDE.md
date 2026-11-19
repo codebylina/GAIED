@@ -5,6 +5,7 @@
   energy (xTB simulations). Provenance is captured by Flowcept.
 - My topic is the agents' memory: `pgmem`, a shared memory (M1-M4) in Redis with references to Flowcept, and an
   independent analysis agent. Design and decisions: `docs/PGMEM.md`. Development campaigns: `docs/DEVELOPMENT_LOG.md`.
+  Evaluation (conditions, scenarios, metrics, series runner): `docs/EVALUATION.md`, `evaluation/`.
 - I work with a partner on the memory; Nadjiba works on provenance analysis.
 
 ## Important files

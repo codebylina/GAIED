@@ -6,6 +6,7 @@ analysis agent that analyzes provenance and memory together and sends guidance t
 
 - Design, configuration and usage: [`docs/PGMEM.md`](docs/PGMEM.md)
 - Running everything locally with Docker: [`INSTALLATION.md`](INSTALLATION.md)
+- Evaluation (conditions, scenarios, metrics, commands): [`docs/EVALUATION.md`](docs/EVALUATION.md)
 - Code: [`pgmem/`](pgmem/), integration points marked `[pgmem]` in `mol_design_agents.py`; tests in [`tests/`](tests/)
 
 The original example is described below.

@@ -245,20 +245,25 @@ class MemoryClient:
         """The memory section added to a node's prompt; guidance received here is marked delivered."""
         if not self.cfg.structured:
             return ""
-        n = self.cfg.retrieval_limit
+        n, cats = self.cfg.retrieval_limit, self.cfg.context_categories
         parts = []
         best = sorted([e for e in self.s.all("M1") if e.data.get("value") is not None],
-                      key=lambda e: -e.data["value"])[:n]
+                      key=lambda e: -e.data["value"])[:n] if "M1" in cats else []
         if best:
             parts.append("Best results of the team (M1):\n" + "\n".join(f"- {_with_notes(e)}" for e in best))
-        know = self.s.search("M3", query, limit=n)
+        know = self.s.search("M3", query, limit=n) if "M3" in cats else []
         if know:
             parts.append("Team knowledge (M3), with its evidence:\n" + "\n".join(f"- {_knowledge_line(e)}"
                                                                                for e in know))
-        exps = [e for e in self.s.search("M2", query, limit=3 * n) if e.kind in ("failure", "diagnosis", "outcome")][:n]
+        exps = [e for e in self.s.search("M2", query, limit=3 * n)
+                if e.kind in ("failure", "diagnosis", "outcome")][:n] if "M2" in cats else []
         if exps:
             parts.append("Relevant experiences (M2):\n" + "\n".join(f"- [{e.kind}] {e.text}" for e in exps))
-        procs = self.s.search("M4", query, limit=n)
+        procs = self.s.search("M4", query, limit=n) if "M4" in cats else []
+        # what was retrieved, for the evaluation of retrieval
+        self.s.emit("context", {"agent": self.agent, "node": node, "query": query[:200], "iteration": self.iteration,
+                                "entries": {c: [e.id for e in es] for c, es in
+                                            (("M1", best), ("M3", know), ("M2", exps), ("M4", procs))}})
         if procs:
             parts.append("Procedures (M4):\n" + "\n".join(
                 f"- {e.text} When: {e.data['trigger']}. Do: {e.data['actions']}. Limits: {e.data['limitations']}. "

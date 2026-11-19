@@ -12,6 +12,11 @@ def _bool(name: str, default: bool) -> bool:
     return default if v is None else v.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _list(name: str, default: tuple) -> tuple:
+    v = os.environ.get(name)
+    return default if v is None else tuple(x.strip() for x in v.split(",") if x.strip())
+
+
 @dataclass
 class Config:
     # off: no shared memory (original GAIED); basic: results shared between agents, nothing else;
@@ -29,6 +34,9 @@ class Config:
     analyzer_llm: bool = True               # False: the analysis agent runs its deterministic rules only
     provenance_source: str = "auto"         # auto | stream | jsonl | none
     jsonl_glob: str = "output/flowcept_buffer_*.jsonl"
+    # ablations (evaluation): memory categories put in the agents' prompts, and the sources the analysis agent uses
+    context_categories: tuple = ("M1", "M2", "M3", "M4")
+    analysis_sources: tuple = ("memory", "provenance")
 
     @property
     def enabled(self) -> bool:
@@ -60,4 +68,6 @@ class Config:
             analyzer_llm=_bool("PGMEM_ANALYZER_LLM", True),
             provenance_source=os.environ.get("PGMEM_PROVENANCE", "auto"),
             jsonl_glob=os.environ.get("PGMEM_JSONL_GLOB", "output/flowcept_buffer_*.jsonl"),
+            context_categories=_list("PGMEM_CONTEXT_CATEGORIES", ("M1", "M2", "M3", "M4")),
+            analysis_sources=_list("PGMEM_ANALYSIS_SOURCES", ("memory", "provenance")),
         )

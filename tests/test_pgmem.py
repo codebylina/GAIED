@@ -4,6 +4,7 @@ Needs a Redis server: REDIS_HOST / REDIS_PORT (default localhost:6379). Run: pyt
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -415,6 +416,42 @@ def test_jsonl_provenance_on_a_real_gaied_file():
     assert [r["activity_id"] for r in p.index.downstream(comps[0]["task_id"])] == ["conclude", "should_continue"]
     assert p.poll() == []                                                    # nothing new: deduplicated
 
+
+
+# --------------------------------------------------------------------------------------------- evaluation support
+def test_fault_selection_is_deterministic_and_follows_the_fraction():
+    from pgmem import faults
+    mols = ["C" * n + "O" for n in range(1, 41)] + ["C" * n + "N" for n in range(1, 41)]
+    rule = {"fraction": 0.3, "salt": "x"}
+    picked = [m for m in mols if faults.selected(rule, m)]
+    assert picked == [m for m in mols if faults.selected(rule, m)]            # same molecules every time
+    assert 10 <= len(picked) <= 40, len(picked)                                 # about 30 % of 80
+    assert faults.selected(rule, "OCC") == faults.selected(rule, "CCO")         # canonical SMILES
+    assert not faults.selected({"fraction": 1.0}, "C1CC")                       # never an unreadable SMILES
+    assert faults.selected({"smarts": "C#N"}, "CC#N") and not faults.selected({"smarts": "C#N"}, "CCO")
+
+
+def test_context_leaves_out_the_categories_removed_by_an_ablation():
+    cfg, s, _ = setup()
+    a1 = client(s, cfg, "a1")
+    a1.record_result("CCO", 9.5, {**COND, "converged": True}, "t1", "w1", "c1")
+    s.add(knowledge("finding", "CCO has a high ionization energy", "observation", "a1"))
+    assert "M3" in a1.context("plan", "CCO")
+    cfg.context_categories = ("M1",)
+    ctx = a1.context("plan", "CCO")
+    assert "(M1)" in ctx and "(M3)" not in ctx
+    ev = [json.loads(f["payload"]) for _, f in s.r.xrange(s._k("events")) if f["event"] == "context"]
+    assert ev[-1]["entries"]["M3"] == [] and ev[-1]["entries"]["M1"]
+
+
+def test_analysis_without_the_memory_source_keeps_only_guidance_tracking():
+    cfg, s, an = setup()
+    cfg.analysis_sources = ("provenance",)
+    a1, a2 = client(s, cfg, "a1"), client(s, cfg, "a2")
+    a1.record_result("CCO", 9.5, {**COND, "converged": True}, "t1", "w1", "c1")
+    a2.record_result("CCO", 9.5, {**COND, "converged": True}, "t2", "w2", "c1")
+    drain(an)
+    assert not diagnoses(s) and not s.all_guidance()
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 

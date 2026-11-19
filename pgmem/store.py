@@ -233,7 +233,8 @@ class MemoryStore:
     def export(self) -> dict:
         return {"namespace": self.ns,
                 "entries": {c: [e.to_dict() for e in self.all(c)] for c in ("M1", "M2", "M3", "M4")},
-                "guidance": [g.to_dict() for g in self.all_guidance()]}
+                "guidance": [g.to_dict() for g in self.all_guidance()],
+                "analyzer_stats": self.r.hgetall(self._k("analyzer", "stats"))}
 
     def reset(self) -> int:
         keys = list(self.r.scan_iter(f"{self.ns}:*"))
