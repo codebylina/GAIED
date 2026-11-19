@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 
@@ -66,7 +67,12 @@ class AnalysisLLM:
         return resp.content
 
     def ask_json(self, system: str, user: str) -> dict:
-        return parse_json(self.ask(system, user))
+        text = self.ask(system, user)
+        d = parse_json(text)
+        if not d:   # make an unusable answer visible (e.g. cut by NUM_PREDICT, or not JSON)
+            logging.getLogger("pgmem.llm").warning("LLM answer is not a JSON object (%d chars): %r ... %r",
+                                                   len(text or ""), (text or "")[:300], (text or "")[-200:])
+        return d
 
 
 def scripted(system: str, user: str) -> str:

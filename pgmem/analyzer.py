@@ -452,8 +452,8 @@ class Analyzer:
                                "(the agent retries)", "workflow", "observed_fact", [],
                                [{"task_id": rec.get("task_id"), "subtype": "llm_call", "workflow_id": wf}])
         elif status == "ERROR":
-            self._diagnose("task_error", str(rec.get("activity_id")), f"Task {rec.get('activity_id')} ended in "
-                           f"ERROR: {str(rec.get('stderr'))[:200]}", "technical_failure", "observed_fact", [],
+            self._diagnose("task_error", str(rec.get("activity_id")), f"Tasks {rec.get('activity_id')} ended in "
+                           f"ERROR (first error: {str(rec.get('stderr'))[:200]})", "technical_failure", "observed_fact", [],
                            [{"task_id": rec.get("task_id"), "subtype": sub}])
 
     # ================================================================== post-execution analysis
@@ -491,7 +491,9 @@ class Analyzer:
                               "by_agent": dict(Counter(e.key for e in attempts))}
         gs = self.s.all_guidance()
         report["guidance"] = {
+            # created / delivered count guidance messages; the others count (guidance, agent) pairs
             "created": len(gs), "delivered": sum(1 for g in gs if g.delivered),
+            "deliveries_to_agents": sum(len({d["agent"] for d in g.delivered}) for g in gs),
             "applied": sum(1 for g in gs for v in g.applied.values() if v is True),
             "not_applied": sum(1 for g in gs for v in g.applied.values() if v is False),
             "effective": sum(1 for g in gs for v in g.effective.values() if v is True),
