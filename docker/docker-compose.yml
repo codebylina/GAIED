@@ -4,7 +4,6 @@
 # Start:  docker compose up -d redis ollama
 #         docker compose exec ollama ollama pull qwen3.5:4b
 #         docker compose run --rm gaied
-# With MongoDB: add --profile mongo
 
 services:
   redis:
@@ -12,12 +11,6 @@ services:
     command: ["redis-server", "--appendonly", "yes"]   # on-disk persistence (AOF)
     ports: ["6379:6379"]
     volumes: [redis-data:/data]
-
-  mongo:
-    image: mongo:7
-    profiles: ["mongo"]                                # started only with --profile mongo
-    ports: ["27017:27017"]
-    volumes: [mongo-data:/data/db]
 
   ollama:
     image: ollama/ollama:latest
@@ -83,5 +76,4 @@ services:
 
 volumes:
   redis-data:
-  mongo-data:
   ollama-models:

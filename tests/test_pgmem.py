@@ -4,7 +4,6 @@ Needs a Redis server: REDIS_HOST / REDIS_PORT (default localhost:6379). Run: pyt
 """
 from __future__ import annotations
 
-import json
 import os
 import sys
 import time

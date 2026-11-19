@@ -74,9 +74,9 @@ def main() -> int:
     th = threading.Thread(target=analyze, daemon=True)
     th.start()
     t0 = time.time()
-    a1 = asyncio.run(run_agent("CNC(N)=O", 3))
+    asyncio.run(run_agent("CNC(N)=O", 3))
     time.sleep(1.0)                                   # the analysis agent works on its own; give it a moment
-    a2 = asyncio.run(run_agent("CNC(N)=O", 3))
+    asyncio.run(run_agent("CNC(N)=O", 3))
     time.sleep(1.5)
     stop.set()
     th.join(timeout=5)

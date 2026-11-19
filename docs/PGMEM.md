@@ -1,170 +1,180 @@
-# pgmem — mémoire partagée ancrée dans la provenance et agent d'analyse
+# pgmem: provenance-grounded shared memory and analysis agent for GAIED
 
-Branche `prov-memory-analysis` (à partir de `docker-local`). Ce document suit le cahier des charges initial. Il
-sépare ce qui vient de ce cahier, les décisions techniques nécessaires pour l'implémenter, et les suggestions non
-implémentées.
+`pgmem` adds to GAIED's molecular-design agents (Academy + LangGraph + xTB, provenance captured by Flowcept):
 
-## Composants
+1. one shared, persistent memory with four logical categories (M1-M4) whose entries **reference** Flowcept records
+   instead of copying them;
+2. an independent **analysis agent** that analyzes provenance and memory together, online and after execution, and
+   sends guidance to the scientific agents;
+3. the integration of both into GAIED's LangGraph workflow, with four comparison conditions (`PGMEM_MODE`).
 
-| Composant | Fichier | Rôle |
+Flowcept remains the single source of detailed provenance. Nothing in `pgmem` changes what Flowcept records, except
+that the xTB conditions and the agent / node of each LLM call are added to existing records.
+
+## Components
+
+| Component | File | Role |
 |---|---|---|
-| Flowcept | inchangé | Seule source de la provenance détaillée |
-| Adaptateur de provenance | `pgmem/provenance.py` | Lit Flowcept (fichiers JSONL, canal Redis en ligne, base) ; parcourt la provenance (tâches en aval) |
-| Mémoire partagée M1-M4 | `pgmem/schema.py`, `pgmem/store.py` | Une seule mémoire dans le Redis existant, 4 catégories logiques, références vers Flowcept |
-| Agent d'analyse | `pgmem/analyzer.py` | Processus séparé : règles déterministes, LLM pour l'interprétation, consignes aux agents |
-| Accroches GAIED | `pgmem/agent_client.py` + lignes `[pgmem]` de `mol_design_agents.py` | Planification, choix des expériences, exécution, conclusion, critique et révision |
-| Injection de fautes | `pgmem/faults.py` | Scénarios d'évaluation à vérité connue (désactivée par défaut) |
+| Memory model | `pgmem/schema.py` | Entry envelope, M1-M4 constructors, guidance record, validation status of procedures |
+| Memory store | `pgmem/store.py` | Redis keyspace `pgmem:{namespace}:...`, deduplication, history, event stream, guidance |
+| Agent integration | `pgmem/agent_client.py`, `[pgmem]` lines of `mol_design_agents.py` | What an agent reads and writes at each workflow node; the per-molecule lock |
+| Provenance adapter | `pgmem/provenance.py` | Reads Flowcept (JSONL files, or the online Redis channel); provenance traversal |
+| Analysis agent | `pgmem/analyzer.py`, `pgmem/llm.py` | Deterministic rules, LLM interpretation labelled as candidate, guidance, post-execution report |
+| Domain helpers | `pgmem/chem.py` | Canonical SMILES, failure classes, deterministic cause confirmation, data-quality checks |
+| Fault injection | `pgmem/faults.py` | Known-truth scenarios for the evaluation (off unless `PGMEM_FAULTS` is set) |
+| Tools | `pgmem/show.py`, `pgmem/collect.py` | Print a memory; zip a namespace with its provenance and reports |
 
-## Ce qui vient du cahier des charges
+## Memory model
 
-- **M1 (preuves et résultats).** Observations et mesures, avec leurs conditions expérimentales et la référence à la
-  tâche Flowcept (`task_id`).
-- **M2 (expériences).** Tentatives, succès, échecs, investigations, diagnostics, issues observées. Les pannes
-  techniques vont ici, jamais dans M1.
-- **M3 (connaissances).** Hypothèses, affirmations, résultats, règles, contraintes, résultats négatifs, incertitudes.
-  Chaque entrée garde sa portée, ses preuves pour et contre, ses références de provenance et son statut
-  épistémique : `observation`, `hypothesis` ou `explanation` (tes termes).
-- **M4 (procédures).** Déclencheur, préconditions, actions, effet attendu, limites, statut de validation, preuves.
-  Une procédure n'est créée qu'à partir d'un schéma répété dans des expériences M2, et elle garde le lien vers elles.
-- **Agent d'analyse.** Il distingue les types de problèmes (`technical_failure`, `data_quality`, `workflow`,
-  `scientific_contradiction`) et la base de chaque énoncé (`observed_fact`, `candidate_explanation`,
-  `confirmed_cause`). Il n'établit jamais une vérité scientifique et n'écrase rien : il ajoute des diagnostics, des
-  notes et des preuves, et il propose.
-- **Analyse d'impact.** Un résultat invalide (optimisation non convergente, valeur absente) amène l'agent d'analyse à
-  lister les connaissances et procédures qui le citent et les tâches Flowcept en aval, puis à proposer leur
-  réévaluation.
-- **Deux modes d'analyse.** En ligne (événements, sans bloquer les agents) et après exécution
-  (`python -m pgmem.analyzer --post`).
-- **Consignes.** Elles arrivent aux agents pendant l'exécution (à `plan`, `critique` et `update`). On suit si chacune
-  a été remise, appliquée et efficace.
-- **Rien n'est perdu si un service est indisponible.** Un événement non traité reste en attente et sera repris.
+Every entry has a category, a kind, a one-sentence text, an exact-retrieval key (canonical molecule, failure class,
+agent), its author, references to other entries (`refs`), references to Flowcept (`prov_refs`: task, workflow,
+campaign ids) and a `history`. Updates never overwrite: they are appended to the history.
 
-## Décisions techniques (nécessaires, réversibles)
-
-| Décision | Pourquoi |
-|---|---|
-| Stockage dans le Redis déjà déployé, clés `pgmem:{namespace}:...` | Réutiliser l'existant ; garder la mémoire d'une campagne à l'autre |
-| M1 reçoit chaque mesure terminée (valeur, conditions, `task_id`), pas la tâche Flowcept entière | « Sélectif » est compris comme : on garde l'observation scientifique, pas les événements, journaux ou appels LLM. **À confirmer** (voir plus bas) |
-| Le choix des expériences réutilise un résultat déjà dans M1 si les conditions sont identiques (`PGMEM_REUSE_RESULTS`) | Façon de « vérifier les résultats existants » ; peut être désactivé |
-| Une entrée M2 « tentative » par itération d'agent | Le cahier cite les « tentatives » ; **à confirmer** (voir plus bas) |
-| Statut de validation d'une procédure M4 = description de ce qui est connu (expériences d'origine, applications, efficaces ou non), sans seuil | Le cahier demande un statut de validation, sans en définir les valeurs |
-| « Répété » = au moins deux occurrences | Définition du mot, pas un seuil réglé |
-| Bloc `KNOWLEDGE` (JSON) demandé à la fin de `conclude` quand la mémoire est structurée, puis retiré du texte | Pour que l'agent propose ses connaissances sous une forme exploitable |
-| Une consigne non appliquée n'est pas jugée efficace ou non | L'effet ne lui est pas attribuable |
-| **Verrou par molécule (demandé par toi après real3)** : avant de calculer, l'agent pose `pgmem:{namespace}:claim:{molécule}` dans Redis (pris une seule fois) ; un autre appel pour la même molécule attend le résultat (ou l'échec) au lieu de recalculer ; verrou libéré après l'enregistrement du résultat | Empêche les calculs simultanés en double (`O=C1C(F)=C(F)N1C(F)(F)F` calculée 3 fois dans real3). Actif dans `basic`, `structured` et `full` (comme la réutilisation des résultats), désactivable : `PGMEM_CLAIMS=false` |
-| Le verrou expire après `PGMEM_CLAIM_TTL_S` (600 s) | Nécessaire : un agent planté ne doit pas bloquer une molécule ; 600 s dépasse largement un calcul xTB de ces molécules. Le rapport compte les attentes (`coordination`) |
-| Modes `PGMEM_MODE` : `off`, `basic`, `structured`, `full` | Ce sont les quatre conditions de comparaison du cahier |
-| `tool_calling` : au plus `TOOL_CALL_RETRIES` (3) nouvelles demandes quand le LLM ne donne aucun appel d'outil lisible, puis l'itération continue sans simulation (marqué `[gaied-docker fix]`) | La boucle d'origine ne s'arrête jamais si le LLM continue sans appel d'outil : l'agent reste bloqué jusqu'à la fin de la campagne (cause probable de l'arrêt de l'agent 1 dans lock1) |
-| Changements dans le code d'Amal, marqués `[pgmem]` | Conditions et convergence du calcul xTB enregistrées dans la provenance ; agent et nœud écrits dans chaque appel LLM ; accroches mémoire |
-
-## Suivi d'une consigne : remise, appliquée, efficace
-
-1. **Remise (`delivered`).** La consigne est ajoutée au prompt de l'agent visé (ou de tous, `*`) au prochain nœud
-   `plan`, `critique` ou `update` ; on note l'agent et l'heure. Une seule fois par agent.
-2. **Appliquée (`applied`).** Jugée sur les premières propositions de l'agent après la remise (`tool_calling`), avec
-   un test qui correspond à ce que la consigne demande :
-   - consigne sur des molécules déjà mesurées ou en échec (`avoid_keys`) : appliquée = aucune de ces molécules
-     n'est reproposée ;
-   - consigne sur les SMILES invalides (`failure_class` = `invalid_smiles`) : appliquée = RDKit lit toutes les
-     nouvelles propositions ;
-   - consigne sans test possible (par exemple un conseil de direction) : rien n'est écrit.
-3. **Efficace (`effective`).** C'est l'**effet à l'itération suivante** : jugé une fois, à la fin de cette itération
-   (`conclude`), sur ce que l'agent a fait depuis la remise. Efficace = aucune molécule de la liste recalculée et, si
-   la consigne porte sur un type d'échec, aucun nouvel échec de ce type. Pas de verdict si la consigne n'est pas
-   appliquée ou pas vérifiable. Pour les SMILES invalides, l'effet ne se sépare pas de l'application (le comportement
-   demandé est le résultat lui-même) : pas de verdict séparé, et la ligne M2 le dit. Le résultat est écrit dans M2
-   (`outcome`) et, si la consigne vient d'une procédure, dans les applications de cette procédure M4.
-
-## Limites documentées (laissées telles quelles, décision du 19/11)
-
-- L'efficacité n'est jugée que sur l'itération qui suit la consigne (real3 : un agent noté efficace a de nouveaux
-  échecs deux itérations plus tard).
-- Le statut épistémique d'une connaissance est celui que l'agent déclare ; l'agent d'analyse ne le réexamine pas
-  (real3 : une généralisation fausse enregistrée comme `observation`). Les preuves pour et contre restent attachées.
-- Un même échec peut donner deux diagnostics, l'un depuis la mémoire, l'autre depuis la provenance Flowcept.
-- « Appliquée » reste une mesure du comportement visible ; on ne voit pas ce que l'agent a « vérifié ».
-- Les preuves « pour » et « contre » d'une connaissance sont les molécules que l'agent cite ; rien ne vérifie
-  qu'elles soutiennent l'énoncé (lock2 : un échec cité comme preuve d'un énoncé faux). L'agent d'analyse ne compare
-  M3 qu'aux nouveaux résultats.
-
-Après ces corrections, la version des campagnes d'évaluation est figée par un tag git ; ensuite, seuls les vrais
-bugs sont corrigés, et notés ici.
-
-## Journal des campagnes réelles (Qwen 3.5 9B, vrai xTB, PC distant)
-
-Chaque constat est rangé dans une de trois cases : **traité automatiquement** par les règles existantes (preuve pour
-le papier), **pas couvert** (type de problème général : nouvelle règle générale, décidée ensemble), **bug** du code
-(corrigé). Les campagnes de développement ci-dessous ne servent pas à l'évaluation : le code a changé entre elles.
-
-| Campagne | Traité automatiquement | Pas couvert | Bug corrigé |
+| Category | Question | Kinds | Category-specific fields |
 |---|---|---|---|
-| real1 (2 graines ; coupée par `STABLE_REPORTS=2`) | Consignes remises ; un agent ignore « ne repropose pas ces SMILES invalides » : noté non appliqué ; M3 rempli par Qwen avec types et statuts | — | Propositions comparées à la mémoire trop tard (fausses « already measured ») ; champs de procédure en liste |
-| real2 (coupée) | Vraies repropositions détectées (7) ; échecs SMILES diagnostiqués ; explication candidate fausse mais étiquetée `candidate_explanation` ; procédure M4 tirée de 2 expériences | Le même échec diagnostiqué deux fois (mémoire et provenance) | Format des actions de procédure |
-| real3 (complète, 3 itérations) | Réutilisation d'un résultat d'un autre agent ; cycle complet des consignes (6 appliquées, 5 efficaces, 1 non efficace) ; preuve contraire ajoutée sans écraser ; calcul triple détecté ; repropositions arrêtées après la consigne ciblée | Calculs simultanés en double → **verrou ajouté (accord)** ; efficacité jugée une seule fois, statut épistémique non réexaminé → **limites documentées** | Preuves des connaissances sur une molécule en échec ; texte trompeur des erreurs de tâches ; unités des consignes ; réponses inutilisables du LLM non journalisées ; test « appliquée » inadapté aux consignes sur les SMILES (→ test RDKit) ; procédure jamais réessayée si la réponse du LLM est inutilisable |
+| M1 evidence and results | What was observed? | `measurement` | entity, quantity, value, unit, experimental conditions (method, accuracy, fmax, max steps, seed, convergence, steps used) |
+| M2 experiences | What happened? | `attempt`, `success`, `failure`, `investigation`, `diagnosis`, `outcome` | context, outcome; for diagnoses: problem type and basis |
+| M3 knowledge | What was learned? | `hypothesis`, `claim`, `finding`, `rule`, `constraint`, `negative_finding`, `uncertainty` | scope, epistemic status (`observation`, `hypothesis`, `explanation`), supporting and contradicting evidence, uncertainty |
+| M4 procedures | How should an agent act? | `procedure`, `strategy`, `recommendation` | trigger, preconditions, actions, expected outcome, limitations, supporting experiences, applications |
 
-| lock1 (même graine deux fois ; lancée deux fois dans le même espace, arrêtée à la main) | À vérifier dans une nouvelle campagne | — | L'agent 1 est resté 12 min sans nouvelle molécule (cause non établie : diagnostic non fait). Corrigé par précaution : retries bornés de `tool_calling` (boucle infinie connue du code d'origine) ; une itération sans proposition n'est plus comptée « consigne appliquée » |
+Technical failures are M2 experiences, never M1 results. A procedure is only derived from a pattern repeated in M2
+experiences and keeps the link to them. Its validation status is a description of what is known (the experiences it
+was derived from, how often it was given, applied, effective), with no threshold.
 
-| lock1, 3e campagne (même espace par erreur) | Les itérations sans appel d'outil se terminent (« An LLM call asked for tool calls returned none ») au lieu de bloquer l'agent ; consigne SMILES jugée par RDKit (non appliquée quand l'agent propose des SMILES invalides) ; procédure M4 créée | Une molécule dont l'échec est confirmé peut être reproposée et recalculée à une itération suivante (le verrou n'empêche que les calculs simultanés) | Statut de validation M4 : « appliquée 4 fois » comptait des remises non appliquées |
+## Integration in the GAIED workflow
 
-Problèmes d'exploitation (pas du système) : Ollama arrêté (real2, 1er essai) ; `STABLE_REPORTS=2` donné par erreur
-dans les commandes (real1, real2).
+| Node | Memory use |
+|---|---|
+| `plan`, `critique`, `update` | `context()`: best team results (M1), relevant knowledge (M3), experiences (M2), procedures (M4), and the analysis agent's pending guidance (marked delivered) |
+| `tool_calling` | `explored()`: molecules the team measured or saw fail; `record_proposals()` |
+| simulation | `claim_or_wait()`: reuse an existing result, or take the molecule's lock, or wait for the computation in progress; `record_result()` (M1) or `record_failure()` (M2), both with the Flowcept task id |
+| `conclude` | the agent is asked for a `KNOWLEDGE` JSON block (M3, removed from the text the workflow keeps); `record_conclusion()` writes the knowledge and the iteration's attempt (M2) |
 
-## Questions ouvertes (à trancher par toi)
+Every memory call is a few Redis operations; no agent ever waits for the analysis agent. If Redis is unavailable,
+the agent logs a warning and continues as the original GAIED.
 
-1. **M1 : toutes les mesures, ou une sélection ?** Ton deuxième message demandait de ne pas stocker chaque mesure ;
-   ton cahier initial parle d'observations « sélectionnées » sans critère. Pour l'instant, M1 reçoit chaque mesure
-   terminée mais seulement ses champs scientifiques.
-2. **M2 : une tentative par itération ?** Même question : pour l'instant oui.
-3. **Mode en ligne et persistance.** En mode en ligne, Flowcept n'écrit plus le JSONL complet (vérifié). Une
-   provenance durable demande alors MongoDB (profil `mongo`, non testé ici).
+## Analysis agent
 
-## Suggestions non implémentées (seulement avec ton accord)
+A separate process (`python -m pgmem.analyzer`), reading the memory's event stream (Redis consumer group) and
+Flowcept's provenance. An event is acknowledged only after it is processed: if processing fails (for example the LLM
+is unavailable), the event stays pending and is retried, so no analysis work is lost.
 
-- Recherche par vecteurs (aujourd'hui : clé exacte puis mots-clés).
-- Ablations au-delà des quatre modes (sans M2/M4, sans M3, analyse provenance seule, mémoire seule).
-- Harnais d'évaluation automatique sur les six scénarios (l'injection de fautes existe, pas encore les scripts de
-  mesure).
+Each finding is an M2 diagnosis with a **problem type** (`technical_failure`, `data_quality`, `workflow`,
+`scientific_contradiction`) and a **basis** (`observed_fact`, `candidate_explanation`, `confirmed_cause`). The
+analysis agent never establishes scientific truth and never overwrites an entry: it adds diagnoses, notes and
+evidence, and proposes.
 
-## Vérifié ici, et ce qui ne l'est pas
+| Rule | Trigger | Output |
+|---|---|---|
+| Redundant computation | the same molecule computed more than once (memory and provenance) | diagnosis; guidance not to compute it again |
+| Repeated proposals | an agent proposes molecules already measured or already failed (as known when it proposed) | diagnosis; guidance to that agent |
+| Repeated failure | the same molecule fails again; cause confirmed when RDKit cannot read the SMILES | diagnosis; guidance not to propose it again |
+| Recurring failure class | different molecules fail with the same class | diagnosis, LLM candidate explanation, guidance, LLM-drafted M4 procedure linked to the experiences (drafted again later if the LLM answer is unusable) |
+| Procedure available | a failure of a class that has a procedure | the procedure sent as guidance to the agent concerned |
+| Invalid result (impact analysis) | a result whose optimization did not converge or whose value is missing | note on the M1 entry; diagnosis listing the knowledge and procedures that cite it and the downstream Flowcept tasks; guidance to reassess them |
+| Knowledge on an unreliable result | new knowledge citing a result with a data-quality note | diagnosis |
+| Result vs knowledge | a new result in the scope of existing statements (LLM judgement) | evidence added for or against the statement (labelled candidate); on contradiction, a diagnosis and guidance |
+| No improvement | two consecutive iterations of an agent without improving its best result | diagnosis; LLM advice for a change of direction |
+| Procedure no longer effective | a procedure that worked before fails in its last application | diagnosis; guidance |
+| Provenance: task error, LLM call without tool calls | Flowcept records | diagnoses |
 
-Vérifié dans l'environnement de test (Redis local, Flowcept 1.0.5, LangGraph, RDKit, ASE ; xTB remplacé par un
-calculateur simulé) :
+After execution, `python -m pgmem.analyzer --post` writes a report (JSON and Markdown in `results/analysis/`):
+Flowcept's own provenance summary and error analysis, computations (total, distinct, redundant), coordination
+(waits for a molecule being computed), procedures, strategy (attempts, improving attempts), guidance statistics, all
+findings, and the memory size.
 
-- `tests/test_pgmem.py` : 16 tests sur la mémoire et l'agent d'analyse.
-- `tests/test_pgmem_agent_loop.py` : le vrai graphe de GAIED, 2 agents × 3 itérations, LLM simulé, agent d'analyse
-  en parallèle ; 10 vérifications.
-- `tests/test_pgmem_flowcept.py` : le canal en ligne de Flowcept reçu pendant l'exécution, et le rapport après
-  exécution.
-- `run-07.py` complet (Parsl, Academy, Flowcept hors ligne), 2 agents de même graine, 2 itérations, LLM simulé,
-  agent d'analyse dans un processus séparé : la campagne se termine normalement. Résultats :
-  - M1 : 6 entrées ; M2 : 20 ; M3 : 2 ; M4 : 1.
-  - 11 calculs pour 8 molécules distinctes : les doublons sont dus aux deux agents qui tournent en parallèle, et ils
-    sont détectés.
-  - 7 consignes créées, 6 remises, 4 appliquées, 5 jugées efficaces.
-  - Le rapport après exécution est produit à partir des JSONL de Flowcept.
+## Guidance tracking
 
-Non vérifié :
+1. **Delivered.** The guidance is added to the prompt of its target agent (or of every agent, `*`) at its next
+   `plan`, `critique` or `update` node; the agent, node and time are recorded. Once per agent.
+2. **Applied.** Judged on the agent's first proposals after delivery, with a test matching what the guidance asks:
+   - molecules to avoid (`avoid_keys`): applied when none of them is proposed again;
+   - invalid SMILES (`failure_class` = `invalid_smiles`): applied when RDKit reads every new proposal;
+   - guidance with no test (for example advice on a direction): no verdict.
+   An iteration without any proposal is not judged.
+3. **Effective.** The effect at the next iteration, judged once, at the end of that iteration: effective when no
+   listed molecule was computed again and, for guidance about a failure class, no new failure of that class occurred.
+   No verdict when the guidance was not applied or has no test. For invalid-SMILES guidance the asked behaviour is the
+   outcome itself, so no separate effectiveness verdict is given. The verdict is written as an M2 `outcome` and, for
+   guidance coming from a procedure, in that procedure's applications.
 
-- Les campagnes Docker sur le PC distant, avec le vrai xTB et Qwen.
-- La lecture de provenance depuis MongoDB (`DbProvenance`).
+## Design decisions
 
-## Essai rapide sur le PC distant (depuis `D:\Research\GAIED\docker`)
+| Decision | Reason |
+|---|---|
+| Storage in GAIED's existing Redis, keys `pgmem:{namespace}:...`, kept across campaigns | Reuse the deployment; later campaigns learn from earlier ones; one namespace per experiment keeps runs separate |
+| M1 keeps every completed measurement, with its scientific fields only | The lock, result reuse and repeated-proposal detection need every result; M3 evidence must point to it; negative results are results; any selection rule would be an arbitrary threshold. Selectivity is in the content (no Flowcept record, log or LLM call is copied) and at retrieval (`PGMEM_RETRIEVAL_LIMIT` entries per category in a prompt) |
+| One M2 attempt per agent iteration | Guidance effectiveness, the no-improvement rule and procedure derivation are judged on attempts; a selection would need an arbitrary criterion |
+| Deduplication: M1 same quantity, value and conditions; M3/M4 same normalized text and kind; M2 never merged | Each experience happened once; merges append references and history |
+| Result reuse when conditions are identical (`PGMEM_REUSE_RESULTS`) | Experiment selection checks existing results |
+| Lock per molecule (`pgmem:{ns}:claim:{molecule}`); the other caller waits for the stored result or failure; expires after `PGMEM_CLAIM_TTL_S` (600 s) | Prevents simultaneous duplicate computations; the expiry keeps a crashed agent from blocking a molecule. Active whenever the memory is (`basic`, `structured`, `full`); `PGMEM_CLAIMS=false` disables it |
+| "Repeated" means at least two occurrences | Definition of the word, not a tuned threshold |
+| LLM only for interpretation; its outputs are labelled candidate | The deterministic rules decide what is observed; the LLM explains, judges and drafts |
+| `PGMEM_MODE`: `off` (original GAIED), `basic` (results shared, M1 only), `structured` (M1-M4), `full` (structured + guidance) | The four comparison conditions |
+| `tool_calling` retries at most `TOOL_CALL_RETRIES` (3) times when the LLM gives no parsable tool call (`[gaied-docker fix]`) | The original loop never ends in that case and blocks the agent for the rest of the campaign |
 
-Le LLM simulé et le vrai xTB : quelques minutes. `SCRIPTED_DELAY_S=2` fait attendre le LLM simulé 2 s par réponse ; sans ce délai, les agents finissent avant que les consignes de l'agent d'analyse leur parviennent.
+Changes to the original GAIED code are minimal and marked: `[pgmem]` (memory hooks, xTB conditions and convergence
+in provenance, agent and node in each LLM call record), `[provenance-fix]` (the xTB task is recorded from the agent
+process: the pool worker is a fork whose Flowcept buffer is never flushed), `[gaied-docker ...]` (local execution).
 
-```powershell
-docker compose run --rm --no-deps -e REDIS_HOST=redis gaied python tests/test_pgmem.py
-docker compose --profile analysis run -d --rm --no-deps --name pgmem-analyzer -e PGMEM_NAMESPACE=quick1 -e LLM_PROVIDER=scripted -e OLLAMA_MODEL=scripted analyzer
-docker compose run --rm --no-deps -e PGMEM_MODE=full -e PGMEM_NAMESPACE=quick1 -e LLM_PROVIDER=scripted -e OLLAMA_MODEL=scripted -e SCRIPTED_DELAY_S=2 -e "SEEDS=CNC(N)=O,CNC(N)=O" -e MAX_ITERATIONS=3 -e STABLE_REPORTS=2 gaied
-docker compose run --rm --no-deps -e PGMEM_NAMESPACE=quick1 gaied python -m pgmem.show
-docker compose run --rm --no-deps -e PGMEM_NAMESPACE=quick1 -e LLM_PROVIDER=scripted -e OLLAMA_MODEL=scripted analyzer python -m pgmem.analyzer --post
+## Limitations
+
+- Effectiveness is judged only on the iteration that follows the guidance.
+- The epistemic status of knowledge is the one the agent declares; the analysis agent does not reassess it.
+- The evidence for and against a statement is the set of molecules the agent cites; nothing checks that they support
+  the statement. The analysis agent compares M3 only with new results, through an LLM judgement.
+- "Applied" measures visible behaviour (the proposals), not what the agent reasoned.
+- The same failure can give two diagnoses, one from memory, one from provenance.
+- The lock prevents simultaneous computations only: a molecule that failed can be proposed and computed again later.
+- In Flowcept's online mode, the JSONL buffer only keeps the last buffer; durable provenance then needs Flowcept's
+  database, which `pgmem` does not read.
+
+## Configuration
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PGMEM_MODE` | `off` | `off`, `basic`, `structured`, `full` |
+| `PGMEM_NAMESPACE` | `default` | memory namespace (use a new one per experiment) |
+| `REDIS_HOST`, `REDIS_PORT` | `localhost`, `6379` | Redis server |
+| `PGMEM_RETRIEVAL_LIMIT` | `5` | entries per category in a prompt |
+| `PGMEM_REUSE_RESULTS` | `true` | reuse a result already in M1 |
+| `PGMEM_CLAIMS`, `PGMEM_CLAIM_TTL_S` | `true`, `600` | per-molecule lock and its expiry |
+| `PGMEM_ANALYZER_LLM` | `true` | `false`: the analysis agent runs its deterministic rules only |
+| `PGMEM_PROVENANCE` | `auto` | `auto` (online channel when Flowcept publishes online, else JSONL), `stream`, `jsonl`, `none` |
+| `PGMEM_JSONL_GLOB` | `output/flowcept_buffer_*.jsonl` | Flowcept files read by the analysis agent |
+| `PGMEM_FAULTS`, `PGMEM_FAULTS_LOG` | unset | fault injection (see `pgmem/faults.py`) and its ground-truth log |
+| `TOOL_CALL_RETRIES` | `3` | retries when the LLM gives no tool call |
+| `LLM_PROVIDER=scripted` (+ `OLLAMA_MODEL=scripted`) | | scripted LLM for fast tests; `SCRIPTED_DELAY_S` imitates latency |
+
+## Running
+
+From `GAIED/docker` (see `INSTALLATION.md` for the setup):
+
+```bash
+docker compose up -d redis
+# analysis agent, in the background
+docker compose --profile analysis run -d --rm --no-deps --name pgmem-analyzer -e PGMEM_NAMESPACE=run1 analyzer
+# campaign
+docker compose run --rm --no-deps -e PGMEM_MODE=full -e PGMEM_NAMESPACE=run1 -e "SEEDS=CNC(N)=O,CNC(N)=O" -e MAX_ITERATIONS=3 gaied
+# memory, post-execution report, shareable zip
+docker compose run --rm --no-deps -e PGMEM_NAMESPACE=run1 gaied python -m pgmem.show
+docker compose run --rm --no-deps -e PGMEM_NAMESPACE=run1 analyzer python -m pgmem.analyzer --post
 docker stop pgmem-analyzer
+docker compose run --rm --no-deps gaied python -m pgmem.collect --namespace run1
 ```
 
-Avec Qwen, remplacer `-e LLM_PROVIDER=scripted -e OLLAMA_MODEL=scripted` par
-`-e OLLAMA_URL=http://host.docker.internal:11434 -e OLLAMA_MODEL=qwen3.5:9b -e LLM_MODEL=qwen3.5:9b`, et changer de
-`PGMEM_NAMESPACE`.
+For a quick check without a model, add `-e LLM_PROVIDER=scripted -e OLLAMA_MODEL=scripted -e SCRIPTED_DELAY_S=2`
+to the analysis agent and campaign commands. For online provenance analysis, add
+`-e FLOWCEPT_SETTINGS_PATH=/app/docker/flowcept_settings_online.yaml` to both.
 
-Pour l'analyse en ligne de la provenance Flowcept, ajouter
-`-e FLOWCEPT_SETTINGS_PATH=/app/docker/flowcept_settings_online.yaml` aux deux commandes, celle de l'agent d'analyse
-et celle de la campagne.
+## Tests
+
+| Test | Needs | Checks |
+|---|---|---|
+| `tests/test_pgmem.py` | Redis | memory store, every analysis rule, guidance tracking, lock |
+| `tests/test_pgmem_agent_loop.py` | Redis | GAIED's real agent graph with the scripted LLM and an xTB stub: memory writes, guidance, lock with parallel agents, bounded tool-call retries |
+| `tests/test_pgmem_flowcept.py` | Redis, Flowcept | Flowcept's online channel received during a run; post-execution report |
+
+```bash
+python tests/test_pgmem.py && python tests/test_pgmem_agent_loop.py && python tests/test_pgmem_flowcept.py
+```

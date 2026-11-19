@@ -36,13 +36,12 @@ import redis
 from . import chem
 from .config import Config
 from .llm import DRAFT_PROCEDURE, EXPLAIN_FAILURES, JUDGE_RESULT, SUGGEST_DIRECTION, AnalysisLLM
-from .provenance import ProvenanceIndex, as_dict, as_float, is_computation, make_source, smiles_of
+from .provenance import ProvenanceIndex, as_dict, is_computation, make_source, smiles_of
 from .schema import Entry, Guidance, experience, procedure, validation_status
 from .store import MemoryStore
 
 log = logging.getLogger("pgmem.analyzer")
 ME = "analysis-agent"
-
 
 
 def _as_text(v) -> str:
@@ -52,6 +51,7 @@ def _as_text(v) -> str:
     if isinstance(v, dict):
         return "; ".join(f"{k}: {_as_text(x)}" for k, x in v.items())
     return "" if v is None else str(v)
+
 
 class Analyzer:
     def __init__(self, store: MemoryStore, cfg: Config, llm: AnalysisLLM | None = None, source=None,
@@ -330,11 +330,9 @@ class Analyzer:
 
     def _on_proposals(self, p: dict) -> None:
         agent, keys = p.get("agent", ""), list(p.get("keys", []))
-        # inefficient exploration: proposing what the team already measured or saw fail
-        # snapshot taken by the agent at proposal time (events from older clients: recomputed now)
-        known = list(p["known"]) if "known" in p else [k for k in keys if self.s.by_key("M1", k)]
-        failed = list(p["failed"]) if "failed" in p else \
-            [k for k in keys if any(e.kind == "failure" for e in self.s.by_key("M2", k))]
+        # inefficient exploration: proposing what the team already measured or saw fail (as known to the memory
+        # when the proposals were made: the agent's own later results must not count)
+        known, failed = list(p.get("known", [])), list(p.get("failed", []))
         if known or failed:
             refs = [e.id for k in known + failed for e in self.s.by_key("M1", k) + self.s.by_key("M2", k)][:20]
             did, new = self._diagnose("repeated_proposals", f"{agent}|{p.get('iteration')}",
@@ -384,12 +382,14 @@ class Analyzer:
                             and e.data["context"].get("failure_class") == fclass]
                 effective = not recomputed and not refailed
             self.s.update_guidance(g.id, lambda x: x.effective.__setitem__(agent, effective))
-            out = experience("outcome", f"Guidance to {agent} was "
-                             f"{'applied' if g.applied.get(agent) else 'not applied' if g.applied.get(agent) is False else 'not checkable'}"
-                             + (" (its effect is the applied behaviour itself)" if not separable and g.applied.get(agent)
-                                else f" and {'effective' if effective else 'not effective' if effective is False else 'of unknown effect'}")
-                             + ": "
-                             f"{g.message[:160]}", ME, key=agent, context={"guidance": g.id},
+            applied = g.applied.get(agent)
+            verdict = {True: "applied", False: "not applied"}.get(applied, "not checkable")
+            if applied and not separable:
+                verdict += " (its effect is the applied behaviour itself)"
+            else:
+                verdict += " and " + {True: "effective", False: "not effective"}.get(effective, "of unknown effect")
+            out = experience("outcome", f"Guidance to {agent} was {verdict}: {g.message[:160]}", ME, key=agent,
+                             context={"guidance": g.id},
                              outcome={"applied": g.applied.get(agent), "effective": effective},
                              refs=[e for e in [g.procedure_id] if e] + g.evidence[:5], campaign_id=self.cfg.campaign_id)
             oid, _ = self.s.add(out, dedup=False)

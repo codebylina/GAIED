@@ -45,13 +45,12 @@ def now() -> float:
 
 @dataclass
 class ProvRef:
-    """Reference to a Flowcept record (task, workflow) or to an artifact; the details stay in Flowcept."""
+    """Reference to a Flowcept record (task, workflow, campaign); the details stay in Flowcept."""
     task_id: str | None = None
     workflow_id: str | None = None
     campaign_id: str | None = None
     subtype: str | None = None
     activity_id: str | None = None
-    artifact: str | None = None          # path or object id of an artifact, when there is one
 
     def to_dict(self) -> dict:
         return {k: v for k, v in asdict(self).items() if v is not None}
@@ -151,8 +150,7 @@ def validation_status(m4: Entry) -> str:
     n = len(m4.data.get("supporting_episodes", []))
     if not apps:
         return f"derived from {n} experience(s); not given to an agent yet"
-    # older records have no "applied" field: an effectiveness verdict implies the procedure was applied
-    applied = [a for a in apps if a.get("applied", a.get("effective") is not None) is True]
+    applied = [a for a in apps if a.get("applied") is True]
     not_applied = [a for a in apps if a.get("applied") is False]
     text = f"derived from {n} experience(s); given {len(apps)} time(s): applied {len(applied)}"
     if applied:

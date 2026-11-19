@@ -1,224 +1,108 @@
-# Installer et lancer le projet (GAIED)
+# Installing and running GAIED with Docker
 
-Guide pour toute personne qui rejoint le projet. Il est écrit pour **Windows** et ne suppose
-aucune connaissance de Docker. Sur Mac ou Linux, les commandes sont les mêmes ; seule
-l'installation de Docker change.
+This guide is written for Windows and assumes no prior Docker knowledge. On macOS or Linux the commands are the
+same; only the Docker installation differs.
 
----
+## What runs where
 
-## Ce qu'il faut savoir avant de commencer
+The project needs Python libraries, the xTB simulator, Redis and a language model. Docker runs them in containers:
 
-Le projet fait tourner des agents IA qui cherchent des molécules à forte énergie d'ionisation.
-Il a besoin de plusieurs programmes : Python et ses bibliothèques, le simulateur xTB, une base
-Redis, un modèle de langage. Les installer à la main sous Windows est très difficile (xTB et une
-partie du code ne fonctionnent que sous Linux).
+| Container | Role |
+|---|---|
+| `redis` | message exchange between agents (Academy) and the shared memory (`pgmem`) |
+| `ollama` | a local language model (Qwen 3.5), no API key needed |
+| `gaied` | the project code (agents, xTB, Flowcept) |
+| `analyzer` | the analysis agent (`pgmem`), started only when needed (profile `analysis`) |
 
-**Docker** règle ce problème : il fait tourner de petites machines Linux, appelées
-**conteneurs**, sur votre PC. Le projet utilise trois conteneurs :
+`docker/docker-compose.yml` describes the containers; `docker/Dockerfile` describes the `gaied` image, built once.
+The project folder is mounted in the containers (`..:/app`): editing a `.py` file does not require rebuilding the
+image. About 15 GB of free disk space are needed (image and model).
 
-| Conteneur | Rôle |
-|-----------|------|
-| `redis`   | la base Redis : échanges entre agents (Academy) |
-| `ollama`  | le modèle de langage local (Qwen 3.5), sans clé API |
-| `gaied`   | le code du projet (agents, xTB, Flowcept) |
+## 1. Install the tools (once)
 
-Le fichier `docker/docker-compose.yml` décrit ces trois conteneurs. Le fichier `docker/Dockerfile`
-décrit comment fabriquer le conteneur `gaied` ; le résultat de cette fabrication s'appelle une
-**image**, qu'on ne construit qu'une seule fois.
+1. Git: https://git-scm.com/download/win
+2. Docker Desktop: https://www.docker.com/products/docker-desktop/ (keep "Use WSL 2"; if asked, run
+   `wsl --install` in an administrator PowerShell and restart). Start Docker Desktop and wait for "Engine running".
 
-**Le dossier du projet est partagé avec le conteneur.** Quand vous modifiez un fichier `.py` dans
-VS Code, le conteneur voit le changement immédiatement : pas besoin de reconstruire l'image.
+Check in PowerShell: `git --version`, `docker --version` and `docker compose version` each print a version.
 
-Il faut environ **15 Go** libres sur le disque (image du projet + modèle de langage) et une
-connexion internet pour la première installation (plusieurs Go à télécharger).
+## 2. Get the code
 
----
-
-## Étape 1 — Installer les outils (une seule fois)
-
-1. **Git** : https://git-scm.com/download/win — installer avec les options par défaut.
-2. **Docker Desktop** : https://www.docker.com/products/docker-desktop/
-   - Pendant l'installation, garder l'option **« Use WSL 2 »** cochée.
-   - Redémarrer le PC si on vous le demande.
-   - Si Docker demande d'installer ou de mettre à jour WSL, ouvrir PowerShell **en administrateur**
-     et taper `wsl --install`, puis redémarrer.
-   - Ouvrir Docker Desktop une première fois et attendre qu'il indique qu'il tourne
-     (« Engine running »). Pas besoin de créer de compte.
-3. **VS Code** (facultatif, pour lire et modifier le code) : https://code.visualstudio.com/
-
-Vérification, dans **PowerShell** (menu Démarrer → « PowerShell ») :
 ```powershell
-git --version
-docker --version
-docker compose version
-```
-Chaque commande doit afficher un numéro de version.
-
----
-
-## Étape 2 — Accéder au dépôt et le télécharger
-
-1. **Accepter l'invitation** de collaboratrice : lien reçu par e-mail, ou sur
-   https://github.com/notifications quand on est connecté à GitHub.
-2. Télécharger le projet (on le met dans `Documents\Research`, mais un autre dossier convient) :
-```powershell
-mkdir $HOME\Documents\Research -Force
-cd $HOME\Documents\Research
-git clone https://github.com/codebylina/gaied.git GAIED
+git clone https://github.com/codebylina/GAIED.git GAIED
 cd GAIED
-git switch docker-local
+git switch prov-memory-analysis
 ```
-`docker-local` est la branche de travail : elle contient la configuration Docker. **Ne pas
-travailler sur `main`** (c'est le code d'origine d'Amal).
 
-**Première connexion GitHub depuis Git** : si Git demande un mot de passe, le mot de passe du
-compte GitHub est refusé. Une fenêtre de connexion GitHub s'ouvre normalement (gestionnaire
-d'identifiants de Git pour Windows) ; sinon, créer un jeton : GitHub → Settings → Developer settings
-→ Personal access tokens → Tokens (classic) → cocher `repo`, et le coller à la place du mot de passe.
-Ce jeton est personnel : ne jamais le partager ni le mettre dans un fichier du projet.
+## 3. Build the image (once, 10 to 30 minutes)
 
----
+All Docker commands run from the `GAIED\docker` folder, typed with the exact letter case of the path (otherwise
+`docker compose build` fails with `--allow=fs.read=Dockerfile`).
 
-## Étape 3 — Construire l'image du projet (une seule fois, 10 à 30 min)
-
-Docker Desktop doit être ouvert.
 ```powershell
-cd $HOME\Documents\Research\GAIED\docker
+cd docker
 docker compose build gaied
 ```
-**Toutes les commandes Docker de ce guide se lancent depuis le dossier `GAIED\docker`.**
 
-Problèmes fréquents :
-- `--allow=fs.read=Dockerfile` : le chemin a été tapé avec des minuscules/majuscules différentes de
-  la réalité (`research` au lieu de `Research`…). Revenir dans le dossier avec la bonne casse,
-  par exemple avec `cd $HOME\Documents\Research\GAIED\docker`.
-- `no such host`, `Could not resolve host`, `timeout` : coupure ou lenteur internet. Relancer la
-  même commande : ce qui a déjà été téléchargé est gardé.
-- `error during connect` / `pipe/dockerDesktopLinuxEngine` : Docker Desktop n'est pas lancé.
-
-Vérification : `docker images` doit lister une image `docker-gaied`.
-
----
-
-## Étape 4 — Démarrer Redis et le modèle de langage
+## 4. Start Redis and the language model
 
 ```powershell
 docker compose up -d redis ollama
 docker compose exec ollama ollama pull qwen3.5:4b
-```
-La deuxième commande télécharge le modèle Qwen 3.5 (environ 3 Go, une seule fois ; il est gardé
-même après redémarrage du PC). Vérifications :
-```powershell
-docker compose ps                              # redis et ollama doivent être "running"
-docker compose exec redis redis-cli ping       # doit répondre PONG
-docker compose exec ollama ollama list         # doit lister qwen3.5:4b
+docker compose exec redis redis-cli ping        # PONG
 ```
 
-Après un redémarrage du PC : ouvrir Docker Desktop, puis relancer seulement
-`docker compose up -d redis ollama`.
+To use a model already served by Ollama installed on the computer itself (instead of the `ollama` container), add
+`--no-deps -e OLLAMA_URL=http://host.docker.internal:11434 -e OLLAMA_MODEL=<model> -e LLM_MODEL=<model>` to the
+`docker compose run` commands below.
 
-### Option : utiliser une clé API au lieu du modèle local
+### Optional: an online API instead of the local model
 
-Le modèle local est gratuit mais lent sur un PC sans carte graphique (1 à 2 minutes par réponse).
-Avec une clé API (OpenAI, Google Gemini, Anthropic, Groq, OpenRouter…), c'est beaucoup plus rapide :
 ```powershell
 Copy-Item env.example.txt .env
 notepad .env
 ```
-Dans le fichier : coller la clé après `LLM_API_KEY=`, puis enlever le `#` devant les deux lignes du
-fournisseur choisi (et vérifier le nom exact du modèle sur le site du fournisseur).
-- Le fichier doit s'appeler exactement `.env` (sans `.txt`) et rester dans le dossier `docker`.
-- Il n'est **jamais** envoyé sur GitHub : `git check-ignore .env` doit afficher `.env`.
-- Pour revenir au modèle local : supprimer `.env` ou y mettre `LLM_PROVIDER=ollama`.
 
----
+Paste the key after `LLM_API_KEY=` and uncomment the two lines of the chosen provider. `docker/.env` is never
+committed (`git check-ignore .env` prints `.env`).
 
-## Étape 5 — Vérifier que l'image fonctionne (sans modèle de langage, quelques secondes)
+## 5. Check the image (a few seconds, no model)
 
 ```powershell
 docker compose run --rm --no-deps gaied python -c "import mol_design_agents, flowcept, academy; print('OK')"
+docker compose run --rm --no-deps gaied python tests/test_pgmem.py
 ```
-Résultat attendu : `OK` (les bibliothèques du projet et xTB sont bien installées dans l'image).
 
----
-
-## Étape 6 — Lancer une campagne de recherche de molécules
+## 6. Run a campaign
 
 ```powershell
 docker compose run --rm gaied
 ```
-Les agents demandent des molécules au modèle, les simulent avec xTB, tirent des conclusions et
-recommencent. Un rapport s'affiche toutes les 30 secondes. Avec le modèle local, une campagne peut
-durer **une heure ou plus**. Ctrl+C pour arrêter.
 
-Réglages utiles, sans modifier aucun fichier (ajouter `-e NOM=valeur` avant `gaied`) :
+Useful settings (add `-e NAME=value` before `gaied`):
 
-| Réglage | Effet |
-|---------|-------|
-| `-e "SEEDS=CNC(N)=O,CNC(N)=O"` | molécules de départ, une par agent (ici : 2 agents, même départ) |
-| `-e MAX_ITERATIONS=1` | nombre de tours de la boucle de chaque agent (moins = plus court) |
+| Setting | Effect |
+|---|---|
+| `"SEEDS=CNC(N)=O,CNC(N)=O"` | starting molecules, one agent per seed |
+| `MAX_ITERATIONS=3` | iterations of each agent |
+| `PGMEM_MODE=full`, `PGMEM_NAMESPACE=<name>` | shared memory and analysis agent (see `docs/PGMEM.md`) |
 
-Exemple :
-```powershell
-docker compose run --rm -e "SEEDS=CNC(N)=O,CNC(N)=O" -e MAX_ITERATIONS=1 gaied
-```
+With a local model on CPU a campaign can take an hour or more; a progress report is printed every 30 seconds.
+`docs/PGMEM.md` gives the full sequence with the analysis agent, the memory report and the post-execution analysis.
 
-### Voir les résultats
+## Troubleshooting
 
-```powershell
-docker compose run --rm gaied python docker/summarize_prov.py     # déroulé de la dernière campagne
-```
-`summarize_prov.py` lit la provenance enregistrée par Flowcept (`output/flowcept_buffer_*.jsonl`)
-et affiche chaque appel au modèle, chaque simulation xTB, et le nombre de **calculs en double**.
+| Message | Cause and fix |
+|---|---|
+| `--allow=fs.read=Dockerfile` | wrong letter case in the path: `cd` again with the exact case |
+| `no such host`, `Could not resolve host`, `timeout` | unstable connection: run the same command again (downloaded layers are kept) |
+| `error during connect` | Docker Desktop is not running |
+| `no configuration file provided` | the command was not run from the `docker` folder |
+| `Connection refused` on `/api/chat` | Ollama is not running |
+| `Number of molecules simulated: 0` for several minutes | normal with a local model: each answer takes time |
 
----
+## Working with Git
 
-## Travailler à plusieurs avec Git
-
-- **Avant de commencer à travailler** : `git pull` (récupère les changements des autres).
-- **Pour une nouvelle fonctionnalité**, créer sa propre branche à partir de `docker-local` :
-  ```powershell
-  git switch docker-local
-  git pull
-  git switch -c yassmine-ma-fonctionnalite
-  ```
-- **Enregistrer et partager son travail** :
-  ```powershell
-  git add .
-  git commit -m "Ce que j'ai fait"
-  git push -u origin yassmine-ma-fonctionnalite
-  ```
-  Puis, sur GitHub, ouvrir une *Pull Request* vers `docker-local` pour que l'autre relise avant de
-  fusionner.
-- Se mettre d'accord avant de modifier le même fichier en même temps (surtout `mol_design_agents.py`
-  et les fichiers de la mémoire), pour éviter les conflits.
-- **Ne jamais committer** `docker/.env` ni un jeton ou une clé.
-- Les fichiers `runinfo/` et `output/` produits par vos campagnes ne sont pas envoyés sur GitHub
-  (déjà dans le `.gitignore`).
-
----
-
-## Où est quoi dans le code
-
-| Fichier | Contenu |
-|---------|---------|
-| `mol_design_agents.py` | l'agent (`XTBSimulationAgent`) et sa boucle LangGraph : plan → tool_calling → simulate → conclude → critique → update |
-| `run-07.py` | lance les agents et l'orchestration de la campagne |
-| `docker/` | toute la configuration Docker ; `local_llm.py` branche le modèle local ou la clé API |
-| `CLAUDE.md` | description détaillée du projet (aussi lue par Claude Code) |
-
-Les modifications faites au code d'origine d'Amal sont repérables par les commentaires
-`[gaied-docker ...]` (configuration) et `[provenance-fix]` (provenance des calculs xTB).
-
----
-
-## Erreurs déjà rencontrées
-
-| Message | Cause et solution |
-|---------|-------------------|
-| `--allow=fs.read=Dockerfile` | casse du chemin incorrecte : `cd $HOME\Documents\Research\GAIED\docker` |
-| `no such host`, `Could not resolve host` | internet instable : relancer la commande |
-| `error during connect` | Docker Desktop n'est pas ouvert |
-| `cannot import name 'init_logging'` | image ancienne : `docker compose build gaied` |
-| `LLM_API_KEY est vide` | `LLM_PROVIDER=openai` dans `.env` sans clé : remplir la clé ou supprimer `.env` |
-| la campagne affiche `Number of molecules simulated: 0` pendant plusieurs minutes | normal avec le modèle local : il réfléchit (1 à 2 min par réponse) |
+Work on a branch of your own, created from `prov-memory-analysis`, and open a pull request to merge it. Never commit
+`docker/.env`, a token or a key. Campaign outputs (`runinfo/`, `output/flowcept_buffer_*.jsonl`, `results/`) are
+ignored by Git.

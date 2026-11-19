@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 MODES = ("off", "basic", "structured", "full")
 
@@ -29,7 +29,6 @@ class Config:
     analyzer_llm: bool = True               # False: the analysis agent runs its deterministic rules only
     provenance_source: str = "auto"         # auto | stream | jsonl | none
     jsonl_glob: str = "output/flowcept_buffer_*.jsonl"
-    extra: dict = field(default_factory=dict)
 
     @property
     def enabled(self) -> bool:

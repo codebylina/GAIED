@@ -1,82 +1,46 @@
-# GAIED — mémoire partagée pour agents scientifiques (PFE / papier ACX 2027)
+# GAIED: provenance-grounded memory and analysis for scientific agents (final-year project, ACX 2027 workshop)
 
-## Contexte du projet
-- Fork de GAIED (Amal Gueroudji, Argonne) : agents Academy + LangGraph qui cherchent des molécules
-  à forte énergie d'ionisation (simulations xTB). La provenance est capturée par Flowcept.
-- Mon sujet : la **mémoire** des agents. Objectif immédiat (réunion de lundi) : une **mémoire partagée
-  dans Redis** avec push / pull entre agents, pour qu'un agent ne simule pas une molécule déjà
-  simulée ou prise par un autre, et que les agents profitent des expériences des autres.
-- Schéma d'Amal : Redis contient `Shared Mem` (dont `Goal` et `Instructions`) et `Interception`
-  (canal où Flowcept publie la provenance) ; MongoDB = stockage durable ; des agents d'analyse
-  (travail de Nadjiba, sur la provenance) lisent Interception et écrivent des Instructions.
-- Je travaille avec une binôme sur la mémoire ; Nadjiba travaille sur la provenance.
+## Context
+- Fork of GAIED (Amal Gueroudji, Argonne): Academy + LangGraph agents searching for molecules with a high ionization
+  energy (xTB simulations). Provenance is captured by Flowcept.
+- My topic is the agents' memory: `pgmem`, a shared memory (M1-M4) in Redis with references to Flowcept, and an
+  independent analysis agent. Design and decisions: `docs/PGMEM.md`. Development campaigns: `docs/DEVELOPMENT_LOG.md`.
+- I work with a partner on the memory; Nadjiba works on provenance analysis.
 
-## Fichiers importants
-- `mol_design_agents.py` : l'agent `XTBSimulationAgent`. Boucle LangGraph :
-  plan → tool_calling → simulate → conclude → (should_continue) → critique → update → tool_calling.
-  `compute_ionization_energy` a un cache local `self.molecule_cache` (par agent, en RAM) :
-  c'est le point naturel pour brancher la mémoire partagée.
-  `tool_calling` met dans le prompt `state.simulated_molecules` (molécules de CET agent seulement).
-- `run-07.py` : lance les agents (Manager Academy sur Redis), rapports toutes les 30 s.
-- `docker/` : toute la configuration pour tourner en local.
-  - `local_llm.py` : remplace `SomeAPILLM` (passerelle anonymisée, URL vide) par Ollama (Qwen 3.5)
-    ou une API au format OpenAI (`LLM_PROVIDER=openai`, clé dans `docker/.env`).
-  - `apply_patches.py`, `patch_stop_rule.py` : correctifs déjà appliqués (ne pas relancer).
-  - `summarize_prov.py` : résume la provenance de la dernière campagne.
-- Mémoire (branche `prov-memory-analysis`) : paquet `pgmem/` = mémoire partagée M1-M4 dans Redis avec références
-  vers Flowcept, agent d'analyse indépendant (`python -m pgmem.analyzer`, service Docker `analyzer`, profil
-  `analysis`), accroches `[pgmem]` dans `mol_design_agents.py`. `PGMEM_MODE` = off | basic | structured | full.
-  Tout est décrit dans `docs/PGMEM.md` (exigences du cahier, décisions techniques, questions ouvertes, essai rapide).
-  Tests : `tests/test_pgmem.py`, `tests/test_pgmem_agent_loop.py`, `tests/test_pgmem_flowcept.py`.
-  `LLM_PROVIDER=scripted` (+ `OLLAMA_MODEL=scripted`) = LLM simulé pour les essais rapides.
-  Coordination : verrou par molécule dans Redis (`pgmem:{ns}:claim:{molécule}`), l'autre agent attend le résultat ;
-  `PGMEM_CLAIMS=false` pour le désactiver. Campagnes réelles : `real3` = première complète (3 itérations), ne pas
-  mettre `STABLE_REPORTS=2` avec Qwen (coupe les agents pendant qu'ils réfléchissent).
-- `output/flowcept_buffer_*.jsonl` : provenance de chaque campagne.
+## Important files
+- `mol_design_agents.py`: `XTBSimulationAgent`, LangGraph loop plan -> tool_calling -> simulate -> conclude ->
+  (should_continue) -> critique -> update -> tool_calling. Memory hooks marked `[pgmem]`.
+- `run-07.py`: launches the agents (Academy manager on Redis), progress reports every 30 s.
+- `pgmem/`: memory model and store, agent integration and per-molecule lock, provenance adapter, analysis agent,
+  fault injection, `show` and `collect` tools.
+- `docker/`: local execution. `local_llm.py` replaces GAIED's anonymized LLM client by Ollama, an OpenAI-format API
+  (`LLM_PROVIDER=openai`, key in `docker/.env`) or a scripted model (`LLM_PROVIDER=scripted`).
+- `output/flowcept_buffer_*.jsonl`: provenance of each campaign.
 
-## Modifications déjà faites au code d'Amal (marquées `[gaied-docker ...]`)
-- `mol_design_agents.py` : si `OLLAMA_MODEL` est défini, `SomeAPILLM` = `local_llm.OllamaLLM` ;
-  `N_XTB_WORKERS` fixe le nombre de processus xTB.
-- `run-07.py` : `REDIS_HOST`, `SEEDS`, `MAX_ITERATIONS` lus dans l'environnement ; `conda activate`
-  retiré de Parsl ; règle d'arrêt : `STABLE_REPORTS` rapports sans nouvelle molécule (et pas à 0).
-- `mol_design_agents.py` (`[gaied-docker fix]`) : `tool_calling` refait au plus `TOOL_CALL_RETRIES` (3) demandes
-  quand le LLM ne donne aucun appel d'outil (la boucle d'origine bloquait un agent pour toute la campagne).
-- Les originaux sont dans `*.orig` et `run-07.py.before-stop-rule`.
+## Changes to Amal's code (all marked)
+- `[gaied-docker ...]`: `SomeAPILLM` = `local_llm.OllamaLLM` when `OLLAMA_MODEL` is set; `N_XTB_WORKERS`;
+  `run-07.py` reads `REDIS_HOST`, `SEEDS`, `MAX_ITERATIONS`, `STABLE_REPORTS`; no `conda activate` in Parsl;
+  `tool_calling` retries at most `TOOL_CALL_RETRIES` (3) times (the original loop could block an agent forever).
+- `[provenance-fix]`: the xTB task is recorded from the agent process (the pool worker is a fork whose Flowcept
+  buffer is never flushed), with a task id shared with the memory entry.
+- `[pgmem]`: memory hooks, xTB conditions and convergence in provenance, agent and node in each LLM call record.
 
-## Comment lancer (Windows, PowerShell, Docker Desktop doit être ouvert)
-Toujours depuis `C:\Users\pc\Documents\Research\GAIED\docker`, en respectant les MAJUSCULES du chemin
-(sinon `docker compose build` échoue avec « --allow=fs.read=Dockerfile »).
-```powershell
-docker compose up -d redis ollama
-docker compose run --rm gaied                                   # une campagne
-docker compose run --rm gaied python docker/summarize_prov.py   # résumé de la provenance
-docker compose exec redis redis-cli KEYS "mem:*"                # voir la mémoire dans Redis
-```
-- Le dossier GAIED est monté dans le conteneur (`..:/app`) : modifier un `.py` ne demande PAS de
-  reconstruire l'image. Reconstruire (`docker compose build gaied`) seulement si le Dockerfile change.
-- Dans le conteneur : Redis = hôte `redis` (`os.environ.get("REDIS_HOST", "localhost")`),
-  la bibliothèque `redis` est installée, `PYTHONPATH=/app:/app/docker`.
-- Réglages dans `docker/docker-compose.yml` : `SEEDS` (une molécule par agent, séparées par des
-  virgules ; deux fois la même pour tester les doublons), `MAX_ITERATIONS`, `STABLE_REPORTS`, `NUM_PREDICT`.
-- Le LLM local sur CPU est lent (1 à 2 min par réponse) : une campagne de 3 itérations peut durer
-  jusqu'à 1 h. Pour tester la logique de la mémoire, préférer des tests unitaires sans LLM.
-- Connexion internet lente et instable : éviter les reconstructions d'image inutiles.
+## Running (Windows, PowerShell, Docker Desktop open)
+- Always from the `GAIED\docker` folder, with the exact letter case of the path.
+- The GAIED folder is mounted in the container (`..:/app`): editing a `.py` file needs no image rebuild.
+- In the container Redis is host `redis`; `PYTHONPATH=/app:/app/docker`.
+- Commands for a campaign with the analysis agent: `docs/PGMEM.md` (section Running). Use a new
+  `PGMEM_NAMESPACE` for every campaign. Do not set a short `STABLE_REPORTS` with a real LLM (it stops agents while
+  they are still thinking).
+- On the remote PC (a friend's computer, AMD GPU, Ollama installed on Windows): always `--no-deps`, never the
+  `ollama` container, never `docker-compose.gpu.yml`, and
+  `-e OLLAMA_URL=http://host.docker.internal:11434 -e OLLAMA_MODEL=qwen3.5:9b -e LLM_MODEL=qwen3.5:9b`.
+  Do not run `docker image prune` or `--remove-orphans`.
 
-## Règles
-- Ne jamais committer `docker/.env` (clé API). Vérifier avec `git check-ignore docker/.env`.
-- Travailler sur la branche `docker-local` (ou une branche dédiée), jamais sur `main`.
-- Garder les modifications du code d'Amal minimales et marquées par un commentaire.
-- Code de la mémoire : dans un module à la racine de GAIED (plus tard dans Flowcept).
-- **Tout le code est en anglais** : commentaires, docstrings, messages affichés, fichiers de config.
-  Aucun français dans le code du projet. Les explications à moi se font en français.
-- Je débute avec Docker.
-
-## Provenance des calculs xTB (correctif conservé, marqué `[provenance-fix]`)
-`_compute_energy_with_prov` écrit la tâche `parsl_task` dans le processus xTB, mais ce processus est
-un fork de l'agent : son `_ACTIVE_INTERCEPTOR` est une COPIE dont le tampon en mémoire n'est jamais
-écrit sur disque (seul l'intercepteur de l'agent est arrêté) → trace perdue (vérifié par expérience).
-`_worker_init` de Flowcept donnerait à chaque processus son propre intercepteur, mais il n'est injecté
-que par `FlowceptAcademyPlugin.start()`, que GAIED n'utilise pas. La tâche est donc écrite depuis le
-processus de l'agent (`XTBSimulationAgent._record_xtb_task`), avec un `task_id` partagé.
-Mesure : `python docker/summarize_prov.py` affiche « DUPLICATE computations » (même molécule calculée
-plusieurs fois), par exemple avec `SEEDS: "CNC(N)=O,CNC(N)=O"`.
+## Rules
+- Never commit `docker/.env` (API key); check with `git check-ignore docker/.env`.
+- Work on `prov-memory-analysis` (or a dedicated branch), never on `main`.
+- Keep changes to Amal's code minimal and marked with a comment.
+- Everything in the repository is in English (code, comments, messages, configuration, documentation).
+- Explanations to me are given in French. I am new to Docker.
+- Do not add mechanisms, statuses, thresholds or layers that are not in the specification without my approval.

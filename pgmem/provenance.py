@@ -6,8 +6,6 @@ Sources (all verified against the Flowcept used by GAIED, see tests):
   JsonlProvenance    the buffer files Flowcept dumps at the end of a run (GAIED's default, offline mode)
   StreamProvenance   the Redis pub/sub channel Flowcept publishes to in online mode (mq.enabled, db_flush_mode online);
                      records are kept in a bounded in-process window only, for traversal, never persisted
-  DbProvenance       Flowcept's DBAPI (MongoDB), for catch-up and post-execution analysis in online mode
-                     (NOT verified here: no MongoDB in the test environment)
 """
 from __future__ import annotations
 
@@ -17,7 +15,6 @@ import json
 import os
 import threading
 from collections import OrderedDict
-from typing import Iterable
 
 RELEVANT_SUBTYPES = {"tool_call", "parsl_task", "llm_call", "langgraph_node", "academy_lifecycle"}
 
@@ -171,7 +168,7 @@ class StreamProvenance:
         while not self._stop.is_set():
             try:
                 m = self._ps.get_message(timeout=1.0)
-            except Exception:  # noqa: BLE001 - connection lost: keep trying, the DB catch-up covers the gap
+            except Exception:  # noqa: BLE001 - connection lost: keep trying
                 self._stop.wait(2.0)
                 continue
             if not m or m.get("type") != "pmessage":
@@ -193,28 +190,6 @@ class StreamProvenance:
         self._stop.set()
         self._thread.join(timeout=3)
         self._ps.close()
-
-
-class DbProvenance:
-    """Flowcept's database (MongoDB in GAIED's compose file), through Flowcept's own DBAPI. Not verified here."""
-
-    def __init__(self, campaign_id: str | None = None) -> None:
-        from flowcept.flowcept_api.db_api import DBAPI
-        self.db = DBAPI()
-        self.campaign_id = campaign_id
-        self.index = ProvenanceIndex()
-        self._seen_end = 0.0
-
-    def poll(self) -> list[dict]:
-        flt = {"ended_at": {"$gte": self._seen_end}}
-        if self.campaign_id:
-            flt["campaign_id"] = self.campaign_id
-        new = []
-        for rec in self.db.task_query(filter=flt) or []:
-            self._seen_end = max(self._seen_end, as_float(rec.get("ended_at")) or 0.0)
-            if is_relevant(rec) and self.index.add(rec):
-                new.append(rec)
-        return new
 
 
 def flowcept_online(settings_path: str | None = None) -> bool:
@@ -240,18 +215,5 @@ def make_source(kind: str, redis_host: str, redis_port: int, jsonl_glob: str, ca
             mq = (yaml.safe_load(open(s)) or {}).get("mq") or {}
             host, port = mq.get("host", host), int(mq.get("port", port))
         return StreamProvenance(host, port)
-    if kind == "db":
-        return DbProvenance(campaign_id)
     return JsonlProvenance(jsonl_glob, campaign_id, skip_existing=online)
 
-
-def iter_records(paths: Iterable[str]) -> list[dict]:
-    out = []
-    for p in paths:
-        for line in open(p, encoding="utf-8"):
-            if line.strip():
-                try:
-                    out.append(json.loads(line))
-                except ValueError:
-                    pass
-    return out

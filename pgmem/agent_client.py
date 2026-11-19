@@ -29,7 +29,7 @@ from .store import MemoryStore
 
 log = logging.getLogger("pgmem.agent")
 
-# LangGraph node being executed by this agent (written into the provenance of its LLM calls, see G7)
+# agent and LangGraph node being executed (written into the provenance of each LLM call)
 CURRENT_NODE: contextvars.ContextVar[str | None] = contextvars.ContextVar("pgmem_node", default=None)
 CURRENT_AGENT: contextvars.ContextVar[str | None] = contextvars.ContextVar("pgmem_agent", default=None)
 

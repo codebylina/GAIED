@@ -1,3 +1,15 @@
+## Provenance-grounded memory and analysis for scientific agents (this fork)
+
+This fork adds `pgmem`: a shared, persistent memory for GAIED's agents, organized in four categories (evidence and
+results, experiences, knowledge, procedures) whose entries reference Flowcept provenance records, and an independent
+analysis agent that analyzes provenance and memory together and sends guidance to the agents during execution.
+
+- Design, configuration and usage: [`docs/PGMEM.md`](docs/PGMEM.md)
+- Running everything locally with Docker: [`INSTALLATION.md`](INSTALLATION.md)
+- Code: [`pgmem/`](pgmem/), integration points marked `[pgmem]` in `mol_design_agents.py`; tests in [`tests/`](tests/)
+
+The original example is described below.
+
 ## Molecular Design Using Parallel Reasoning
 
 This example is based on [example 07 from the Academy repository](https://github.com/academy-agents/academy/tree/main/examples/07-mol-design), extended with Flowcept provenance instrumentation (see [Provenance Instrumentation](#provenance-instrumentation) below).
