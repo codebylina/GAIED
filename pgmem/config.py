@@ -24,7 +24,8 @@ class Config:
     retrieval_limit: int = 5                # entries per category put in a prompt (prompt size, not a scientific rule)
     reuse_results: bool = True              # experiment selection: reuse a result already in M1 instead of recomputing
     claims: bool = True                     # coordination: one computation of a molecule at a time (lock in Redis)
-    claim_ttl_s: int = 600                  # a lock left by a crashed agent expires (must exceed one xTB computation)
+    claim_ttl_s: int = 120                  # lock lifetime, renewed while the computation runs: a lock left by a
+                                            # stopped or crashed agent blocks the molecule for at most this long
     analyzer_group: str = "analyzer"
     analyzer_llm: bool = True               # False: the analysis agent runs its deterministic rules only
     provenance_source: str = "auto"         # auto | stream | jsonl | none
@@ -57,7 +58,7 @@ class Config:
             retrieval_limit=int(os.environ.get("PGMEM_RETRIEVAL_LIMIT", "5")),
             reuse_results=_bool("PGMEM_REUSE_RESULTS", True),
             claims=_bool("PGMEM_CLAIMS", True),
-            claim_ttl_s=int(os.environ.get("PGMEM_CLAIM_TTL_S", "600")),
+            claim_ttl_s=int(os.environ.get("PGMEM_CLAIM_TTL_S", "120")),
             analyzer_llm=_bool("PGMEM_ANALYZER_LLM", True),
             provenance_source=os.environ.get("PGMEM_PROVENANCE", "auto"),
             jsonl_glob=os.environ.get("PGMEM_JSONL_GLOB", "output/flowcept_buffer_*.jsonl"),

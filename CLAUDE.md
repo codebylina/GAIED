@@ -39,6 +39,8 @@
   `N_XTB_WORKERS` fixe le nombre de processus xTB.
 - `run-07.py` : `REDIS_HOST`, `SEEDS`, `MAX_ITERATIONS` lus dans l'environnement ; `conda activate`
   retiré de Parsl ; règle d'arrêt : `STABLE_REPORTS` rapports sans nouvelle molécule (et pas à 0).
+- `mol_design_agents.py` (`[gaied-docker fix]`) : `tool_calling` refait au plus `TOOL_CALL_RETRIES` (3) demandes
+  quand le LLM ne donne aucun appel d'outil (la boucle d'origine bloquait un agent pour toute la campagne).
 - Les originaux sont dans `*.orig` et `run-07.py.before-stop-rule`.
 
 ## Comment lancer (Windows, PowerShell, Docker Desktop doit être ouvert)

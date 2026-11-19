@@ -704,7 +704,15 @@ class XTBSimulationAgent(Agent):
                 ],
             )
             logger.info(f'Tool Calling: {response}')
+            # [gaied-docker fix] bounded retries: the original loop never ends when the LLM keeps answering
+            # without a parsable tool call, and the agent then stays blocked for the rest of the campaign
+            _max_retries, _retries = int(os.environ.get('TOOL_CALL_RETRIES', '3')), 0
             while len(response.tool_calls) == 0:
+                if _retries >= _max_retries:
+                    logger.warning('No parsable tool call after %d retries: this iteration runs no simulation',
+                                   _retries)
+                    break
+                _retries += 1
                 logger.warning('Tool calling agent did not call tools!')
                 logger.warning(response)
                 response = await self.llm_with_tools.ainvoke(

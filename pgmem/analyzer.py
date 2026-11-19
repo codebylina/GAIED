@@ -347,7 +347,8 @@ class Analyzer:
                             "proposing.", "workflow", "observed_fact", [did], [], target=agent,
                             check={"avoid_keys": known + failed})
         # guidance tracking: was guidance delivered to this agent applied in these proposals?
-        for g in self.s.all_guidance():
+        # (no proposal at all, e.g. the LLM gave no tool call: nothing to judge yet)
+        for g in self.s.all_guidance() if keys else []:
             if not any(d["agent"] == agent for d in g.delivered) or agent in g.applied:
                 continue
             avoid, fclass = set(g.check.get("avoid_keys", [])), g.check.get("failure_class")

@@ -117,6 +117,17 @@ def main() -> int:
     checks["parallel agents: each molecule computed once (lock)"] = bool(tasks) and max(tasks.values()) == 1
     checks["parallel agents: no lock left behind"] = not list(store2.r.scan_iter(store2._k("claim", "*")))
     store2.reset()
+    # the scripted model runs out of molecules, then answers without any tool call: the agent must not block
+    ns3 = ns + "-notools"
+    os.environ.update({"PGMEM_NAMESPACE": ns3, "SCRIPTED_PROPOSALS": "20"})
+    try:
+        asyncio.run(asyncio.wait_for(run_agent("CNC(N)=O", 3), timeout=120))
+        checks["agent ends when the LLM gives no tool call (bounded retries)"] = True
+    except asyncio.TimeoutError:
+        checks["agent ends when the LLM gives no tool call (bounded retries)"] = False
+    finally:
+        os.environ.pop("SCRIPTED_PROPOSALS")
+        MemoryStore.connect(cfg.redis_host, cfg.redis_port, ns3).reset()
     print(f"two agents x 3 iterations in {dt:.1f} s; memory {report['memory']}; guidance {report['guidance']}")
     for e in m2:
         if e.kind == "diagnosis":
