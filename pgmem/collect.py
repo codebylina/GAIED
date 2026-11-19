@@ -1,6 +1,7 @@
 """
 Gather everything about the campaigns of one memory namespace into one zip file, to share the results:
-  - the memory export (all entries M1-M4, guidance, events) as JSON;
+  - the memory export (all entries M1-M4 and the guidance) as JSON;
+  - the event stream (proposals, results, failures, reuses, waits...) as JSON;
   - the Flowcept provenance files (JSONL) of the campaigns recorded in that memory;
   - the post-execution analysis reports (JSON and Markdown) of that namespace;
   - any extra file given with --add (for example a saved console log).
@@ -85,6 +86,9 @@ def main(argv: list[str] | None = None) -> None:
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr(f"{a.namespace}_memory.json", json.dumps(export, indent=1, default=str))
+        events = [{"id": i, "event": f.get("event"), "t": f.get("t"), "payload": json.loads(f.get("payload") or "{}")}
+                  for i, f in s.r.xrange(s._k("events"))]
+        z.writestr(f"{a.namespace}_events.json", json.dumps(events, indent=1, default=str))
         for folder, paths in (("provenance", prov), ("analysis", reps), ("extra", extra)):
             for p in paths:
                 z.write(p, arcname=f"{folder}/{os.path.basename(p)}")
