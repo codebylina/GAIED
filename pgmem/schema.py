@@ -150,8 +150,14 @@ def validation_status(m4: Entry) -> str:
     inef = [a for a in apps if a.get("effective") is False]
     n = len(m4.data.get("supporting_episodes", []))
     if not apps:
-        return f"derived from {n} experience(s); not applied yet"
-    return f"derived from {n} experience(s); applied {len(apps)} time(s): {len(eff)} effective, {len(inef)} not effective"
+        return f"derived from {n} experience(s); not given to an agent yet"
+    # older records have no "applied" field: an effectiveness verdict implies the procedure was applied
+    applied = [a for a in apps if a.get("applied", a.get("effective") is not None) is True]
+    not_applied = [a for a in apps if a.get("applied") is False]
+    text = f"derived from {n} experience(s); given {len(apps)} time(s): applied {len(applied)}"
+    if applied:
+        text += f" ({len(eff)} effective, {len(inef)} not effective, {len(applied) - len(eff) - len(inef)} effect unknown)"
+    return text + f", not applied {len(not_applied)}"
 
 
 @dataclass

@@ -365,6 +365,18 @@ def test_procedure_that_stops_working_is_identified():
     assert len(s.get(pid).data["applications"]) == 2
 
 
+def test_procedure_given_but_not_applied_is_not_counted_as_applied():
+    from pgmem.schema import procedure, validation_status
+    cfg, s, an = setup()
+    pid = s.add(procedure("procedure", "Check SMILES", "invalid_smiles", "", "check them", "valid SMILES",
+                          "few cases", ["m2:a", "m2:b"], "analysis-agent", key="invalid_smiles"))[0]
+    an._record_application(pid, "a1", "g1", "m2:o1", None, False)
+    an._record_application(pid, "a2", "g2", "m2:o2", True, True)
+    st = validation_status(s.get(pid))
+    assert st == "derived from 2 experience(s); given 2 time(s): applied 1 (1 effective, 0 not effective, " \
+                 "0 effect unknown), not applied 1", st
+
+
 def test_analysis_work_is_not_lost_when_the_llm_is_unavailable():
     class Down(AnalysisLLM):
         def __init__(self):

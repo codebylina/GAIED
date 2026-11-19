@@ -394,7 +394,7 @@ class Analyzer:
                              refs=[e for e in [g.procedure_id] if e] + g.evidence[:5], campaign_id=self.cfg.campaign_id)
             oid, _ = self.s.add(out, dedup=False)
             if g.procedure_id:
-                self._record_application(g.procedure_id, agent, g.id, oid, effective)
+                self._record_application(g.procedure_id, agent, g.id, oid, effective, g.applied.get(agent))
         # repeated unsuccessful strategy: this attempt and the previous one did not improve the agent's best
         mine = sorted([e for e in self.s.by_key("M2", agent) if e.kind == "attempt"], key=lambda e: e.created_at)
         last = mine[-2:]
@@ -414,13 +414,14 @@ class Analyzer:
                     self._guide(adv["advice"], "workflow", "candidate_explanation", [did] + [e.id for e in best],
                                 [], target=agent)
 
-    def _record_application(self, pid: str, agent: str, gid: str, outcome_id: str, effective) -> None:
+    def _record_application(self, pid: str, agent: str, gid: str, outcome_id: str, effective, applied=None) -> None:
         proc = self.s.get(pid)
         if proc is None:
             return
         was_effective = any(a.get("effective") is True for a in proc.data.get("applications", []))
         self.s.update(pid, ME, "application recorded", lambda e: e.data["applications"].append(
-            {"agent": agent, "guidance": gid, "outcome": outcome_id, "effective": effective, "t": time.time()}))
+            {"agent": agent, "guidance": gid, "outcome": outcome_id, "applied": applied, "effective": effective,
+             "t": time.time()}))
         if effective is False and was_effective:   # it worked before and did not work this time
             self._diagnose("procedure_no_longer_effective", f"{pid}|{outcome_id}",
                            f"Procedure {pid} was effective before but not in its last application "

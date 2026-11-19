@@ -101,6 +101,8 @@ le papier), **pas couvert** (type de problème général : nouvelle règle gén�
 
 | lock1 (même graine deux fois ; lancée deux fois dans le même espace, arrêtée à la main) | À vérifier dans une nouvelle campagne | — | L'agent 1 est resté 12 min sans nouvelle molécule (cause non établie : diagnostic non fait). Corrigé par précaution : retries bornés de `tool_calling` (boucle infinie connue du code d'origine) ; verrou de 120 s renouvelé au lieu de 600 s fixes (un verrou laissé par un arrêt bloquait 10 min) ; une itération sans proposition n'est plus comptée « consigne appliquée » |
 
+| lock1, 3e campagne (même espace par erreur) | Les itérations sans appel d'outil se terminent (« An LLM call asked for tool calls returned none ») au lieu de bloquer l'agent ; consigne SMILES jugée par RDKit (non appliquée quand l'agent propose des SMILES invalides) ; procédure M4 créée | Une molécule dont l'échec est confirmé peut être reproposée et recalculée à une itération suivante (le verrou n'empêche que les calculs simultanés) | Statut de validation M4 : « appliquée 4 fois » comptait des remises non appliquées |
+
 Problèmes d'exploitation (pas du système) : Ollama arrêté (real2, 1er essai) ; `STABLE_REPORTS=2` donné par erreur
 dans les commandes (real1, real2).
 
