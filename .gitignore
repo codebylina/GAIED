@@ -20,3 +20,4 @@ run-07.py.before-stop-rule
 experiments/results/
 # post-execution reports of the analysis agent
 results/analysis/
+dump.rdb
