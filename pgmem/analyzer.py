@@ -292,6 +292,9 @@ class Analyzer:
                 did = self._fired("recurring_failure_class", fclass)
                 self.s.update(did, ME, "new occurrence",
                               lambda e: e.refs.append(f.id) if f.id not in e.refs else None)
+                # no procedure yet (the LLM answer was unusable): try again, nothing is lost
+                if self.cfg.structured and not self.s.by_key("M4", fclass):
+                    self._store_procedure(fclass, same_class, self._draft_procedure(fclass, same_class))
         # a procedure already exists for this situation: apply it as guidance to this agent
         for proc in self.s.by_key("M4", fclass):
             if self.s.r.sadd(self.s._k("analyzer", "applied"), f"{proc.id}|{f.author}|{fclass}"):
@@ -347,8 +350,12 @@ class Analyzer:
         for g in self.s.all_guidance():
             if not any(d["agent"] == agent for d in g.delivered) or agent in g.applied:
                 continue
-            avoid = set(g.check.get("avoid_keys", []))
-            applied = (not (avoid & set(keys))) if avoid else None
+            avoid, fclass = set(g.check.get("avoid_keys", [])), g.check.get("failure_class")
+            if fclass == "invalid_smiles":
+                # the guidance asks for valid SMILES: applied = every new proposal is read by RDKit
+                applied = all(chem.parses(k) for k in keys) if chem.Chem is not None and keys else None
+            else:
+                applied = (not (avoid & set(keys))) if avoid else None
             self.s.update_guidance(g.id, lambda x: x.applied.__setitem__(agent, applied))
 
     def _on_attempt(self, p: dict) -> None:
@@ -364,8 +371,11 @@ class Analyzer:
             since = deliveries[0]["t"]
             mine = [e for c in ("M1", "M2") for e in self.s.all(c) if e.author == agent and e.created_at >= since]
             avoid, fclass = set(g.check.get("avoid_keys", [])), g.check.get("failure_class")
+            separable = fclass != "invalid_smiles"
             if (not avoid and not fclass) or g.applied.get(agent) is False:
                 effective = None        # nothing checkable, or not applied: the effect is not attributable
+            elif not separable:
+                effective = None        # the asked behaviour (only valid SMILES) is the outcome: no separate effect
             else:
                 recomputed = [e for e in mine if e.key in avoid and e.category == "M1"
                               and any(r.get("task_id") for r in e.prov_refs)]
@@ -375,7 +385,9 @@ class Analyzer:
             self.s.update_guidance(g.id, lambda x: x.effective.__setitem__(agent, effective))
             out = experience("outcome", f"Guidance to {agent} was "
                              f"{'applied' if g.applied.get(agent) else 'not applied' if g.applied.get(agent) is False else 'not checkable'}"
-                             f" and {'effective' if effective else 'not effective' if effective is False else 'of unknown effect'}: "
+                             + (" (its effect is the applied behaviour itself)" if not separable and g.applied.get(agent)
+                                else f" and {'effective' if effective else 'not effective' if effective is False else 'of unknown effect'}")
+                             + ": "
                              f"{g.message[:160]}", ME, key=agent, context={"guidance": g.id},
                              outcome={"applied": g.applied.get(agent), "effective": effective},
                              refs=[e for e in [g.procedure_id] if e] + g.evidence[:5], campaign_id=self.cfg.campaign_id)

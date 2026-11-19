@@ -223,6 +223,53 @@ def test_no_lock_when_disabled():
     assert asyncio.run(a1.claim_or_wait("CCO", COND)) == (None, None)
     assert asyncio.run(a2.claim_or_wait("CCO", COND)) == (None, None)
 
+
+def test_invalid_smiles_guidance_is_applied_when_every_new_proposal_is_valid():
+    cfg, s, an = setup()
+    a1, a2, a3 = client(s, cfg, "a1"), client(s, cfg, "a2"), client(s, cfg, "a3")
+    a1.record_failure("C1CC", "Parse failure for C1CC", "t1", None, "c1")
+    a1.record_failure("C1CCN", "Parse failure for C1CCN", "t2", None, "c1")
+    drain(an)
+    g = [g for g in s.all_guidance() if g.check.get("failure_class") == "invalid_smiles"][0]
+    a2.context("plan", "x")
+    a3.context("plan", "x")
+    a2.record_proposals(["CCO", "CCCO"])            # valid SMILES only
+    a3.record_proposals(["CCO", "CC("])             # one invalid SMILES, not in the guidance's list
+    drain(an)
+    g = s.get_guidance(g.id)
+    assert g.applied == {"a2": True, "a3": False}, g.applied
+    a2.record_result("CCO", 9.5, {**COND, "converged": True}, "t3", "w2", "c1")
+    a2.record_conclusion("Done.", "plan", None)
+    drain(an)
+    g = s.get_guidance(g.id)
+    assert g.effective.get("a2", "missing") is None                    # not separable from the application
+    out = [e for e in s.all("M2") if e.kind == "outcome" and e.key == "a2"]
+    assert out and "its effect is the applied behaviour itself" in out[0].text
+
+
+def test_procedure_is_drafted_again_when_the_llm_answer_was_unusable():
+    from pgmem.llm import DRAFT_PROCEDURE
+    llm = AnalysisLLM("scripted")
+    real, calls = llm.ask, {"n": 0}
+
+    def ask(system, user):
+        if system == DRAFT_PROCEDURE:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return "Here is a procedure: first check the SCF settings"     # not JSON: unusable
+        return real(system, user)
+    llm.ask = ask
+    cfg, s, an = setup(llm=llm)
+    a1 = client(s, cfg, "a1")
+    a1.record_failure("CCN", "SCF not converged", "t1", None, "c1")
+    drain(an)
+    a1.record_failure("CCCN", "SCF not converged", "t2", None, "c1")
+    drain(an)
+    assert not s.all("M4") and calls["n"] == 1
+    a1.record_failure("CCCCN", "SCF not converged", "t3", None, "c1")
+    drain(an)
+    assert len(s.all("M4")) == 1 and calls["n"] == 2
+
 def test_procedure_fields_given_as_lists_by_the_llm_are_stored_as_text():
     cfg, s, an = setup()
     pid = an._store_procedure("k", [], {"text": "Fix", "trigger": ["a", "b"], "preconditions": {"x": 1},

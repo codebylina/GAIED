@@ -60,17 +60,31 @@ implémentées.
 
 1. **Remise (`delivered`).** La consigne est ajoutée au prompt de l'agent visé (ou de tous, `*`) au prochain nœud
    `plan`, `critique` ou `update` ; on note l'agent et l'heure. Une seule fois par agent.
-2. **Appliquée (`applied`).** Jugée sur les premières propositions de l'agent après la remise (`tool_calling`). La
-   consigne porte une liste de molécules à éviter (`avoid_keys`) : appliquée = aucune de ces molécules n'est
-   reproposée. Sans liste (par exemple un conseil de direction), ce n'est pas vérifiable : rien n'est écrit.
-3. **Efficace (`effective`).** Jugée à la fin de cette itération (`conclude`), sur ce que l'agent a fait depuis la
-   remise : efficace = aucune molécule de la liste recalculée et, si la consigne porte sur un type d'échec
-   (`failure_class`), aucun nouvel échec de ce type. Non appliquée ou non vérifiable : pas de verdict. Le résultat
-   est écrit dans M2 (`outcome`) et, si la consigne vient d'une procédure, dans les applications de cette procédure
-   M4.
+2. **Appliquée (`applied`).** Jugée sur les premières propositions de l'agent après la remise (`tool_calling`), avec
+   un test qui correspond à ce que la consigne demande :
+   - consigne sur des molécules déjà mesurées ou en échec (`avoid_keys`) : appliquée = aucune de ces molécules
+     n'est reproposée ;
+   - consigne sur les SMILES invalides (`failure_class` = `invalid_smiles`) : appliquée = RDKit lit toutes les
+     nouvelles propositions ;
+   - consigne sans test possible (par exemple un conseil de direction) : rien n'est écrit.
+3. **Efficace (`effective`).** C'est l'**effet à l'itération suivante** : jugé une fois, à la fin de cette itération
+   (`conclude`), sur ce que l'agent a fait depuis la remise. Efficace = aucune molécule de la liste recalculée et, si
+   la consigne porte sur un type d'échec, aucun nouvel échec de ce type. Pas de verdict si la consigne n'est pas
+   appliquée ou pas vérifiable. Pour les SMILES invalides, l'effet ne se sépare pas de l'application (le comportement
+   demandé est le résultat lui-même) : pas de verdict séparé, et la ligne M2 le dit. Le résultat est écrit dans M2
+   (`outcome`) et, si la consigne vient d'une procédure, dans les applications de cette procédure M4.
 
-Limites constatées (real3) : « appliquée » ne vérifie que la liste de molécules, pas le reste du message ; le
-verdict d'efficacité est donné une seule fois, sur une itération (voir les questions ouvertes).
+## Limites documentées (laissées telles quelles, décision du 19/11)
+
+- L'efficacité n'est jugée que sur l'itération qui suit la consigne (real3 : un agent noté efficace a de nouveaux
+  échecs deux itérations plus tard).
+- Le statut épistémique d'une connaissance est celui que l'agent déclare ; l'agent d'analyse ne le réexamine pas
+  (real3 : une généralisation fausse enregistrée comme `observation`). Les preuves pour et contre restent attachées.
+- Un même échec peut donner deux diagnostics, l'un depuis la mémoire, l'autre depuis la provenance Flowcept.
+- « Appliquée » reste une mesure du comportement visible ; on ne voit pas ce que l'agent a « vérifié ».
+
+Après ces corrections, la version des campagnes d'évaluation est figée par un tag git ; ensuite, seuls les vrais
+bugs sont corrigés, et notés ici.
 
 ## Journal des campagnes réelles (Qwen 3.5 9B, vrai xTB, PC distant)
 
@@ -82,7 +96,7 @@ le papier), **pas couvert** (type de problème général : nouvelle règle gén�
 |---|---|---|---|
 | real1 (2 graines ; coupée par `STABLE_REPORTS=2`) | Consignes remises ; un agent ignore « ne repropose pas ces SMILES invalides » : noté non appliqué ; M3 rempli par Qwen avec types et statuts | — | Propositions comparées à la mémoire trop tard (fausses « already measured ») ; champs de procédure en liste |
 | real2 (coupée) | Vraies repropositions détectées (7) ; échecs SMILES diagnostiqués ; explication candidate fausse mais étiquetée `candidate_explanation` ; procédure M4 tirée de 2 expériences | Le même échec diagnostiqué deux fois (mémoire et provenance) | Format des actions de procédure |
-| real3 (complète, 3 itérations) | Réutilisation d'un résultat d'un autre agent ; cycle complet des consignes (6 appliquées, 5 efficaces, 1 non efficace) ; preuve contraire ajoutée sans écraser ; calcul triple détecté ; repropositions arrêtées après la consigne ciblée | Calculs simultanés en double → **verrou ajouté (accord)** ; test « appliquée » inadapté aux consignes sur les SMILES → test RDKit des propositions (proposé, à confirmer) ; efficacité jugée une seule fois ; statut épistémique déclaré par l'agent non réexaminé ; procédure non réessayée si la réponse du LLM est inutilisable | Preuves des connaissances sur une molécule en échec ; texte trompeur des erreurs de tâches ; unités des consignes ; réponses inutilisables du LLM non journalisées |
+| real3 (complète, 3 itérations) | Réutilisation d'un résultat d'un autre agent ; cycle complet des consignes (6 appliquées, 5 efficaces, 1 non efficace) ; preuve contraire ajoutée sans écraser ; calcul triple détecté ; repropositions arrêtées après la consigne ciblée | Calculs simultanés en double → **verrou ajouté (accord)** ; efficacité jugée une seule fois, statut épistémique non réexaminé → **limites documentées** | Preuves des connaissances sur une molécule en échec ; texte trompeur des erreurs de tâches ; unités des consignes ; réponses inutilisables du LLM non journalisées ; test « appliquée » inadapté aux consignes sur les SMILES (→ test RDKit) ; procédure jamais réessayée si la réponse du LLM est inutilisable |
 
 Problèmes d'exploitation (pas du système) : Ollama arrêté (real2, 1er essai) ; `STABLE_REPORTS=2` donné par erreur
 dans les commandes (real1, real2).
@@ -93,13 +107,7 @@ dans les commandes (real1, real2).
    ton cahier initial parle d'observations « sélectionnées » sans critère. Pour l'instant, M1 reçoit chaque mesure
    terminée mais seulement ses champs scientifiques.
 2. **M2 : une tentative par itération ?** Même question : pour l'instant oui.
-3. **Efficacité jugée une seule fois.** Dans real3, une consigne est notée efficace après l'itération 1, puis
-   l'agent a 3 échecs du même type à l'itération 2. Réévaluer à chaque itération en gardant l'historique ?
-4. **Procédure M4 jamais réessayée si la réponse du LLM est inutilisable** (real3 : aucune procédure). Réessayer au
-   prochain échec du même type, ou seulement le noter ?
-5. **Statut épistémique déclaré par l'agent.** L'agent d'analyse ne le réexamine pas (real3 : une généralisation
-   fausse enregistrée comme `observation`). Lui faire ajouter une note, sans écraser le statut ?
-6. **Mode en ligne et persistance.** En mode en ligne, Flowcept n'écrit plus le JSONL complet (vérifié). Une
+3. **Mode en ligne et persistance.** En mode en ligne, Flowcept n'écrit plus le JSONL complet (vérifié). Une
    provenance durable demande alors MongoDB (profil `mongo`, non testé ici).
 
 ## Suggestions non implémentées (seulement avec ton accord)
