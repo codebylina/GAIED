@@ -185,7 +185,10 @@ class MemoryClient:
     def _evidence(self, mols) -> list[dict]:
         out = []
         for m in mols if isinstance(mols, list) else []:
-            for e in self.s.by_key("M1", chem.canonical(str(m)))[:1]:
+            key = chem.canonical(str(m))
+            # a measured result, or else a recorded failure (knowledge about a molecule that failed cites it)
+            found = self.s.by_key("M1", key)[:1] or [e for e in self.s.by_key("M2", key) if e.kind == "failure"][:1]
+            for e in found:
                 out.append({"entry": e.id, "prov_refs": e.prov_refs})
         return out
 

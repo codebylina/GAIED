@@ -155,6 +155,16 @@ def test_own_results_computed_after_the_proposal_are_not_counted_as_already_meas
     assert len(d) == 1 and "1 already measured" in d[0].text and "CCCO" not in d[0].text, d[0].text
 
 
+
+def test_knowledge_about_a_failed_molecule_cites_the_failure():
+    cfg, s, _ = setup()
+    a1 = client(s, cfg, "a1")
+    fid = a1.record_failure("C1CC", "Parse failure for C1CC", "t1", None, "c1")
+    a1.record_conclusion('Done.\nKNOWLEDGE: [{"kind": "constraint", "statement": "C1CC cannot be parsed", '
+                         '"epistemic_status": "observation", "supporting_molecules": ["C1CC"]}]', "plan", None)
+    k = [e for e in s.all("M3") if "C1CC" in e.text][0]
+    assert [ev["entry"] for ev in k.data["supporting_evidence"]] == [fid]
+
 def test_procedure_fields_given_as_lists_by_the_llm_are_stored_as_text():
     cfg, s, an = setup()
     pid = an._store_procedure("k", [], {"text": "Fix", "trigger": ["a", "b"], "preconditions": {"x": 1},
