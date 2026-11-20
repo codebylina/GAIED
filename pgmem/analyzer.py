@@ -33,7 +33,7 @@ from collections import Counter, defaultdict
 
 import redis
 
-from . import chem
+from . import chem, verification
 from .config import Config
 from .llm import DRAFT_PROCEDURE, EXPLAIN_FAILURES, JUDGE_RESULT, SUGGEST_DIRECTION, AnalysisLLM
 from .provenance import ProvenanceIndex, as_dict, is_computation, make_source, smiles_of
@@ -120,9 +120,9 @@ class Analyzer:
         """Analysis rules on memory events, and the tracking of guidance (kept in every configuration, since it is
         how interventions are measured). Without the "memory" source (ablation) only the tracking runs."""
         rules = "memory" in self.cfg.analysis_sources
-        handlers = {"result": [self._on_result] if rules else [],
+        handlers = {"result": [self._on_result, self._reverify_for_result] if rules else [],
                     "failure": [self._on_failure] if rules else [],
-                    "knowledge": [self._on_knowledge] if rules else [],
+                    "knowledge": [self._on_knowledge, self._verify_knowledge] if rules else [],
                     "proposals": ([self._on_proposals] if rules else []) + [self._track_application],
                     "attempt": [self._track_effectiveness] + ([self._on_attempt] if rules else [])}
         for handler in handlers.get(event, []):
@@ -456,6 +456,55 @@ class Analyzer:
                                    f"Knowledge \"{k.text}\" relies on a result with a data-quality problem "
                                    f"({m1.text}); it should be reassessed", "data_quality", "observed_fact",
                                    [k.id, m1.id], m1.prov_refs)
+
+    # ================================================================== claim-evidence verification
+    def _verify_knowledge(self, p: dict) -> None:
+        """New statements: the LLM gives their structured form, the check against the results is deterministic."""
+        if not self.cfg.structured:
+            return
+        measured = ", ".join(sorted({e.key for e in self.s.all("M1")}))[:3000]
+        for kid in p.get("entries", []):
+            k = self.s.get(kid)
+            if k is None or self.s.get_verification(kid):
+                continue
+            raw = self._llm_json(verification.extraction_prompt(),
+                                 f"Statement: {k.text}\nMeasured molecules: {measured}")
+            claim = verification.normalize(raw)
+            result = verification.check(claim, self.s)
+            rec, _ = verification.record(self.s, kid, claim, result, "new knowledge")
+            self.stats[f"verification:{result['verdict']}"] += 1
+            if result["verdict"] == "contradicted":
+                self._report_contradiction(k, result, "claim_contradicted", kid, target=k.author,
+                                           lead=f"Your statement \"{k.text}\" is contradicted by the team's results")
+
+    def _reverify_for_result(self, p: dict) -> None:
+        """A new result: check again the statements whose scope it falls in."""
+        m1 = self.s.get(p["entry"])
+        if m1 is None or not self.cfg.structured:
+            return
+        for kid, rec in self.s.all_verifications().items():
+            claim = rec.get("claim", {})
+            if not verification.in_scope(claim, m1.key):
+                continue
+            result = verification.check(claim, self.s)
+            _, prev = verification.record(self.s, kid, claim, result, f"new result {m1.id}")
+            if result["verdict"] == "contradicted" and prev != "contradicted":
+                k = self.s.get(kid)
+                if k is not None:
+                    self._report_contradiction(k, result, "claim_contradicted_by_new_result", f"{kid}|{m1.id}",
+                                               target="*", lead=f"The new result {m1.text} makes the statement "
+                                                                f"\"{k.text}\" contradicted by the team's results",
+                                               extra_refs=[m1.id])
+
+    def _report_contradiction(self, k: Entry, result: dict, rule: str, key: str, target: str, lead: str,
+                              extra_refs: list[str] | None = None) -> None:
+        refs = [k.id] + (extra_refs or []) + [i for i in result["evidence"] if i not in (extra_refs or [])]
+        prov = [r for i in result["evidence"] for r in (self.s.get(i).prov_refs if self.s.get(i) else [])]
+        did, new = self._diagnose(rule, key, f"{lead}: {result['reason']}", "scientific_contradiction",
+                                  "observed_fact", refs, prov)
+        if new:
+            self._guide(f"{lead} ({result['reason']}). Treat it as not established; revise or test it.",
+                        "scientific_contradiction", "observed_fact", [did] + refs, prov, target=target)
 
     # ================================================================== rules on provenance records
     def _on_provenance(self, rec: dict) -> None:

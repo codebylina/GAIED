@@ -32,6 +32,16 @@ reusable procedure for future agents. Be specific; state its limits.
 Answer with ONLY a JSON object: {"kind": "procedure|strategy|recommendation", "text": "...", "trigger": "...",
 "preconditions": "...", "actions": "...", "expected_outcome": "...", "limitations": "..."}"""
 
+EXTRACT_CLAIM = """You turn one scientific statement about ionization energies into a structured claim that can be
+checked against measured values. Use exactly one of these forms, or "none" if the statement cannot be checked this way:
+{"form": "value", "molecule": "<SMILES>", "value": <eV>}                     the molecule's value is about this
+{"form": "bound", "molecule": "<SMILES>", "relation": "above|below", "value": <eV>}
+{"form": "comparison", "a": "<SMILES>", "relation": "higher|lower", "b": "<SMILES>"}   a's value is higher/lower than b's
+{"form": "motif_effect", "feature": "<one of FEATURE_NAMES>", "direction": "increases|decreases"}
+                                    molecules with this feature have higher/lower values than those without it
+{"form": "none"}
+Use SMILES exactly as written in the statement or in the list of measured molecules. Answer with the JSON only."""
+
 _JSON = re.compile(r"\{.*\}", re.S)
 
 
@@ -93,6 +103,12 @@ def scripted(system: str, user: str) -> str:
             else:
                 verdicts.append({"id": i, "relation": "unrelated", "reason": "scripted"})
         return json.dumps({"verdicts": verdicts})
+    if system.startswith("You turn one scientific statement"):
+        m = re.search(r"ionization energy of (\S+) is (above|below) (-?[0-9.]+)", user)
+        if m:
+            return json.dumps({"form": "bound", "molecule": m.group(1), "relation": m.group(2),
+                               "value": float(m.group(3))})
+        return json.dumps({"form": "none"})
     if system == SUGGEST_DIRECTION:
         return json.dumps({"advice": "Explore a different scaffold than the last iterations (scripted advice)."})
     if system == DRAFT_PROCEDURE:

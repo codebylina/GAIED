@@ -18,6 +18,7 @@ from pgmem.config import Config  # noqa: E402
 from pgmem.llm import AnalysisLLM  # noqa: E402
 from pgmem.provenance import JsonlProvenance, ProvenanceIndex, smiles_of  # noqa: E402
 from pgmem.schema import ProvRef, knowledge, observation  # noqa: E402
+from pgmem import chem
 from pgmem.store import MemoryStore  # noqa: E402
 
 HOST, PORT = os.environ.get("REDIS_HOST", "localhost"), int(os.environ.get("REDIS_PORT", "6379"))
@@ -452,6 +453,126 @@ def test_analysis_without_the_memory_source_keeps_only_guidance_tracking():
     a2.record_result("CCO", 9.5, {**COND, "converged": True}, "t2", "w2", "c1")
     drain(an)
     assert not diagnoses(s) and not s.all_guidance()
+
+
+# --------------------------------------------------------------------------------------------- retrieval
+def test_retrieval_ranks_results_on_related_molecules_first():
+    from pgmem import retrieval
+    cfg, s, _ = setup()
+    a1 = client(s, cfg, "a1")
+    for smi, v in [("FC(F)(F)C#N", 16.0), ("FC(F)(F)CC#N", 15.5), ("c1ccccc1", 9.0), ("CCCCCCCC", 10.0)]:
+        a1.record_result(smi, v, {**COND, "converged": True}, f"t-{smi}", "w1", "c1")
+    q = retrieval.build_query("try more nitriles like N#CC(F)(F)F", [])
+    got = [e.key for e, _, _ in retrieval.retrieve(s, "M1", q, 2)]
+    assert got[0] == chem.canonical("FC(F)(F)C#N") and chem.canonical("c1ccccc1") not in got, got
+
+
+def test_m2_kinds_are_filtered_before_ranking():
+    cfg, s, _ = setup()
+    a1 = client(s, cfg, "a1")
+    for i in range(12):                                           # many attempts mentioning the query words
+        a1.record_conclusion(f"nitrile iteration {i}", "nitrile plan", None)
+    a1.record_failure("CC#N", "SCF not converged", "t1", None, "c1")
+    got = s.search("M2", "nitrile CC#N", limit=1, kinds=("failure",))
+    assert got and got[0].kind == "failure"
+
+
+def test_m1_merges_two_spellings_of_the_same_molecule():
+    cfg, s, _ = setup()
+    a1 = client(s, cfg, "a1")
+    a1.record_result("CCO", 9.5, {**COND, "converged": True}, "t1", "w1", "c1")
+    a1.record_result("OCC", 9.5, {**COND, "converged": True}, "t2", "w1", "c1")
+    assert len(s.all("M1")) == 1 and len(s.all("M1")[0].prov_refs) == 2
+
+
+def test_on_demand_answer_reports_failures_of_similar_molecules_and_is_logged():
+    cfg, s, _ = setup()
+    a1, a2 = client(s, cfg, "a1"), client(s, cfg, "a2")
+    a1.record_failure("FC(F)(F)C#N", "SCF not converged", "t1", None, "c1")
+    ans = a2.answer("Have similar molecules failed?", "FC(F)(F)CC#N")
+    assert "[failure" in ans and chem.canonical("FC(F)(F)C#N") in ans, ans
+    ev = [json.loads(f["payload"]) for _, f in s.r.xrange(s._k("events")) if f["event"] == "memory_query"]
+    assert ev and ev[-1]["entries"]["M2"]
+
+
+def test_failures_are_reused_only_in_the_ablation():
+    import asyncio
+    cfg, s, _ = setup()
+    a1 = client(s, cfg, "a1")
+    a1.record_failure("C1CC", "Parse failure for C1CC", "t1", None, "c1")
+    assert asyncio.run(a1.claim_or_wait("C1CC", COND))[1]         # computed again by default (lock taken)
+    s.r.delete(s._k("claim", "C1CC"))
+    cfg.reuse_failures = True
+    try:
+        asyncio.run(a1.claim_or_wait("C1CC", COND))
+        raise AssertionError("expected the recorded failure")
+    except RuntimeError as exc:
+        assert "not computed again" in str(exc)
+
+
+def test_faults_change_after_a_number_of_computations():
+    import tempfile
+    from pgmem import faults
+    log = tempfile.mktemp()
+    os.environ["PGMEM_FAULTS_LOG"] = log
+    os.environ["PGMEM_FAULTS"] = json.dumps({"phases": [
+        {"until_computations": 2, "fail": {"smarts": "C#N"}}, {"fail": {"smarts": "[CX4](F)(F)F"}}]})
+    try:
+        out = []
+        for smi in ["CC#N", "CCO", "CC#N", "CC(F)(F)F"]:
+            try:
+                faults.before(smi, 10)
+                out.append("ok")
+            except RuntimeError as exc:
+                out.append(str(exc))
+        assert out == ["SCF not converged", "ok", "ok", "SCF not converged"], out
+    finally:
+        os.environ.pop("PGMEM_FAULTS")
+        os.environ.pop("PGMEM_FAULTS_LOG")
+
+
+# --------------------------------------------------------------------------------------------- verification
+def test_claim_checks_are_deterministic_on_reliable_results():
+    from pgmem import verification as v
+    cfg, s, _ = setup()
+    a1 = client(s, cfg, "a1")
+    vals = {"CC(F)(F)F": 15.0, "CCC(F)(F)F": 14.8, "CCC": 11.0, "CCCC": 10.5, "CCO": 9.0}
+    for smi, val in vals.items():
+        a1.record_result(smi, val, {**COND, "converged": True}, f"t-{smi}", "w1", "c1")
+    a1.record_result("CCN", 8.0, {**COND, "converged": False}, "t-n", "w1", "c1")
+    k = chem.canonical
+    assert v.check(v.normalize({"form": "comparison", "a": "CCC", "relation": "higher", "b": "CCO"}), s)[
+        "verdict"] == "supported"
+    assert v.check(v.normalize({"form": "bound", "molecule": "CCO", "relation": "above", "value": 10}), s)[
+        "verdict"] == "contradicted"
+    r = v.check(v.normalize({"form": "value", "molecule": "CCN", "value": 8.0}), s)
+    assert r["verdict"] == "inconclusive" and "unreliable" in r["reason"]
+    r = v.check(v.normalize({"form": "motif_effect", "feature": "trifluoromethyl", "direction": "increases"}), s)
+    assert r["verdict"] == "supported", r
+    r = v.check(v.normalize({"form": "motif_effect", "feature": "trifluoromethyl", "direction": "decreases"}), s,
+                values={k("CC(F)(F)F"): 15.0, k("CCC(F)(F)F"): 14.8})
+    assert r["verdict"] == "contradicted"
+    assert v.normalize({"form": "motif_effect", "feature": "magic", "direction": "increases"}) == {"form": "none"}
+
+
+def test_analysis_agent_flags_a_contradicted_statement_and_rechecks_on_new_results():
+    cfg, s, an = setup()
+    a1 = client(s, cfg, "a1")
+    a1.record_result("CCO", 9.5, {**COND, "converged": True}, "t1", "w1", "c1")
+    drain(an)
+    a1.record_conclusion('Done.\nKNOWLEDGE: [{"kind": "finding", "statement": "The ionization energy of CCCO '
+                         'is above 12.0 eV", "epistemic_status": "observation", "supporting_molecules": []}]',
+                         "plan", None)
+    drain(an)
+    kid = [e for e in s.all("M3")][0].id
+    assert s.get_verification(kid)["verdict"] == "inconclusive"            # no result for CCCO yet
+    a1.record_result("CCCO", 9.8, {**COND, "converged": True}, "t2", "w1", "c1")
+    drain(an)
+    rec = s.get_verification(kid)
+    assert rec["verdict"] == "contradicted" and len(rec["history"]) == 2, rec
+    assert diagnoses(s, "claim_contradicted_by_new_result")
+    assert any("contradicted" in g.message for g in s.all_guidance())
+    assert "checked against the results: contradicted" in a1.context("plan", "CCCO")
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
