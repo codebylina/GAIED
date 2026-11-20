@@ -278,18 +278,15 @@ class MemoryClient:
         """The memory section added to a node's prompt; guidance received here is marked delivered."""
         if not self.cfg.structured:
             return ""
-        if self.cfg.retrieval == "recent":
-            q, sections = None, self._recent_sections(query)
-        else:
-            q = self.task_query(query)
-            sections = self._task_sections(q)
+        q = self.task_query(query)               # also logged in the ablation, to judge what it retrieves
+        sections = self._recent_sections(query) if self.cfg.retrieval == "recent" else self._task_sections(q)
         parts = [f"{title}:\n" + "\n".join(f"- {line}" for line in lines) for title, lines, _ in sections if lines]
         entries: dict[str, list[str]] = {"M1": [], "M2": [], "M3": [], "M4": []}
         for _, _, ids in sections:
             for c, i in ids:
                 entries[c].append(i)
         self.s.emit("context", {"agent": self.agent, "node": node, "query": query[:200], "iteration": self.iteration,
-                                "molecules": q.molecules if q else [], "entries": entries})
+                                "molecules": q.molecules, "entries": entries})
         if self.cfg.guidance:
             gs = self.s.pending_guidance(self.agent)
             if gs:
