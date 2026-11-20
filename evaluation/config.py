@@ -18,7 +18,7 @@ SAME_SEEDS = "CNC(N)=O,CNC(N)=O"                  # two agents starting from the
 SCENARIOS: dict[str, dict] = {
     "repeated_failures": {
         "seeds": DIFFERENT_SEEDS,
-        "faults": {"fail": {"fraction": 0.3, "salt": "repeated", "message": "SCF not converged (injected)"}},
+        "faults": {"fail": {"fraction": 0.3, "salt": "repeated", "message": "SCF not converged"}},
     },
     "redundant_computations": {"seeds": SAME_SEEDS, "faults": {}},
     "inefficient_exploration": {"seeds": DIFFERENT_SEEDS, "faults": {}},
@@ -34,9 +34,9 @@ SCENARIOS: dict[str, dict] = {
     # the failing molecules change (phase 2), so applying the procedure no longer prevents failures
     "ineffective_procedure": {
         "seeds": DIFFERENT_SEEDS,
-        "faults": {"fail": {"fraction": 0.3, "salt": "phase1", "message": "SCF not converged (injected)"}},
+        "faults": {"fail": {"fraction": 0.3, "salt": "phase1", "message": "SCF not converged"}},
         "switch_when_procedure_effective": {"fail": {"fraction": 0.3, "salt": "phase2",
-                                                     "message": "SCF not converged (injected)"}},
+                                                     "message": "SCF not converged"}},
     },
 }
 

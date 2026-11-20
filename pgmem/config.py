@@ -28,6 +28,10 @@ class Config:
     campaign_id: str | None = None
     retrieval_limit: int = 5                # entries per category put in a prompt (prompt size, not a scientific rule)
     reuse_results: bool = True              # experiment selection: reuse a result already in M1 instead of recomputing
+    retrieval: str = "contextual"           # contextual (task-aware, pgmem/retrieval.py) | recent (earlier, ablation)
+    on_demand: bool = True                  # agents may call the query_memory tool at experiment selection
+    memory_queries: int = 2                 # rounds of memory questions allowed before deciding
+    reuse_failures: bool = False            # ablation: a molecule that failed is not computed again
     claims: bool = True                     # coordination: one computation of a molecule at a time (lock in Redis)
     claim_ttl_s: int = 600                  # a lock left by a crashed agent expires (must exceed one xTB computation)
     analyzer_group: str = "analyzer"
@@ -63,6 +67,10 @@ class Config:
             campaign_id=os.environ.get("FLOWCEPT_CAMPAIGN_ID"),
             retrieval_limit=int(os.environ.get("PGMEM_RETRIEVAL_LIMIT", "5")),
             reuse_results=_bool("PGMEM_REUSE_RESULTS", True),
+            retrieval=os.environ.get("PGMEM_RETRIEVAL", "contextual"),
+            on_demand=_bool("PGMEM_ON_DEMAND", True),
+            memory_queries=int(os.environ.get("PGMEM_MEMORY_QUERIES", "2")),
+            reuse_failures=_bool("PGMEM_REUSE_FAILURES", False),
             claims=_bool("PGMEM_CLAIMS", True),
             claim_ttl_s=int(os.environ.get("PGMEM_CLAIM_TTL_S", "600")),
             analyzer_llm=_bool("PGMEM_ANALYZER_LLM", True),

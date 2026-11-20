@@ -164,18 +164,32 @@ class MemoryStore:
         ids = self.r.zrange(self._k("cat", category), 0, -1)
         return [e for e in (self.get(i) for i in ids) if e]
 
-    def search(self, category: str, query: str, limit: int = 5, scan: int = 500) -> list[Entry]:
-        """Keyword retrieval over the most recent entries of a category (ties: newest first)."""
+    def search(self, category: str, query: str, limit: int = 5, scan: int = 500,
+               kinds: Iterable[str] | None = None) -> list[Entry]:
+        """Keyword retrieval over the most recent entries of a category (ties: newest first); `kinds` filters
+        before ranking."""
         q = tokens(query)
+        pool = [e for e in self.recent(category, scan) if kinds is None or e.kind in kinds]
         if not q:
-            return self.recent(category, limit)
+            return pool[:limit]
         scored = []
-        for e in self.recent(category, scan):
+        for e in pool:
             s = len(q & tokens(f"{e.text} {e.key} {json.dumps(e.data)}"))
             if s:
                 scored.append((s, e.created_at, e))
         scored.sort(key=lambda x: (-x[0], -x[1]))
         return [e for _, _, e in scored[:limit]]
+
+    # ------------------------------------------------------------------ verification records (linked to M3 ids)
+    def get_verification(self, entry_id: str) -> dict | None:
+        raw = self.r.hget(self._k("verification"), entry_id)
+        return json.loads(raw) if raw else None
+
+    def set_verification(self, entry_id: str, record: dict) -> None:
+        self.r.hset(self._k("verification"), entry_id, json.dumps(record, default=str))
+
+    def all_verifications(self) -> dict[str, dict]:
+        return {k: json.loads(v) for k, v in self.r.hgetall(self._k("verification")).items()}
 
     def citing(self, entry_id: str, categories: Iterable[str] = ("M3", "M4")) -> list[Entry]:
         """Entries that reference this one directly (used to find knowledge that relies on a given result)."""
@@ -234,7 +248,8 @@ class MemoryStore:
         return {"namespace": self.ns,
                 "entries": {c: [e.to_dict() for e in self.all(c)] for c in ("M1", "M2", "M3", "M4")},
                 "guidance": [g.to_dict() for g in self.all_guidance()],
-                "analyzer_stats": self.r.hgetall(self._k("analyzer", "stats"))}
+                "analyzer_stats": self.r.hgetall(self._k("analyzer", "stats")),
+                "verification": self.all_verifications()}
 
     def reset(self) -> int:
         keys = list(self.r.scan_iter(f"{self.ns}:*"))

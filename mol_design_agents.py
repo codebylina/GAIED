@@ -681,8 +681,11 @@ class XTBSimulationAgent(Agent):
                     previously_simulated += memory.explored()
                 except Exception as exc:
                     logger.warning('Shared memory read failed: %s', exc)
-            response = await self.llm_with_tools.ainvoke(
-                [
+            # [pgmem] on demand: the agent may also call the query_memory tool before deciding
+            _ask = memory is not None and memory.cfg.structured and memory.cfg.on_demand
+            _tools_llm = (self.generation_llm.bind_tools(list(self.tools_by_name.values()) + [memory.tool()])
+                          if _ask else self.llm_with_tools)
+            _msgs = [
                     SystemMessage(
                         content=(
                             'You are a computational chemist who is an expert '
@@ -692,6 +695,8 @@ class XTBSimulationAgent(Agent):
                             'write python code. You should run several '
                             'simulations at once. Do not repeat previously '
                             'conducted simulations.'
+                            + (' Before deciding, you may ask the team\'s shared memory with the query_memory tool.'
+                               if _ask else '')  # [pgmem]
                         ),
                     ),
                     HumanMessage(
@@ -701,9 +706,27 @@ class XTBSimulationAgent(Agent):
                             'Do not repeat those molecules in the tool calls.'
                         ),
                     ),
-                ],
-            )
+                ]
+            response = await _tools_llm.ainvoke(_msgs)
             logger.info(f'Tool Calling: {response}')
+            for _ in range(memory.cfg.memory_queries if _ask else 0):  # [pgmem] answer, then let the agent decide
+                _questions = [c for c in response.tool_calls if c['name'] == 'query_memory']
+                if not _questions:
+                    break
+                try:
+                    _answers = '\n\n'.join(
+                        f"Question: {c['args'].get('question', '')}\n"
+                        + memory.answer(c['args'].get('question', ''), c['args'].get('smiles')) for c in _questions)
+                except Exception as exc:
+                    logger.warning('Shared memory read failed: %s', exc)
+                    break
+                _msgs = _msgs + [response, HumanMessage(content=(
+                    'Answers from the shared memory:\n' + _answers
+                    + '\n\nNow decide which simulations to run with compute_ionization_energy.'))]
+                response = await _tools_llm.ainvoke(_msgs)
+                logger.info(f'Tool Calling after memory answers: {response}')
+            if _ask:  # [pgmem] only simulations go on to the simulate node
+                response.tool_calls = [c for c in response.tool_calls if c['name'] != 'query_memory']
             # [gaied-docker fix] bounded retries: the original loop never ends when the LLM keeps answering
             # without a parsable tool call, and the agent then stays blocked for the rest of the campaign
             _max_retries, _retries = int(os.environ.get('TOOL_CALL_RETRIES', '3')), 0

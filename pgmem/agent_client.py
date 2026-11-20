@@ -1,16 +1,19 @@
 """
 What a scientific agent does with the shared memory, at the integration points of its workflow:
 
-  planning              context(): relevant knowledge (M3), experiences (M2), procedures (M4), team results (M1),
-                        and the analysis agent's guidance
-  experiment selection  explored(): what the team already measured or saw fail; lookup(): an existing result
+  planning              context(): the memory relevant to the current task (pgmem/retrieval.py): results on similar
+                        molecules and the team's best (M1), experiences (M2), knowledge with its verification (M3),
+                        applicable procedures (M4), and the analysis agent's guidance
+  experiment selection  explored(): what the team already measured or saw fail; query_memory, a tool the agent may
+                        call itself before deciding (answer()); claim_or_wait(): an existing result, or the lock
   execution             record_result() -> M1 (with the Flowcept task id); record_failure() -> M2
   conclusion            conclude_instruction() + record_conclusion() -> proposed knowledge (M3) and the attempt (M2)
   critique / revision   context() again, with the guidance received since
 
 Modes (Config.mode): basic = results shared (M1 only, read back at experiment selection); structured = M1-M4;
 full = structured + guidance from the analysis agent. Every call is a few Redis operations; none waits for the
-analysis agent.
+analysis agent. Retrieval is task-aware (PGMEM_RETRIEVAL=contextual) or, for comparison, the earlier one: best
+results and keyword search (PGMEM_RETRIEVAL=recent).
 """
 from __future__ import annotations
 
@@ -24,6 +27,7 @@ import uuid
 
 from . import chem
 from .config import Config
+from . import retrieval
 from .schema import EPISTEMIC_STATUS, M3_KINDS, ProvRef, experience, knowledge, observation, validation_status
 from .store import MemoryStore
 
@@ -65,6 +69,9 @@ class MemoryClient:
         self._iter_failures: list[str] = []
         self._iter_proposals: list[str] = []
         self._best_start: float | None = None
+        self.seed = agent.split("#")[0]          # GAIED names an agent after its seed molecule
+        self._recent_proposals: list[str] = []
+        self._recent_failure_classes: set[str] = set()
 
     # ------------------------------------------------------------------ experiment selection
     def explored(self) -> str:
@@ -104,6 +111,7 @@ class MemoryClient:
         """Before computing: (value, None) when the result exists or arrives while another computation of the same
         molecule runs; (None, token) when this call holds the lock and must compute, then call release(); a failure
         of the computation it waited for is raised as is. Without locks: (lookup result, None)."""
+        self._known_failure(smiles)
         value = self.lookup(smiles, conditions)
         if value is not None or not (self.cfg.claims and self.cfg.reuse_results):
             return value, None
@@ -131,6 +139,19 @@ class MemoryClient:
                 return None, token
             waited = True
 
+    def _known_failure(self, smiles: str) -> None:
+        """Ablation PGMEM_REUSE_FAILURES: a molecule whose computation already failed is not computed again; the
+        recorded failure is returned instead (a reuse of negative results, like a cache)."""
+        if not (self.cfg.reuse_failures and self.cfg.structured):
+            return
+        key = chem.canonical(smiles)
+        failed = [e for e in self.s.by_key("M2", key) if e.kind == "failure"]
+        if failed:
+            self._iter_failures.append(failed[0].id)
+            self.s.emit("reused_failure", {"entry": failed[0].id, "agent": self.agent, "key": key})
+            raise RuntimeError(f"{failed[0].data['outcome'].get('error', 'computation failed')} "
+                               "(failed before; not computed again)")
+
     def release(self, smiles: str, token: str | None) -> None:
         if token:
             self.s.r.eval(self._RELEASE, 1, self._claim_key(chem.canonical(smiles)), f"{self.agent}|{token}")
@@ -142,6 +163,8 @@ class MemoryClient:
     def record_proposals(self, smiles_list: list[str]) -> None:
         keys = [chem.canonical(s) for s in smiles_list]
         self._iter_proposals = keys
+        if keys:
+            self._recent_proposals = (keys + self._recent_proposals)[:20]
         self._best_start = self.best
         # what the memory already holds when the proposals are made; the analysis agent reads the event later,
         # after this agent's own new results are stored, so it must not recompute this itself
@@ -156,8 +179,9 @@ class MemoryClient:
         key = chem.canonical(smiles)
         prov = ProvRef(task_id=task_id, workflow_id=workflow_id, campaign_id=campaign_id, subtype="parsl_task",
                        activity_id="compute_ionization_energy")
-        eid, merged = self.s.add(observation(key, QUANTITY, value, UNIT, {**conditions, "smiles_given": smiles},
-                                             self.agent, prov, campaign_id))
+        obs = observation(key, QUANTITY, value, UNIT, conditions, self.agent, prov, campaign_id)
+        obs.data["smiles_given"] = smiles      # the spelling used, kept out of the conditions (deduplication)
+        eid, merged = self.s.add(obs)
         self._seen(value)
         self._iter_results.append(eid)
         self.s.emit("result", {"entry": eid, "agent": self.agent, "key": key, "task_id": task_id,
@@ -177,6 +201,7 @@ class MemoryClient:
                                           subtype="parsl_task").to_dict()], campaign_id=campaign_id)
         eid, _ = self.s.add(e)
         self._iter_failures.append(eid)
+        self._recent_failure_classes.add(fclass)
         self.s.emit("failure", {"entry": eid, "agent": self.agent, "key": key, "failure_class": fclass,
                                 "task_id": task_id})
         return eid
@@ -227,6 +252,8 @@ class MemoryClient:
         aid, _ = self.s.add(att)
         self.s.emit("attempt", {"entry": aid, "agent": self.agent, "iteration": self.iteration})
         self.iteration += 1
+        if not self._iter_failures:              # failure classes met in the last iteration stay "recent"
+            self._recent_failure_classes = set()
         self._iter_results, self._iter_failures, self._iter_proposals = [], [], []
         return body
 
@@ -241,33 +268,28 @@ class MemoryClient:
         return out
 
     # ------------------------------------------------------------------ planning, critique, revision
+    def task_query(self, text: str, molecules: list[str] | None = None) -> retrieval.Query:
+        """The current task: the text given (plan, critique, question), the molecules it names, the agent's seed
+        and recent proposals, and the failure classes it met recently."""
+        mols = list(molecules or []) + [self.seed] + self._recent_proposals
+        return retrieval.build_query(text, mols, self._recent_failure_classes)
+
     def context(self, node: str, query: str) -> str:
         """The memory section added to a node's prompt; guidance received here is marked delivered."""
         if not self.cfg.structured:
             return ""
-        n, cats = self.cfg.retrieval_limit, self.cfg.context_categories
-        parts = []
-        best = sorted([e for e in self.s.all("M1") if e.data.get("value") is not None],
-                      key=lambda e: -e.data["value"])[:n] if "M1" in cats else []
-        if best:
-            parts.append("Best results of the team (M1):\n" + "\n".join(f"- {_with_notes(e)}" for e in best))
-        know = self.s.search("M3", query, limit=n) if "M3" in cats else []
-        if know:
-            parts.append("Team knowledge (M3), with its evidence:\n" + "\n".join(f"- {_knowledge_line(e)}"
-                                                                               for e in know))
-        exps = [e for e in self.s.search("M2", query, limit=3 * n)
-                if e.kind in ("failure", "diagnosis", "outcome")][:n] if "M2" in cats else []
-        if exps:
-            parts.append("Relevant experiences (M2):\n" + "\n".join(f"- [{e.kind}] {e.text}" for e in exps))
-        procs = self.s.search("M4", query, limit=n) if "M4" in cats else []
-        # what was retrieved, for the evaluation of retrieval
+        if self.cfg.retrieval == "recent":
+            q, sections = None, self._recent_sections(query)
+        else:
+            q = self.task_query(query)
+            sections = self._task_sections(q)
+        parts = [f"{title}:\n" + "\n".join(f"- {line}" for line in lines) for title, lines, _ in sections if lines]
+        entries: dict[str, list[str]] = {"M1": [], "M2": [], "M3": [], "M4": []}
+        for _, _, ids in sections:
+            for c, i in ids:
+                entries[c].append(i)
         self.s.emit("context", {"agent": self.agent, "node": node, "query": query[:200], "iteration": self.iteration,
-                                "entries": {c: [e.id for e in es] for c, es in
-                                            (("M1", best), ("M3", know), ("M2", exps), ("M4", procs))}})
-        if procs:
-            parts.append("Procedures (M4):\n" + "\n".join(
-                f"- {e.text} When: {e.data['trigger']}. Do: {e.data['actions']}. Limits: {e.data['limitations']}. "
-                f"({validation_status(e)})" for e in procs))
+                                "molecules": q.molecules if q else [], "entries": entries})
         if self.cfg.guidance:
             gs = self.s.pending_guidance(self.agent)
             if gs:
@@ -277,17 +299,116 @@ class MemoryClient:
                     self.s.mark_delivered(g.id, self.agent, node)
         return ("\n\nSHARED MEMORY\n" + "\n\n".join(parts)) if parts else ""
 
+    def _task_sections(self, q: retrieval.Query) -> list:
+        n, cats = self.cfg.retrieval_limit, self.cfg.context_categories
+        sections = []
+        if "M1" in cats:
+            similar = retrieval.retrieve(self.s, "M1", q, n, keep=lambda e: e.data.get("value") is not None)
+            sections.append(("Results on molecules related to the current task (M1)",
+                             [f"{_with_notes(e)} [similarity {p['structure']:.2f}]" for e, _, p in similar],
+                             [("M1", e.id) for e, _, _ in similar]))
+            shown = {e.id for e, _, _ in similar}
+            best = [e for e in sorted([e for e in self.s.all("M1") if e.data.get("value") is not None],
+                                      key=lambda e: -e.data["value"]) if e.id not in shown][:3]
+            sections.append(("Best results of the team so far, for reference (M1)", [_with_notes(e) for e in best],
+                             [("M1", e.id) for e in best]))
+        if "M2" in cats:
+            exps = retrieval.retrieve(self.s, "M2", q, n, kinds=retrieval.M2_KINDS,
+                                      keep=lambda e: e.kind != "attempt" or e.data["outcome"].get("improved"))
+            sections.append(("Relevant experiences of the team (M2)",
+                             [f"[{'improving attempt' if e.kind == 'attempt' else e.kind}] {e.text}"
+                              for e, _, _ in exps], [("M2", e.id) for e, _, _ in exps]))
+        if "M3" in cats:
+            know = retrieval.retrieve(self.s, "M3", q, n)
+            sections.append(("Team knowledge related to the task (M3), with its evidence and verification",
+                             [_knowledge_line(e, self.s) for e, _, _ in know], [("M3", e.id) for e, _, _ in know]))
+        if "M4" in cats:
+            procs = [(e, why) for e in self.s.all("M4") if (why := retrieval.applicable(e, q, self.s))][:n]
+            sections.append(("Procedures that apply now (M4)", [
+                f"{e.text} Applies because {why}. When: {e.data['trigger']}. Do: {e.data['actions']}. "
+                f"Limits: {e.data['limitations']}. ({validation_status(e)})" for e, why in procs],
+                [("M4", e.id) for e, _ in procs]))
+        return sections
+
+    def _recent_sections(self, query: str) -> list:
+        """The earlier retrieval (ablation): the team's best results and a keyword search per category."""
+        n, cats = self.cfg.retrieval_limit, self.cfg.context_categories
+        best = sorted([e for e in self.s.all("M1") if e.data.get("value") is not None],
+                      key=lambda e: -e.data["value"])[:n] if "M1" in cats else []
+        know = self.s.search("M3", query, limit=n) if "M3" in cats else []
+        exps = self.s.search("M2", query, limit=n, kinds=("failure", "diagnosis", "outcome")) if "M2" in cats else []
+        procs = self.s.search("M4", query, limit=n) if "M4" in cats else []
+        return [("Best results of the team (M1)", [_with_notes(e) for e in best], [("M1", e.id) for e in best]),
+                ("Team knowledge (M3), with its evidence", [_knowledge_line(e, self.s) for e in know],
+                 [("M3", e.id) for e in know]),
+                ("Relevant experiences (M2)", [f"[{e.kind}] {e.text}" for e in exps], [("M2", e.id) for e in exps]),
+                ("Procedures (M4)", [f"{e.text} When: {e.data['trigger']}. Do: {e.data['actions']}. "
+                                     f"Limits: {e.data['limitations']}. ({validation_status(e)})" for e in procs],
+                 [("M4", e.id) for e in procs])]
+
+    # ------------------------------------------------------------------ on demand
+    def answer(self, question: str, smiles: str | None = None) -> str:
+        """Answer an agent's own question to the memory (the query_memory tool): results on the molecule and on
+        similar ones, related failures and diagnoses, knowledge and its verification, applicable procedures, each
+        with its reference to the Flowcept task when there is one."""
+        t0 = time.time()
+        q = self.task_query(question, [smiles] if smiles else None)
+        if smiles and chem.parses(smiles):       # the molecule asked about first, not the agent's other ones
+            key = chem.canonical(smiles)
+            q = retrieval.build_query(question, [key], self._recent_failure_classes)
+        k = self.cfg.retrieval_limit
+        found = {
+            "M1": retrieval.retrieve(self.s, "M1", q, k, keep=lambda e: e.data.get("value") is not None),
+            "M2": retrieval.retrieve(self.s, "M2", q, k, kinds=("failure", "diagnosis", "outcome")),
+            "M3": retrieval.retrieve(self.s, "M3", q, k),
+        }
+        procs = [(e, why) for e in self.s.all("M4") if (why := retrieval.applicable(e, q, self.s))][:k]
+        lines = []
+        for e, _, p in found["M1"]:
+            lines.append(f"[result {e.id}] {_with_notes(e)} (similarity {p['structure']:.2f}; "
+                         f"Flowcept task {_task(e)})")
+        for e, _, _ in found["M2"]:
+            lines.append(f"[{e.kind} {e.id}] {e.text}" + (f" (Flowcept task {_task(e)})" if _task(e) else ""))
+        for e, _, _ in found["M3"]:
+            lines.append(f"[knowledge {e.id}] {_knowledge_line(e, self.s)}")
+        for e, why in procs:
+            lines.append(f"[procedure {e.id}] {e.text} Applies because {why}. Do: {e.data['actions']}")
+        ids = {c: [e.id for e, _, _ in v] for c, v in found.items()} | {"M4": [e.id for e, _ in procs]}
+        self.s.emit("memory_query", {"agent": self.agent, "question": question[:300], "smiles": smiles,
+                                     "molecules": q.molecules, "iteration": self.iteration, "entries": ids,
+                                     "seconds": round(time.time() - t0, 3)})
+        return "\n".join(lines) if lines else "The shared memory has nothing related to this question yet."
+
+    def tool(self):
+        """The query_memory tool offered to the agent at experiment selection (LangChain StructuredTool)."""
+        from langchain_core.tools import StructuredTool
+
+        def query_memory(question: str, smiles: str = "") -> str:
+            return self.answer(question, smiles or None)
+        return StructuredTool.from_function(
+            query_memory, name="query_memory",
+            description="Ask the team's shared memory before deciding: results on a molecule and similar ones, "
+                        "failures, knowledge with its verification, procedures. Args: question (text), "
+                        "smiles (optional, the molecule you are considering).")
+
 
 def _with_notes(e) -> str:
     notes = e.data.get("notes", [])
     return e.text + (f" (WARNING: {notes[-1]['note']})" if notes else "")
 
 
-def _knowledge_line(e) -> str:
+def _task(e) -> str | None:
+    return next((r.get("task_id") for r in e.prov_refs if r.get("task_id")), None)
+
+
+def _knowledge_line(e, store: MemoryStore | None = None) -> str:
     d = e.data
-    return (f"{e.text} [{e.kind}, {d['epistemic_status']}; {len(d['supporting_evidence'])} result(s) for, "
-            f"{len(d['contradicting_evidence'])} against" + (f"; uncertain: {d['uncertainty']}" if d.get('uncertainty')
-                                                           else "") + "]")
+    ver = store.get_verification(e.id) if store is not None else None
+    return (f"{e.text} [{e.kind}, {d['epistemic_status']}; {len(d['supporting_evidence'])} result(s) cited for, "
+            f"{len(d['contradicting_evidence'])} against"
+            + (f"; uncertain: {d['uncertainty']}" if d.get('uncertainty') else "")
+            + (f"; checked against the results: {ver['verdict']} ({ver['reason']})"
+               if ver and ver.get("verdict") else "") + "]")
 
 
 def split_knowledge(text: str) -> tuple[str, list[dict]]:

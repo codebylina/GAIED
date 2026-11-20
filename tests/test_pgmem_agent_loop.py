@@ -9,6 +9,7 @@ Needs Redis (REDIS_HOST / REDIS_PORT). Run: python tests/test_pgmem_agent_loop.p
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import threading
@@ -101,6 +102,11 @@ def main() -> int:
         "recurring failure class produced a procedure (M4)": bool(store.all("M4")),
         "guidance delivered to an agent during execution": any(g.delivered for g in store.all_guidance()),
         "guidance application was assessed": any(g.applied for g in store.all_guidance()),
+        "agents consulted the memory on demand (query_memory tool)": any(
+            b.get("event") == "memory_query" for _, b in store.r.xrange(store._k("events"))),
+        "prompts received task-related results (context events with molecules)": any(
+            b.get("event") == "context" and json.loads(b["payload"])["molecules"]
+            for _, b in store.r.xrange(store._k("events"))),
     }
     # two agents with the same seed at the same time: the lock must prevent simultaneous duplicate computations
     ns2 = ns + "-parallel"

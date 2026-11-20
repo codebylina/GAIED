@@ -78,6 +78,10 @@ class OllamaLLM:
                 "Respond with ONLY a JSON object: "
                 '{"tool_calls": [{"name": "<tool>", "args": {"smiles": "<SMILES>"}}]}'
             )
+            if any(t.name == "query_memory" for t in self._tools):   # [pgmem] the memory tool takes a question
+                instruction += (
+                    '\nTo ask the shared memory first, call {"name": "query_memory", "args": {"question": "<text>", '
+                    '"smiles": "<SMILES or empty>"}}; you will get its answer before deciding.')
             for m in reversed(out):            # instruction appended to the last user message
                 if m["role"] == "user":
                     m["content"] += instruction
@@ -91,10 +95,17 @@ class OllamaLLM:
             return []
         calls = []
         default_name = self._tools[0].name if self._tools else "compute_ionization_energy"
+        names = {t.name for t in self._tools or []}
         for c in parsed.get("tool_calls", []) if isinstance(parsed, dict) else []:
             args = c.get("args") if isinstance(c, dict) else None
-            if isinstance(args, dict) and args.get("smiles"):
-                calls.append({"name": c.get("name") or default_name, "args": {"smiles": args["smiles"]}})
+            if not isinstance(args, dict):
+                continue
+            if c.get("name") == "query_memory" and "query_memory" in names and args.get("question"):
+                calls.append({"name": "query_memory", "args": {"question": str(args["question"]),
+                                                               "smiles": str(args.get("smiles") or "")}})
+            elif args.get("smiles"):
+                name = c.get("name") if c.get("name") in names else default_name
+                calls.append({"name": name, "args": {"smiles": args["smiles"]}})
         return calls
 
     # ------------------------------------------------------------------ backends
@@ -110,6 +121,8 @@ class OllamaLLM:
                 "num_ctx": int(os.environ.get("NUM_CTX", "8192")),
             },
         }
+        if os.environ.get("LLM_SEED"):          # paired runs: the same sampling seed in every condition
+            payload["options"]["seed"] = int(os.environ["LLM_SEED"])
         think = os.environ.get("OLLAMA_THINK", "false").lower()
         if think in ("true", "false"):
             payload["think"] = think == "true"
@@ -152,7 +165,8 @@ class OllamaLLM:
         if self.provider == "scripted":
             # SCRIPTED_DELAY_S: seconds per answer, to imitate a real model's latency in quick tests
             await asyncio.sleep(float(os.environ.get("SCRIPTED_DELAY_S", "0")))
-            content = scripted_answer(chat, bool(self._tools))
+            content = scripted_answer(chat, bool(self._tools),
+                                      any(t.name == "query_memory" for t in self._tools or []))
             if self._tools:
                 return _LLMResponse(content=content, tool_calls=self._parse_tool_calls(content))
             return _LLMResponse(content=content)
@@ -170,12 +184,15 @@ SCRIPTED_POOL = ["NC(N)=O", "NC(=O)C(=O)N", "C1CC", "O=C1NC(=O)NC1=O", "C1CCN", 
                  "O=C1NCC(=O)N1", "OC(=O)C(=O)O", "N#CC#N", "CC(=O)NC(N)=O", "NC(=O)NC(N)=O"]
 
 
-def scripted_answer(chat: list[dict], tools: bool) -> str:
+def scripted_answer(chat: list[dict], tools: bool, memory_tool: bool = False) -> str:
     system = next((m["content"] for m in chat if m["role"] == "system"), "")
     user = "\n".join(m["content"] for m in chat if m["role"] == "user")
     if tools:
         per_call = int(os.environ.get("SCRIPTED_PROPOSALS", "3"))
         picks = [s for s in SCRIPTED_POOL if f" {s} " not in f" {user.replace(',', ' ')} "][:per_call]
+        if memory_tool and "Answers from the shared memory" not in user and picks:   # ask once, then decide
+            return json.dumps({"tool_calls": [{"name": "query_memory", "args": {
+                "question": "Have similar molecules failed or been measured?", "smiles": picks[0]}}]})
         return json.dumps({"tool_calls": [{"name": "compute_ionization_energy", "args": {"smiles": s}}
                                           for s in picks]})
     if "Synthesize any conclusions" in system:
