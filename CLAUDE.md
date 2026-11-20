@@ -40,7 +40,8 @@
 
 ## Rules
 - Never commit `docker/.env` (API key); check with `git check-ignore docker/.env`.
-- Work on `prov-memory-analysis` (or a dedicated branch), never on `main`.
+- Work on `prov-memory-analysis-v2` (task-aware retrieval, on-demand memory, claim verification, evaluation v2;
+  `prov-memory-analysis` is the version of the first pilot), never on `main`.
 - Keep changes to Amal's code minimal and marked with a comment.
 - Everything in the repository is in English (code, comments, messages, configuration, documentation).
 - Explanations to me are given in French. I am new to Docker.

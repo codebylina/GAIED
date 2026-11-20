@@ -356,13 +356,16 @@ class MemoryClient:
         if smiles and chem.parses(smiles):       # the molecule asked about first, not the agent's other ones
             key = chem.canonical(smiles)
             q = retrieval.build_query(question, [key], self._recent_failure_classes)
-        k = self.cfg.retrieval_limit
+        k, cats = self.cfg.retrieval_limit, self.cfg.context_categories
         found = {
-            "M1": retrieval.retrieve(self.s, "M1", q, k, keep=lambda e: e.data.get("value") is not None),
-            "M2": retrieval.retrieve(self.s, "M2", q, k, kinds=("failure", "diagnosis", "outcome")),
-            "M3": retrieval.retrieve(self.s, "M3", q, k),
+            "M1": retrieval.retrieve(self.s, "M1", q, k, keep=lambda e: e.data.get("value") is not None)
+            if "M1" in cats else [],
+            "M2": retrieval.retrieve(self.s, "M2", q, k, kinds=("failure", "diagnosis", "outcome"))
+            if "M2" in cats else [],
+            "M3": retrieval.retrieve(self.s, "M3", q, k) if "M3" in cats else [],
         }
-        procs = [(e, why) for e in self.s.all("M4") if (why := retrieval.applicable(e, q, self.s))][:k]
+        procs = [(e, why) for e in self.s.all("M4") if (why := retrieval.applicable(e, q, self.s))][:k] \
+            if "M4" in cats else []
         lines = []
         for e, _, p in found["M1"]:
             lines.append(f"[result {e.id}] {_with_notes(e)} (similarity {p['structure']:.2f}; "

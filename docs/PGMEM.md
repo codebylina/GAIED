@@ -17,10 +17,12 @@ that the xTB conditions and the agent / node of each LLM call are added to exist
 |---|---|---|
 | Memory model | `pgmem/schema.py` | Entry envelope, M1-M4 constructors, guidance record, validation status of procedures |
 | Memory store | `pgmem/store.py` | Redis keyspace `pgmem:{namespace}:...`, deduplication, history, event stream, guidance |
-| Agent integration | `pgmem/agent_client.py`, `[pgmem]` lines of `mol_design_agents.py` | What an agent reads and writes at each workflow node; the per-molecule lock |
+| Agent integration | `pgmem/agent_client.py`, `[pgmem]` lines of `mol_design_agents.py` | What an agent reads and writes at each workflow node; the `query_memory` tool; the per-molecule lock |
+| Retrieval | `pgmem/retrieval.py` | Task-aware hybrid ranking (molecular structure, functional groups, words, failure class); applicability of procedures |
 | Provenance adapter | `pgmem/provenance.py` | Reads Flowcept (JSONL files, or the online Redis channel); provenance traversal |
 | Analysis agent | `pgmem/analyzer.py`, `pgmem/llm.py` | Deterministic rules, LLM interpretation labelled as candidate, guidance, post-execution report |
-| Domain helpers | `pgmem/chem.py` | Canonical SMILES, failure classes, deterministic cause confirmation, data-quality checks |
+| Claim verification | `pgmem/verification.py` | Statements of M3 checked against the reliable results of M1 (the LLM only gives the statement's structured form) |
+| Domain helpers | `pgmem/chem.py` | Canonical SMILES, failure classes, deterministic cause confirmation, data-quality checks, functional groups, fingerprint similarity |
 | Fault injection | `pgmem/faults.py` | Known-truth scenarios for the evaluation (off unless `PGMEM_FAULTS` is set) |
 | Tools | `pgmem/show.py`, `pgmem/collect.py` | Print a memory; zip a namespace with its provenance and reports |
 | Evaluation | `evaluation/` | Conditions, scenarios, series runner and metrics (see `docs/EVALUATION.md`) |
@@ -46,10 +48,41 @@ was derived from, how often it was given, applied, effective), with no threshold
 
 | Node | Memory use |
 |---|---|
-| `plan`, `critique`, `update` | `context()`: best team results (M1), relevant knowledge (M3), experiences (M2), procedures (M4), and the analysis agent's pending guidance (marked delivered) |
-| `tool_calling` | `explored()`: molecules the team measured or saw fail; `record_proposals()` |
+| `plan`, `critique`, `update` | `context()`: the memory relevant to the current task (below), and the analysis agent's pending guidance (marked delivered) |
+| `tool_calling` | `explored()`: molecules the team measured or saw fail; the `query_memory` tool, which the agent may call before deciding (at most `PGMEM_MEMORY_QUERIES` rounds); `record_proposals()` |
 | simulation | `claim_or_wait()`: reuse an existing result, or take the molecule's lock, or wait for the computation in progress; `record_result()` (M1) or `record_failure()` (M2), both with the Flowcept task id |
 | `conclude` | the agent is asked for a `KNOWLEDGE` JSON block (M3, removed from the text the workflow keeps); `record_conclusion()` writes the knowledge and the iteration's attempt (M2) |
+
+## Retrieval
+
+Memory reaches an agent in two ways (hybrid access): at fixed points of the workflow (`plan`, `critique`, `update`),
+and when the agent asks, through the `query_memory` tool at experiment selection. Both use the same task-aware
+retrieval (`pgmem/retrieval.py`).
+
+**The query is the current task**: the text of the node (the seed for `plan`, the plan for `critique`, the critique
+for `update`, the agent's question for `query_memory`), the molecules written in it, the agent's seed and recent
+proposals, and the failure classes it met in its last iteration.
+
+**Ranking.** Structured filters first (category, kind of experience), then a hybrid score: Tanimoto similarity of
+Morgan fingerprints between the task's molecules and the entry's molecules (0.4), overlap of functional groups from a
+closed vocabulary (0.25), overlap of words (0.2), same failure class (0.15). Entries with no signal are not returned.
+Embeddings of the text are not used: for molecules, structure is the meaningful similarity, and the specification
+does not ask for vector search.
+
+**What a prompt receives**, per category:
+
+| Category | Section |
+|---|---|
+| M1 | results on molecules related to the task, with their similarity; and, apart, the team's three best results for reference |
+| M2 | failures, diagnoses, outcomes of guidance, and attempts that improved (strategies that worked) |
+| M3 | related statements, with the evidence cited and the result of their verification against the measurements |
+| M4 | only procedures that apply now: their trigger (a failure class) was met in the last iteration, or the task's molecules resemble those of the experiences the procedure was derived from (similarity at least 0.4) |
+
+`query_memory(question, smiles)` answers with the results on that molecule and similar ones, related failures and
+diagnoses, statements and their verification, and applicable procedures, each with its Flowcept task id. Each
+retrieval is logged as an event (`context`, `memory_query`) with the task's molecules and the entries returned, so the
+evaluation can measure what was retrieved, whether the agent asked, and what it did next. The earlier retrieval
+(best results and keyword search) remains as an ablation (`PGMEM_RETRIEVAL=recent`).
 
 Every memory call is a few Redis operations; no agent ever waits for the analysis agent. If Redis is unavailable,
 the agent logs a warning and continues as the original GAIED.
@@ -75,6 +108,7 @@ evidence, and proposes.
 | Invalid result (impact analysis) | a result whose optimization did not converge or whose value is missing | note on the M1 entry; diagnosis listing the knowledge and procedures that cite it and the downstream Flowcept tasks; guidance to reassess them |
 | Knowledge on an unreliable result | new knowledge citing a result with a data-quality note | diagnosis |
 | Result vs knowledge | a new result in the scope of existing statements (LLM judgement) | evidence added for or against the statement (labelled candidate); on contradiction, a diagnosis and guidance |
+| Claim verification | a new statement (M3), and every new result in a statement's scope | verdict supported / contradicted / inconclusive (below); on contradiction, a diagnosis (observed fact) and guidance to the author, or to every agent when a new result causes it |
 | No improvement | two consecutive iterations of an agent without improving its best result | diagnosis; LLM advice for a change of direction |
 | Procedure no longer effective | a procedure that worked before fails in its last application | diagnosis; guidance |
 | Provenance: task error, LLM call without tool calls | Flowcept records | diagnoses |
@@ -83,6 +117,24 @@ After execution, `python -m pgmem.analyzer --post` writes a report (JSON and Mar
 Flowcept's own provenance summary and error analysis, computations (total, distinct, redundant), coordination
 (waits for a molecule being computed), procedures, strategy (attempts, improving attempts), guidance statistics, all
 findings, and the memory size.
+
+## Claim verification
+
+The LLM turns a statement into one of four checkable forms, or "none": a value ("the IE of X is about v"), a bound
+("above / below v"), a comparison ("X higher / lower than Y") or the effect of a functional group from the closed
+vocabulary ("F increases / decreases the IE"). The check is deterministic and uses only reliable results (finite
+value, converged optimization, no data-quality note):
+
+| Form | Supported when | Policy |
+|---|---|---|
+| value | the measured value is within the tolerance | 0.05 eV (xTB is deterministic for a given geometry) |
+| bound | the measured value is above / below the stated bound | |
+| comparison | the difference has the stated sign | undecided within 0.01 eV |
+| motif effect | molecules with the group have a higher / lower mean | at least 2 results in each group, Welch's |t| >= 2 |
+
+Missing or unreliable results, or no clear difference, give "inconclusive", never "contradicted". A verdict says
+whether the team's current results agree with the statement, not whether it is true. Verification records are kept
+apart from the M3 entries (linked by id), with their history, and are shown to the agents with the statements.
 
 ## Guidance tracking
 
@@ -111,7 +163,10 @@ findings, and the memory size.
 | Lock per molecule (`pgmem:{ns}:claim:{molecule}`); the other caller waits for the stored result or failure; expires after `PGMEM_CLAIM_TTL_S` (600 s) | Prevents simultaneous duplicate computations; the expiry keeps a crashed agent from blocking a molecule. Active whenever the memory is (`basic`, `structured`, `full`); `PGMEM_CLAIMS=false` disables it |
 | "Repeated" means at least two occurrences | Definition of the word, not a tuned threshold |
 | LLM only for interpretation; its outputs are labelled candidate | The deterministic rules decide what is observed; the LLM explains, judges and drafts |
-| `PGMEM_MODE`: `off` (original GAIED), `basic` (results shared, M1 only), `structured` (M1-M4), `full` (structured + guidance) | The four comparison conditions |
+| `PGMEM_MODE`: `off` (original GAIED), `basic` (results shared and reused, lock, team list at experiment selection; M1 only, no prompt sections), `structured` (M1-M4, prompt sections, `query_memory`), `full` (structured + the analysis agent's guidance) | The four comparison conditions |
+| Retrieval weights 0.4 / 0.25 / 0.2 / 0.15; procedure applicability at similarity 0.4 | Structure first for chemistry; stated, not tuned |
+| Verification tolerances (0.05 eV, 0.01 eV, 2 results per group, \|t\| >= 2) | Stated in `pgmem/verification.py`; a verdict is evidence, not truth |
+| Failure reuse only as an ablation (`PGMEM_REUSE_FAILURES`) | It is a cache of negative results; kept apart so that it does not explain the effect of the memory |
 | `tool_calling` retries at most `TOOL_CALL_RETRIES` (3) times when the LLM gives no parsable tool call (`[gaied-docker fix]`) | The original loop never ends in that case and blocks the agent for the rest of the campaign |
 
 Changes to the original GAIED code are minimal and marked: `[pgmem]` (memory hooks, xTB conditions and convergence
@@ -122,11 +177,14 @@ process: the pool worker is a fork whose Flowcept buffer is never flushed), `[ga
 
 - Effectiveness is judged only on the iteration that follows the guidance.
 - The epistemic status of knowledge is the one the agent declares; the analysis agent does not reassess it.
-- The evidence for and against a statement is the set of molecules the agent cites; nothing checks that they support
-  the statement. The analysis agent compares M3 only with new results, through an LLM judgement.
+- The evidence an agent cites for a statement is not checked as such; claim verification checks the statement against
+  all reliable results instead, but only for its four forms, and depends on the LLM's structured reading of it.
 - "Applied" measures visible behaviour (the proposals), not what the agent reasoned.
 - The same failure can give two diagnoses, one from memory, one from provenance.
-- The lock prevents simultaneous computations only: a molecule that failed can be proposed and computed again later.
+- The lock prevents simultaneous computations only: a molecule that failed can be proposed and computed again later
+  (except in the failure-reuse ablation).
+- Retrieval relevance is judged by structure (the same molecule, a similar one, a shared specific functional group),
+  not by an expert.
 - In Flowcept's online mode, the JSONL buffer only keeps the last buffer; durable provenance then needs Flowcept's
   database, which `pgmem` does not read.
 
@@ -138,6 +196,9 @@ process: the pool worker is a fork whose Flowcept buffer is never flushed), `[ga
 | `PGMEM_NAMESPACE` | `default` | memory namespace (use a new one per experiment) |
 | `REDIS_HOST`, `REDIS_PORT` | `localhost`, `6379` | Redis server |
 | `PGMEM_RETRIEVAL_LIMIT` | `5` | entries per category in a prompt |
+| `PGMEM_RETRIEVAL` | `contextual` | `contextual` (task-aware) or `recent` (earlier retrieval, ablation) |
+| `PGMEM_ON_DEMAND`, `PGMEM_MEMORY_QUERIES` | `true`, `2` | the `query_memory` tool, and its rounds per decision |
+| `PGMEM_REUSE_FAILURES` | `false` | ablation: a molecule that failed is not computed again |
 | `PGMEM_REUSE_RESULTS` | `true` | reuse a result already in M1 |
 | `PGMEM_CLAIMS`, `PGMEM_CLAIM_TTL_S` | `true`, `600` | per-molecule lock and its expiry |
 | `PGMEM_ANALYZER_LLM` | `true` | `false`: the analysis agent runs its deterministic rules only |
@@ -148,6 +209,7 @@ process: the pool worker is a fork whose Flowcept buffer is never flushed), `[ga
 | `PGMEM_ANALYSIS_SOURCES` | `memory,provenance` | sources the analysis agent analyzes (ablations; guidance tracking always runs) |
 | `TOOL_CALL_RETRIES` | `3` | retries when the LLM gives no tool call |
 | `LLM_PROVIDER=scripted` (+ `OLLAMA_MODEL=scripted`) | | scripted LLM for fast tests; `SCRIPTED_DELAY_S` imitates latency |
+| `LLM_SEED` | unset | sampling seed of the Ollama model (paired evaluation runs) |
 
 ## Running
 
@@ -174,8 +236,8 @@ to the analysis agent and campaign commands. For online provenance analysis, add
 
 | Test | Needs | Checks |
 |---|---|---|
-| `tests/test_pgmem.py` | Redis | memory store, every analysis rule, guidance tracking, lock |
-| `tests/test_pgmem_agent_loop.py` | Redis | GAIED's real agent graph with the scripted LLM and an xTB stub: memory writes, guidance, lock with parallel agents, bounded tool-call retries |
+| `tests/test_pgmem.py` | Redis | memory store, retrieval, every analysis rule, claim verification, guidance tracking, lock, fault injection |
+| `tests/test_pgmem_agent_loop.py` | Redis | GAIED's real agent graph with the scripted LLM and an xTB stub: memory writes, task-related prompts, `query_memory`, guidance, lock with parallel agents, bounded tool-call retries |
 | `tests/test_pgmem_flowcept.py` | Redis, Flowcept | Flowcept's online channel received during a run; post-execution report |
 
 ```bash

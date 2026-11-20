@@ -31,7 +31,7 @@ Check in PowerShell: `git --version`, `docker --version` and `docker compose ver
 ```powershell
 git clone https://github.com/codebylina/GAIED.git GAIED
 cd GAIED
-git switch prov-memory-analysis
+git switch prov-memory-analysis-v2
 ```
 
 ## 3. Build the image (once, 10 to 30 minutes)
@@ -103,6 +103,6 @@ With a local model on CPU a campaign can take an hour or more; a progress report
 
 ## Working with Git
 
-Work on a branch of your own, created from `prov-memory-analysis`, and open a pull request to merge it. Never commit
+Work on a branch of your own, created from `prov-memory-analysis-v2`, and open a pull request to merge it. Never commit
 `docker/.env`, a token or a key. Campaign outputs (`runinfo/`, `output/flowcept_buffer_*.jsonl`, `results/`) are
 ignored by Git.
