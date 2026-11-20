@@ -10,11 +10,8 @@ and/or a deterministic fraction (a hash of the canonical SMILES and a salt, inde
    "offset":   {"fraction": 0.2, "salt": "c", "value": -3.0}}       # wrong value (contradictory result), in eV
 
 With both "smarts" and "fraction", a molecule must match the pattern and fall in the fraction; with "smarts" only,
-every matching molecule is selected. Faults can change during a run, after a number of computations (the same point
-in every condition):
-
-  {"phases": [{"until_computations": 20, "fail": {"smarts": "C#N", "message": "SCF not converged"}},
-              {"fail": {"smarts": "[CX4](F)(F)F", "message": "SCF not converged"}}]}
+every matching molecule is selected. The evaluation runner may rewrite the file during a run to change the faults
+(a new "phase", after a number of agent iterations: the same point in every condition).
 
 Every computation and every injected fault is appended to PGMEM_FAULTS_LOG (JSONL) as ground truth; nothing about it
 is written into the provenance or the memory (the failure message is the ordinary xTB one), so neither the agents nor
@@ -73,30 +70,10 @@ def _log(kind: str, smiles: str, **kw) -> None:
                      + "\n")
 
 
-def _computations() -> int:
-    path = os.environ.get("PGMEM_FAULTS_LOG")
-    try:
-        with open(path) as fh:
-            return sum(1 for line in fh if '"fault": "computation"' in line)
-    except (OSError, TypeError):
-        return 0
-
-
-def _active(spec: dict) -> tuple[dict, int]:
-    """The faults in force now, and the phase number (0 without phases)."""
-    phases = spec.get("phases")
-    if not phases:
-        return spec, 0
-    n = _computations()
-    for i, ph in enumerate(phases):
-        if "until_computations" not in ph or n < int(ph["until_computations"]):
-            return ph, i
-    return phases[-1], len(phases) - 1
-
-
 def before(smiles: str, steps: int) -> int:
     """Called before the computation: may raise (injected failure) or shorten the optimization."""
-    f, phase = _active(_load())
+    f = _load()
+    phase = int(f.get("phase", 0))
     _log("computation", smiles, phase=phase)
     if selected(f.get("fail"), smiles):
         _log("failure", smiles, phase=phase, rule=f["fail"].get("smarts") or f["fail"].get("salt"))
@@ -110,7 +87,7 @@ def before(smiles: str, steps: int) -> int:
 
 def after(smiles: str, value: float) -> float:
     """Called after the computation: may shift the value (wrong result)."""
-    rule = _active(_load())[0].get("offset")
+    rule = _load().get("offset")
     if selected(rule, smiles):
         _log("offset", smiles, delta=float(rule.get("value", -3.0)))
         return value + float(rule.get("value", -3.0))

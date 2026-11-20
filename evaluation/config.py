@@ -1,27 +1,41 @@
 """
-Evaluation design: conditions, scenarios and series (which runs to execute).
+Evaluation design: scenarios, conditions and series (which runs to execute).
 
-Conditions follow the specification: agents without shared memory or analysis (off), with basic shared memory (basic),
-with the structured four-category memory (structured), and with structured memory plus the online cross-source
-analysis agent (full). Ablations remove memory categories from the agents' prompts, or one of the analysis agent's
-two sources.
+Scenarios cover the specification's six situations with four controlled campaigns (inefficient exploration and
+redundant computations are measured in every run):
 
-Scenarios follow the specification's list. Faults are injected by pgmem/faults.py on a deterministic fraction of the
-molecules (hash of the canonical SMILES), so that a scenario is exercised whatever molecules the LLM proposes. The
-fractions and the offset are parameters of the experimental design, stated here and in the results.
+  motif_failures          repeated technical failures, then a change of context: molecules with a nitrile fail
+                          until the agents have completed SWITCH_AFTER_ITERATIONS iterations in total (the same
+                          decision budget in every condition), then those with a CF3 group fail instead (a molecule
+                          with both fails in both phases). Covers repeated failures, learning from
+                          negative experiences, and procedures that become ineffective.
+  invalid_artifacts       30 % of the optimizations are cut after 3 steps (not converged); knowledge resting on them
+  contradictory_results   30 % of the values are shifted by -3 eV (same molecule, same conditions, a wrong value);
+                          the ground truth is the verification of the team's statements with the true values
+  redundant_computations  two agents start from the same molecule
+
+Faults are injected by pgmem/faults.py; the failure message is xTB's ordinary one and nothing about the injection
+reaches the provenance or the memory, so the agents and the analysis agent can only discover the patterns. The
+fractions, offset, motifs and switch point are parameters of the design, reported with the results.
+
+Conditions: the specification's four (off, basic, structured, full) and ablations of full. Every condition of a
+repetition uses the same LLM sampling seed (paired runs).
 """
 from __future__ import annotations
 
 DIFFERENT_SEEDS = "CNC(N)=O,CC1=C(O)N=C(O)N1"     # GAIED's default seeds: two agents exploring different regions
 SAME_SEEDS = "CNC(N)=O,CNC(N)=O"                  # two agents starting from the same molecule
+SWITCH_AFTER_ITERATIONS = 4                       # iterations of all agents before the failing motif changes
+NITRILE, CF3 = "C#N", "[CX4](F)(F)F"
 
 SCENARIOS: dict[str, dict] = {
-    "repeated_failures": {
-        "seeds": DIFFERENT_SEEDS,
-        "faults": {"fail": {"fraction": 0.3, "salt": "repeated", "message": "SCF not converged"}},
+    "motif_failures": {
+        "seeds": DIFFERENT_SEEDS, "max_iterations": 5,
+        "faults": {"phase": 0, "fail": {"smarts": NITRILE, "message": "SCF not converged"}},
+        "switch": {"after_iterations": SWITCH_AFTER_ITERATIONS,
+                   "faults": {"phase": 1, "fail": {"smarts": CF3, "message": "SCF not converged"}}},
+        "motifs": [NITRILE, CF3],
     },
-    "redundant_computations": {"seeds": SAME_SEEDS, "faults": {}},
-    "inefficient_exploration": {"seeds": DIFFERENT_SEEDS, "faults": {}},
     "invalid_artifacts": {
         "seeds": DIFFERENT_SEEDS,
         "faults": {"truncate": {"fraction": 0.3, "salt": "artifacts", "steps": 3}},
@@ -30,39 +44,38 @@ SCENARIOS: dict[str, dict] = {
         "seeds": DIFFERENT_SEEDS,
         "faults": {"offset": {"fraction": 0.3, "salt": "contradiction", "value": -3.0}},
     },
-    # phase 1: a failure pattern the analysis agent turns into a procedure; once that procedure has been effective,
-    # the failing molecules change (phase 2), so applying the procedure no longer prevents failures
-    "ineffective_procedure": {
-        "seeds": DIFFERENT_SEEDS,
-        "faults": {"fail": {"fraction": 0.3, "salt": "phase1", "message": "SCF not converged"}},
-        "switch_when_procedure_effective": {"fail": {"fraction": 0.3, "salt": "phase2",
-                                                     "message": "SCF not converged"}},
-    },
+    "redundant_computations": {"seeds": SAME_SEEDS, "faults": {}},
 }
 
 CONDITIONS: dict[str, dict] = {
+    # what each condition changes (see docs/EVALUATION.md for the exact differences)
     "off": {"env": {"PGMEM_MODE": "off"}, "analyzer": False},
     "basic": {"env": {"PGMEM_MODE": "basic"}, "analyzer": False},
     "structured": {"env": {"PGMEM_MODE": "structured"}, "analyzer": False},
     "full": {"env": {"PGMEM_MODE": "full"}, "analyzer": True},
-    # ablations of the full condition
+    # ablations of full
     "full-no-M3": {"env": {"PGMEM_MODE": "full", "PGMEM_CONTEXT_CATEGORIES": "M1,M2,M4"}, "analyzer": True},
     "full-no-M2-M4": {"env": {"PGMEM_MODE": "full", "PGMEM_CONTEXT_CATEGORIES": "M1,M3"}, "analyzer": True},
     "full-memory-only": {"env": {"PGMEM_MODE": "full", "PGMEM_ANALYSIS_SOURCES": "memory"}, "analyzer": True},
     "full-provenance-only": {"env": {"PGMEM_MODE": "full", "PGMEM_ANALYSIS_SOURCES": "provenance"}, "analyzer": True},
+    "full-scheduled-only": {"env": {"PGMEM_MODE": "full", "PGMEM_ON_DEMAND": "false"}, "analyzer": True},
+    "full-recent-retrieval": {"env": {"PGMEM_MODE": "full", "PGMEM_RETRIEVAL": "recent"}, "analyzer": True},
+    "full-failure-reuse": {"env": {"PGMEM_MODE": "full", "PGMEM_REUSE_FAILURES": "true"}, "analyzer": True},
 }
 
 MAIN_CONDITIONS = ["off", "basic", "structured", "full"]
-ABLATIONS = ["full-no-M3", "full-no-M2-M4", "full-memory-only", "full-provenance-only"]
+ABLATIONS = ["full-no-M3", "full-no-M2-M4", "full-memory-only", "full-provenance-only", "full-scheduled-only",
+             "full-recent-retrieval", "full-failure-reuse"]
 
-# llm: "scripted" (no model, minutes) or "ollama" (the model given by OLLAMA_URL / OLLAMA_MODEL in the environment)
+# llm: "scripted" (no model, minutes) or "ollama" (the model given by OLLAMA_URL / OLLAMA_MODEL in the environment);
+# max_iterations applies unless a scenario sets its own
 SERIES: dict[str, dict] = {
     "smoke": {"llm": "scripted", "scenarios": list(SCENARIOS), "conditions": MAIN_CONDITIONS + ABLATIONS,
               "repetitions": 1, "max_iterations": 3},
-    "pilot": {"llm": "ollama", "scenarios": list(SCENARIOS), "conditions": MAIN_CONDITIONS,
-              "repetitions": 1, "max_iterations": 3},
+    "pilot2": {"llm": "ollama", "scenarios": list(SCENARIOS), "conditions": MAIN_CONDITIONS,
+               "repetitions": 1, "max_iterations": 3},
     "main": {"llm": "ollama", "scenarios": list(SCENARIOS), "conditions": MAIN_CONDITIONS,
-             "repetitions": 3, "max_iterations": 3},
+             "repetitions": 5, "max_iterations": 3},
     "ablations": {"llm": "ollama", "scenarios": list(SCENARIOS), "conditions": ABLATIONS,
-                  "repetitions": 1, "max_iterations": 3},
+                  "repetitions": 2, "max_iterations": 3},
 }

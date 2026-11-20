@@ -181,7 +181,8 @@ class OllamaLLM:
 # ---------------------------------------------------------------------------------------------- scripted model
 # Molecules proposed by the scripted model, in order; "C1CC" and "C1CCN" are invalid SMILES (technical failures).
 SCRIPTED_POOL = ["NC(N)=O", "NC(=O)C(=O)N", "C1CC", "O=C1NC(=O)NC1=O", "C1CCN", "CC(N)=O", "NC#N",
-                 "O=C1NCC(=O)N1", "OC(=O)C(=O)O", "N#CC#N", "CC(=O)NC(N)=O", "NC(=O)NC(N)=O"]
+                 "O=C1NCC(=O)N1", "OC(=O)C(=O)O", "N#CC#N", "CC(=O)NC(N)=O", "NC(=O)NC(N)=O", "NC(=O)C(F)(F)F",
+                 "OC(=O)C(F)(F)F"]
 
 
 def scripted_answer(chat: list[dict], tools: bool, memory_tool: bool = False) -> str:

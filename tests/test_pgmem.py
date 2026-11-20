@@ -510,22 +510,25 @@ def test_failures_are_reused_only_in_the_ablation():
         assert "not computed again" in str(exc)
 
 
-def test_faults_change_after_a_number_of_computations():
+def test_faults_follow_the_file_rewritten_during_a_run():
     import tempfile
     from pgmem import faults
-    log = tempfile.mktemp()
-    os.environ["PGMEM_FAULTS_LOG"] = log
-    os.environ["PGMEM_FAULTS"] = json.dumps({"phases": [
-        {"until_computations": 2, "fail": {"smarts": "C#N"}}, {"fail": {"smarts": "[CX4](F)(F)F"}}]})
+    log, spec = tempfile.mktemp(), tempfile.mktemp()
+    json.dump({"phase": 0, "fail": {"smarts": "C#N"}}, open(spec, "w"))
+    os.environ.update({"PGMEM_FAULTS_LOG": log, "PGMEM_FAULTS": spec})
     try:
-        out = []
-        for smi in ["CC#N", "CCO", "CC#N", "CC(F)(F)F"]:
+        def run(smi):
             try:
                 faults.before(smi, 10)
-                out.append("ok")
+                return "ok"
             except RuntimeError as exc:
-                out.append(str(exc))
-        assert out == ["SCF not converged", "ok", "ok", "SCF not converged"], out
+                return str(exc)
+        first = [run("CC#N"), run("CC(F)(F)F")]
+        json.dump({"phase": 1, "fail": {"smarts": "[CX4](F)(F)F"}}, open(spec, "w"))
+        second = [run("CC#N"), run("CC(F)(F)F")]
+        assert first == ["SCF not converged", "ok"] and second == ["ok", "SCF not converged"], (first, second)
+        logged = [json.loads(x) for x in open(log)]
+        assert [x["phase"] for x in logged if x["fault"] == "computation"] == [0, 0, 1, 1]
     finally:
         os.environ.pop("PGMEM_FAULTS")
         os.environ.pop("PGMEM_FAULTS_LOG")

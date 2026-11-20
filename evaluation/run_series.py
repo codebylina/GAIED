@@ -7,7 +7,7 @@ each, one after the other, each in its own memory namespace. Meant to run inside
     python -m evaluation.run_series main --only full           # a subset of conditions
 
 For each run, results/eval/<series>/<run id>/ receives: meta.json, campaign.log, analyzer.log, flowcept_settings.yaml,
-faults.json and faults.jsonl (injected faults: the ground truth), provenance.jsonl (every Flowcept record published
+faults.json and faults.jsonl (every computation and injected fault: the ground truth), provenance.jsonl (every Flowcept record published
 during the run), memory.json and events.json (the memory at the end), and the post-execution report when the
 analysis agent ran. A run whose meta.json says "ok" is skipped, so an interrupted series can be resumed.
 
@@ -42,6 +42,7 @@ class ProvenanceRecorder:
 
     def __init__(self, path: str, channel: str = "interception") -> None:
         self.path, self.n = path, 0
+        self.iterations: set[str] = set()            # LangGraph should_continue nodes seen: completed iterations
         self._r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
         self._ps = self._r.pubsub(ignore_subscribe_messages=True)
         self._ps.psubscribe(channel)
@@ -67,6 +68,8 @@ class ProvenanceRecorder:
                     if isinstance(r, dict):
                         fh.write(json.dumps(r, default=str) + "\n")
                         self.n += 1
+                        if r.get("subtype") == "langgraph_node" and r.get("activity_id") == "should_continue":
+                            self.iterations.add(str(r.get("task_id")))
                 fh.flush()
 
     def close(self) -> None:
@@ -110,18 +113,19 @@ def drain(store: MemoryStore, timeout_s: float) -> bool:
     return False
 
 
-def watch_procedure(store: MemoryStore, faults_path: str, switch: dict, meta: dict, stop: threading.Event) -> None:
-    """Scenario "ineffective_procedure": change the injected faults once a procedure has been effective."""
-    while not stop.wait(3):
-        for m4 in store.all("M4"):
-            if any(a.get("effective") is True for a in m4.data.get("applications", [])):
-                faults = json.load(open(faults_path))
-                faults.update(switch)
-                with open(faults_path, "w") as fh:
-                    json.dump(faults, fh)
-                meta["fault_switch_at"] = time.time()
-                meta["fault_switch_procedure"] = m4.id
-                return
+def watch_switch(recorder: ProvenanceRecorder, faults_path: str, faults_log: str, switch: dict, meta: dict,
+                 stop: threading.Event) -> None:
+    """Change the injected faults once the agents have completed a given number of iterations."""
+    while not stop.wait(1):
+        if len(recorder.iterations) >= switch["after_iterations"]:
+            with open(faults_path, "w") as fh:
+                json.dump(switch["faults"], fh)
+            meta["fault_switch_at"] = time.time()
+            with open(faults_log, "a") as fh:
+                fh.write(json.dumps({"t": meta["fault_switch_at"], "fault": "switch",
+                                     "phase": switch["faults"].get("phase"),
+                                     "iterations": len(recorder.iterations)}) + "\n")
+            return
 
 
 def run_one(series: str, cfg: dict, scenario: str, condition: str, rep: int, out_root: str) -> dict:
@@ -144,9 +148,14 @@ def run_one(series: str, cfg: dict, scenario: str, condition: str, rep: int, out
     faults_log = os.path.join(run_dir, "faults.jsonl")
     open(faults_log, "w").close()
 
+    max_iterations = sc.get("max_iterations", cfg["max_iterations"])
     env = {**os.environ, **cond["env"], "PGMEM_NAMESPACE": namespace, "SEEDS": sc["seeds"],
-           "MAX_ITERATIONS": str(cfg["max_iterations"]), "FLOWCEPT_SETTINGS_PATH": flowcept_settings(run_dir),
-           "PGMEM_FAULTS": faults_path, "PGMEM_FAULTS_LOG": faults_log, "PYTHONPATH": os.pathsep.join(x for x in (ROOT, os.path.join(ROOT, "docker"), os.environ.get("PYTHONPATH")) if x)}
+           "MAX_ITERATIONS": str(max_iterations),
+           "LLM_SEED": str(1000 + rep),                     # paired runs: the same sampling seed in every condition
+           "FLOWCEPT_SETTINGS_PATH": flowcept_settings(run_dir),
+           "PGMEM_FAULTS": faults_path, "PGMEM_FAULTS_LOG": faults_log,
+           "PYTHONPATH": os.pathsep.join(x for x in (ROOT, os.path.join(ROOT, "docker"), os.environ.get("PYTHONPATH"))
+                                         if x)}
     if not sc["faults"]:
         env.pop("PGMEM_FAULTS")
     if cfg["llm"] == "scripted":
@@ -154,20 +163,21 @@ def run_one(series: str, cfg: dict, scenario: str, condition: str, rep: int, out
                     "SCRIPTED_DELAY_S": env.get("SCRIPTED_DELAY_S", "1")})
     meta = {"series": series, "run_id": run_id, "scenario": scenario, "condition": condition, "repetition": rep,
             "namespace": namespace, "seeds": sc["seeds"], "faults": sc["faults"], "llm": cfg["llm"],
-            "model": env.get("OLLAMA_MODEL") or env.get("LLM_MODEL"), "max_iterations": cfg["max_iterations"],
+            "model": env.get("OLLAMA_MODEL") or env.get("LLM_MODEL"), "max_iterations": max_iterations,
+            "llm_seed": env["LLM_SEED"], "motifs": sc.get("motifs"),
             "git_commit": git_commit(), "started_at": time.time(), "status": "running"}
     json.dump(meta, open(meta_path, "w"), indent=1)
     print(f"run {run_id} (namespace {namespace})", flush=True)
 
     recorder = ProvenanceRecorder(os.path.join(run_dir, "provenance.jsonl"))
+    stop_watch = threading.Event()
+    if "switch" in sc:
+        threading.Thread(target=watch_switch, daemon=True,
+                         args=(recorder, faults_path, faults_log, sc["switch"], meta, stop_watch)).start()
     analyzer = None
     if cond["analyzer"]:
         analyzer = subprocess.Popen([sys.executable, "-m", "pgmem.analyzer"], cwd=ROOT, env=env,
                                     stdout=open(os.path.join(run_dir, "analyzer.log"), "w"), stderr=subprocess.STDOUT)
-    stop_watch = threading.Event()
-    if "switch_when_procedure_effective" in sc:
-        threading.Thread(target=watch_procedure, daemon=True,
-                         args=(store, faults_path, sc["switch_when_procedure_effective"], meta, stop_watch)).start()
     timeout = float(os.environ.get("EVAL_CAMPAIGN_TIMEOUT_S", "5400"))
     try:
         with open(os.path.join(run_dir, "campaign.log"), "w") as log:
