@@ -1,4 +1,5 @@
-"""Domain helpers for the GAIED case study: molecule identity and classification of technical failures."""
+"""Chemistry for the GAIED case study: molecule identity, functional groups, similarity, failure classes and the
+data quality of a result. pgmem/domain.py exposes it to the memory through the domain interface."""
 from __future__ import annotations
 
 import math
@@ -55,8 +56,8 @@ def data_quality_issues(value, conditions: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------------------------- structure
-# A closed vocabulary of functional groups and structural motifs, used to compare molecules (retrieval), to state
-# motif effects (claim verification) and to judge retrieval relevance (evaluation). Names are what the LLM may use.
+# A closed vocabulary of functional groups and structural motifs: motif nodes of the memory graph, motif effects in
+# claim verification, relevance in the evaluation. Names are what the LLM may use.
 FEATURES: dict[str, str] = {
     "nitrile": "C#N",
     "trifluoromethyl": "[CX4](F)(F)F",
@@ -77,6 +78,8 @@ FEATURES: dict[str, str] = {
     "ring": "[R]",
     "heteroaromatic_nitrogen": "n",
 }
+# groups present in most small organic molecules: they do not characterize a molecule, so they get no motif node
+GENERIC = {"fluorine", "ring", "carbonyl", "alkene", "aromatic_ring"}
 _PATTERNS = None
 
 

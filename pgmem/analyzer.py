@@ -1,25 +1,29 @@
 """
-Independent analysis agent: reads Flowcept provenance and the shared memory (M1-M4), detects problems, writes its
-findings to memory (M2 diagnoses, notes, evidence, M4 procedures) and sends guidance to the scientific agents.
+Independent analysis agent: reads Flowcept provenance and the memory graph, detects problems, writes its findings
+(M2 diagnoses, M4 procedures, verdicts, edges) and sends guidance to the scientific agents. It reads and writes the
+graph directly, rule by rule; it never rewrites an entry.
 
 Separate process, never on the agents' critical path:
     python -m pgmem.analyzer                      online: memory events + Flowcept provenance, until stopped
-    python -m pgmem.analyzer --post [--out DIR]   post-execution analysis of the campaign and of the memory
+    python -m pgmem.analyzer --post [--out DIR]   post-execution report of the campaign and of the memory
 
-Event processing
-  selection     memory events from the agents (results, failures, proposals, attempts, knowledge, deliveries) and
-                the Flowcept records listed in provenance.RELEVANT_SUBTYPES; everything else is ignored
-  processing    deterministic rules first; the LLM only for interpretation (candidate explanations, comparing a result
-                with knowledge statements, advice, drafting procedures)
-  deduplication a memory event is acknowledged only once processed (Redis consumer group) and recorded as done;
-                a Flowcept record is processed once per task_id
-  linking       every finding carries the memory entry ids and Flowcept task ids it is based on
-  durability    an event whose processing fails (e.g. LLM unavailable) stays pending and is retried; a stopped
-                analysis agent resumes from the pending events and re-reads the provenance files
+Rules, by event (deterministic first; the LLM only to interpret: put a statement in a checkable form, propose an
+explanation, draft a procedure, advise a change of direction):
+  result     redundant computation; data quality, and the impact analysis of an unreliable result (what rests on
+             it, through IMPACT edges, up to PGMEM_ANALYSIS_DEPTH); verdicts of the statements in its scope
+  failure    repeated failure of a molecule (cause confirmed by RDKit when it cannot read the SMILES); recurring
+             failures of one class on molecules sharing a motif (graph: failure -> molecule -> motif -> other
+             molecules -> their failures), with a candidate explanation, a procedure for that class and motif, and the
+             procedure applied when it already exists
+  knowledge  a statement resting on an unreliable result; its verdict, and what rests on it when it is contradicted
+  proposals  proposals of molecules the team already measured or saw fail
+  attempt    whether the guidance an agent received was applied and effective (APPLIED_IN edges); a procedure that
+             worked before and no longer does; two iterations without improvement
+  provenance redundant computations, LLM calls without tool calls, tasks in error (Flowcept records)
 
-Every finding states its problem type (technical_failure, data_quality, workflow, scientific_contradiction) and its
-basis (observed_fact, candidate_explanation, confirmed_cause). The analysis agent never establishes scientific truth
-and never overwrites an entry: it adds diagnoses, notes and evidence, and proposes.
+Processing: a memory event is acknowledged once processed (Redis consumer group) and recorded as done; an event
+whose processing fails (e.g. LLM unavailable) stays pending and is retried. A Flowcept record is processed once per
+task id; the records received online are counted, so a loss on Flowcept's channel is visible in the evaluation.
 """
 from __future__ import annotations
 
@@ -29,15 +33,17 @@ import logging
 import os
 import socket
 import time
-from collections import Counter, defaultdict
+from collections import Counter
 
 import redis
 
 from . import chem, verification
 from .config import Config
-from .llm import DRAFT_PROCEDURE, EXPLAIN_FAILURES, JUDGE_RESULT, SUGGEST_DIRECTION, AnalysisLLM
+from .domain import DOMAIN
+from .llm import DRAFT_PROCEDURE, EXPLAIN_FAILURES, SUGGEST_DIRECTION, AnalysisLLM
 from .provenance import ProvenanceIndex, as_dict, is_computation, make_source, smiles_of
-from .schema import Entry, Guidance, experience, procedure, validation_status
+from .retrieval import describe, procedure_history, unreliable
+from .schema import Entry, Guidance, diagnosis, molecule_node, motif_node, procedure
 from .store import MemoryStore
 
 log = logging.getLogger("pgmem.analyzer")
@@ -56,16 +62,18 @@ def _as_text(v) -> str:
 class Analyzer:
     def __init__(self, store: MemoryStore, cfg: Config, llm: AnalysisLLM | None = None, source=None,
                  consumer: str | None = None) -> None:
-        self.s, self.cfg = store, cfg
+        self.s, self.g, self.cfg = store, store.graph, cfg
         self.llm = llm if (llm is not None or not cfg.analyzer_llm) else AnalysisLLM()
         self.source = source
         self.index: ProvenanceIndex = source.index if source is not None else ProvenanceIndex()
-        self.stream = store._k("events")
-        self.group = cfg.analyzer_group
+        self.stream, self.group = store._k("events"), cfg.analyzer_group
         self.consumer = consumer or f"{socket.gethostname()}-{os.getpid()}"
-        self.stats = Counter()
+        self.stats_key = store._k("analyzer", "stats")
+        self.count_provenance = True           # records received during the run (provenance coverage)
+        if source is not None:                 # 0 until records arrive: "none received" differs from "not measured"
+            store.r.hsetnx(self.stats_key, "provenance_records", 0)
         try:
-            self.s.r.xgroup_create(self.stream, self.group, id="0", mkstream=True)
+            store.r.xgroup_create(self.stream, self.group, id="0", mkstream=True)
         except redis.exceptions.ResponseError as exc:
             if "BUSYGROUP" not in str(exc):
                 raise
@@ -78,15 +86,16 @@ class Analyzer:
         claimed = self.s.r.xautoclaim(self.stream, self.group, self.consumer, min_idle_time=retry_idle_ms,
                                       start_id="0-0", count=50)
         msgs = list(claimed[1]) if claimed else []
-        new = self.s.r.xreadgroup(self.group, self.consumer, {self.stream: ">"}, count=50, block=block_ms)
-        for _, batch in new or []:
+        for _, batch in self.s.r.xreadgroup(self.group, self.consumer, {self.stream: ">"}, count=50,
+                                            block=block_ms) or []:
             msgs.extend(batch)
         for msg_id, fields in msgs:
-            if self._handle_event(msg_id, fields):
-                n += 1
+            n += self._handle_event(msg_id, fields)
         if self.source is not None:
             for rec in self.source.poll():
                 self._on_provenance(rec)
+                if self.count_provenance:
+                    self.s.r.hincrby(self.stats_key, "provenance_records", 1)
                 n += 1
         return n
 
@@ -99,14 +108,12 @@ class Analyzer:
         try:
             self._on_event(fields.get("event", ""), json.loads(fields.get("payload") or "{}"))
         except Exception as exc:  # noqa: BLE001 - kept pending, retried later: no analysis work is lost
-            self.stats["failed_attempts"] += 1
             log.warning("event %s left pending (%s: %s)", msg_id, type(exc).__name__, exc)
             return False
-        finally:   # overhead of the analysis agent, kept in Redis for the evaluation
-            self.s.r.hincrbyfloat(self.s._k("analyzer", "stats"), "event_seconds", time.time() - t0)
+        finally:   # overhead of the analysis agent, kept for the evaluation
+            self.s.r.hincrbyfloat(self.stats_key, "event_seconds", time.time() - t0)
         self.s.r.sadd(done, msg_id)
         self.s.r.xack(self.stream, self.group, msg_id)
-        self.stats["events"] += 1
         return True
 
     def run_forever(self, idle_s: float = 0.5) -> None:
@@ -115,430 +122,424 @@ class Analyzer:
             if not self.step():
                 time.sleep(idle_s)
 
-    # ================================================================== dispatch
     def _on_event(self, event: str, p: dict) -> None:
-        """Analysis rules on memory events, and the tracking of guidance (kept in every configuration, since it is
-        how interventions are measured). Without the "memory" source (ablation) only the tracking runs."""
+        """Rules on memory events, and the judgement of guidance (kept in every configuration: it is how the
+        interventions are measured). Without the "memory" source (ablation) only the judgement runs."""
         rules = "memory" in self.cfg.analysis_sources
-        handlers = {"result": [self._on_result, self._reverify_for_result] if rules else [],
-                    "failure": [self._on_failure] if rules else [],
-                    "knowledge": [self._on_knowledge, self._verify_knowledge] if rules else [],
-                    "proposals": ([self._on_proposals] if rules else []) + [self._track_application],
-                    "attempt": [self._track_effectiveness] + ([self._on_attempt] if rules else [])}
-        for handler in handlers.get(event, []):
+        handlers = {"result": [self._on_result], "failure": [self._on_failure], "knowledge": [self._on_knowledge],
+                    "proposals": [self._on_proposals], "attempt": [self._on_attempt]}
+        if event == "attempt":
+            self._judge_guidance(p)
+        for handler in handlers.get(event, []) if rules else []:
             handler(p)
 
-    # ================================================================== helpers
+    # ================================================================== findings, guidance, investigation
     def _fired(self, rule: str, key: str) -> str | None:
-        """The M2 diagnosis already written for this rule and key, if any (one diagnosis per problem; later
-        occurrences are added to it)."""
         return self.s.r.hget(self.s._k("analyzer", "fired"), f"{rule}|{key}")
 
-    def _diagnose(self, rule: str, key: str, text: str, problem_type: str, basis: str, refs: list[str],
-                  prov_refs: list[dict], context: dict | None = None) -> tuple[str, bool]:
-        """Write (or extend) the M2 diagnosis of a problem. Returns (id, new)."""
-        prev = self._fired(rule, key)
-        if prev:
-            old = self.s.get(prev)
-            new_refs = [r for r in refs if r not in old.refs]
-            new_prov = [p for p in prov_refs if p not in old.prov_refs]
-            if new_refs or new_prov:            # a new occurrence only when new evidence is involved
+    def _diagnose(self, rule: str, key: str, text: str, problem_type: str, status: str, based_on: list[str],
+                  prov_refs: list[dict] | None = None, context: dict | None = None,
+                  about: str | None = None) -> tuple[str, bool]:
+        """The diagnosis of a problem, linked to what it is based on (DIAGNOSED_FROM). One diagnosis per rule and
+        key: a later occurrence adds the new evidence to it. Returns (id, new)."""
+        did = self._fired(rule, key)
+        new = did is None
+        if new:
+            did, _ = self.s.add(diagnosis(rule, key, text, problem_type, status, ME, context, prov_refs,
+                                          self.cfg.campaign_id))
+            self.s.r.hset(self.s._k("analyzer", "fired"), f"{rule}|{key}", did)
+            if about is None and DOMAIN.valid(key) and self.s.exists(molecule_node(key)):
+                about = molecule_node(key)       # a diagnosis keyed by a molecule is about it
+            if about:
+                self.s.link(did, about, "ABOUT", ME)
+        for node in dict.fromkeys(based_on):
+            if self.s.exists(node):
+                self.s.link(did, node, "DIAGNOSED_FROM", ME)
+        return did, new
 
-                def fn(e: Entry) -> None:
-                    e.refs.extend(new_refs)
-                    e.prov_refs.extend(new_prov)
-                    e.data["outcome"]["occurrences"] = e.data["outcome"].get("occurrences", 1) + 1
-                self.s.update(prev, ME, "new occurrence", fn)
-            return prev, False
-        e = experience("diagnosis", text, ME, key=key, context={"rule": rule, **(context or {})},
-                       outcome={"occurrences": 1}, prov_refs=prov_refs, refs=refs, problem_type=problem_type,
-                       basis=basis, campaign_id=self.cfg.campaign_id)
-        eid, _ = self.s.add(e, dedup=False)
-        self.s.r.hset(self.s._k("analyzer", "fired"), f"{rule}|{key}", eid)
-        self.stats[f"finding:{rule}"] += 1
-        return eid, True
-
-    def _guide(self, message: str, problem_type: str | None, basis: str, evidence: list[str], prov_refs: list[dict],
-               target: str = "*", check: dict | None = None, procedure_id: str | None = None) -> str | None:
+    def _guide(self, message: str, problem_type: str | None, status: str, applies: list[str], target: str = "*",
+               check: dict | None = None) -> str | None:
+        """Guidance to an agent (or "*"), linked to the diagnoses and procedures it applies (APPLIES)."""
         if not self.cfg.guidance:
             return None
-        g = Guidance(message=message, problem_type=problem_type, basis=basis, target=target, evidence=evidence,
-                     prov_refs=prov_refs, check=check or {}, procedure_id=procedure_id)
-        self.stats["guidance"] += 1
-        return self.s.add_guidance(g)
+        gid = self.s.add_guidance(Guidance(message, problem_type, status, target, check or {}))
+        for node in applies:
+            if node.startswith(("m2:", "m4:")):
+                self.s.link(gid, node, "APPLIES", ME)
+        return gid
 
     def _llm_json(self, system: str, user: str) -> dict:
         if self.llm is None:
             return {}
-        self.s.r.hincrby(self.s._k("analyzer", "stats"), "llm_calls", 1)
+        self.s.r.hincrby(self.stats_key, "llm_calls", 1)
         return self.llm.ask_json(system, user)       # an exception leaves the event pending
 
-    # ================================================================== rules on memory events
+    def investigate(self, node: str, depth: int = 2, limit: int = 20) -> str:
+        """A bounded subgraph around a node, as text for the LLM: each node reached, the relation and direction of
+        the last edge of its path, and its description."""
+        lines = [f"{node}: {self._label(node)}"]
+        for r in self.g.traverse(node, "both", None, depth, limit):
+            e = r.path[-1]
+            arrow = f"--{e['type']}-->" if e["target"] == r.node else f"<--{e['type']}--"
+            lines.append(f"{'  ' * r.depth}{arrow} {r.node}: {self._label(r.node)}"
+                         + (" (proposed by an LLM)" if e["origin"] == "llm" else ""))
+        return "\n".join(lines)
+
+    def _label(self, node: str) -> str:
+        if node.startswith(("mol:", "motif:")):
+            return node.split(":", 1)[1]
+        if node.startswith("g:"):
+            g = self.s.get_guidance(node)
+            return f"guidance: {g.message[:160]}" if g else node
+        e = self.s.get(node)
+        return describe(self.s, e)[:240] if e else node
+
+    def _impact(self, node: str) -> list[dict]:
+        """What rests on a node (the impact analysis): each dependent entry or guidance, how far, through which
+        relations."""
+        return [{"node": r.node, "depth": r.depth, "via": [e["type"] for e in r.path]}
+                for r in self.g.dependents(node, self.cfg.analysis_depth)]
+
+    def _impact_text(self, impact: list[dict]) -> str:
+        items = [d for d in impact if d["node"].startswith(("m3:", "m4:"))][:4]
+        return "; ".join(f"{'directly' if d['depth'] == 1 else 'indirectly'}: {self._label(d['node'])[:140]}"
+                         for d in items)
+
+    # ================================================================== results
     def _on_result(self, p: dict) -> None:
         m1 = self.s.get(p["entry"])
         if m1 is None:
             return
         key = m1.key
-        # 1. redundant computations: the same molecule computed more than once (memory and provenance)
-        computed = [r for e in self.s.by_key("M1", key) for r in e.prov_refs if r.get("task_id")]
+        # redundant computations: the same molecule computed more than once (memory and provenance); one computation
+        # appears in Flowcept as a tool_call and a parsl_task: count the parsl_task records, as the memory does
+        computed = {r["task_id"] for e in self.s.by_key("M1", key) for r in e.prov_refs if r.get("task_id")}
         camp = {r.get("campaign_id") for r in m1.prov_refs}
-        # one computation appears in Flowcept as a tool_call and as a parsl_task: count the parsl_task records,
-        # whose task ids are the ones memory entries reference
-        prov_runs = [r for r in self.index.computations() if chem.canonical(smiles_of(r) or "") == key
-                     and r.get("campaign_id") in camp and r.get("subtype") == "parsl_task"]
-        task_ids = {r["task_id"] for r in computed} | {r["task_id"] for r in prov_runs}
-        if len(task_ids) > 1:
-            refs = [e.id for e in self.s.by_key("M1", key)]
-            _, new = self._diagnose("redundant_computation", key,
-                                    f"{key} was computed {len(task_ids)} times", "workflow", "observed_fact",
-                                    refs, [{"task_id": t} for t in sorted(task_ids)])
+        computed |= {r["task_id"] for r in self.index.computations() if r.get("subtype") == "parsl_task"
+                     and r.get("campaign_id") in camp and chem.canonical(smiles_of(r) or "") == key}
+        if len(computed) > 1:
+            results = [e.id for e in self.s.by_key("M1", key)]
+            did, new = self._diagnose("redundant_computation", key, f"{key} was computed {len(computed)} times",
+                                      "workflow", "observation", results, [{"task_id": t} for t in sorted(computed)])
             if new:
                 self._guide(f"{key} has already been computed ({m1.text}); do not compute it again.", "workflow",
-                            "observed_fact", refs, m1.prov_refs, check={"avoid_keys": [key]})
-        # 2. data quality of the result: invalid or incomplete artifact, and what depends on it
+                            "observation", [did], check={"avoid_keys": [key]})
         issues = chem.data_quality_issues(m1.data.get("value"), m1.data.get("conditions", {}))
         if issues:
             self._data_quality(m1, issues)
-        # 3. compare the new result with existing knowledge
-        if self.cfg.structured and not issues:
-            self._compare_with_knowledge(m1)
+        if self.cfg.structured:
+            self._reverify(m1)
 
     def _data_quality(self, m1: Entry, issues: list[str]) -> None:
-        affected = self.s.citing(m1.id)
-        tids = [r["task_id"] for r in m1.prov_refs if r.get("task_id")]
-        downstream = [d for t in tids for d in self.index.downstream(t)]
+        impact = self._impact(m1.id)
+        downstream = [{"task_id": d["task_id"], "activity_id": d.get("activity_id")}
+                      for r in m1.prov_refs if r.get("task_id") for d in self.index.downstream(r["task_id"])]
+        rests = [d for d in impact if d["node"].startswith(("m3:", "m4:"))]
         text = f"Result {m1.text} is unreliable: {'; '.join(issues)}"
-        if affected:
-            text += f"; {len(affected)} knowledge/procedure entr(ies) rely on it and should be reassessed"
-        did, new = self._diagnose("invalid_artifact", m1.id, text, "data_quality", "observed_fact",
-                                  [m1.id] + [a.id for a in affected], m1.prov_refs,
-                                  context={"issues": issues, "affected": [a.id for a in affected],
-                                           "downstream_tasks": [{"task_id": d["task_id"],
-                                                                 "activity_id": d.get("activity_id")}
-                                                                for d in downstream]})
+        if rests:
+            text += f"; {len(rests)} statement(s) or procedure(s) rest on it"
+        did, new = self._diagnose("invalid_artifact", m1.id, text, "data_quality", "observation", [m1.id],
+                                  m1.prov_refs, {"subject": m1.id, "issues": issues, "affected": impact,
+                                                 "downstream_tasks": downstream},
+                                  molecule_node(m1.key) if self.s.exists(molecule_node(m1.key)) else None)
         if new:
-            self.s.add_note(m1.id, ME, f"data-quality problem: {'; '.join(issues)}", refs=[did])
             msg = f"The result {m1.text} is unreliable ({'; '.join(issues)}). Do not build conclusions on it"
-            if affected:
-                msg += "; reassess: " + " | ".join(a.text for a in affected[:3])
-            self._guide(msg + ".", "data_quality", "observed_fact", [did, m1.id], m1.prov_refs)
+            if rests:
+                msg += "; reassess what rests on it: " + self._impact_text(impact)
+            self._guide(msg + ".", "data_quality", "observation", [did])
 
-    def _compare_with_knowledge(self, m1: Entry) -> None:
-        cands = {e.id: e for e in self.s.search("M3", f"{m1.key} {m1.data.get('quantity', '')}",
-                                                limit=self.cfg.retrieval_limit)}
-        for e in self.s.all("M3"):
-            if any(self.s.get(r) and self.s.get(r).key == m1.key for r in e.refs if r.startswith("m1:")):
-                cands[e.id] = e
-        cands.pop(None, None)
-        if not cands or self.llm is None:
-            return
-        user = (f"New result: {m1.text}\nmolecule: {m1.key}\nvalue: {m1.data.get('value')}\n"
-                f"conditions: {json.dumps(m1.data.get('conditions', {}))}\n\nStatements:\n" +
-                "\n".join(f"[{e.id}] ({e.kind}, scope: {e.data.get('scope') or 'not stated'}) {e.text}"
-                          for e in cands.values()))
-        verdicts = self._llm_json(JUDGE_RESULT, user).get("verdicts", [])
-        for v in verdicts if isinstance(verdicts, list) else []:
-            e = cands.get(v.get("id"))
-            rel = v.get("relation")
-            if e is None or rel not in ("supports", "contradicts"):
+    def _reverify(self, m1: Entry) -> None:
+        """A new result: the verdicts of the statements in its scope may change."""
+        good, bad = verification.results(self.s)
+        for kid, rec in self.s.all_verifications().items():
+            if not kid.startswith("m3:") or not verification.in_scope(rec.get("claim", {}), m1.key):
                 continue
-            side = "supporting_evidence" if rel == "supports" else "contradicting_evidence"
-            if any(ev.get("entry") == m1.id for ev in e.data.get(side, [])):
-                continue
-            self.s.add_evidence(e.id, side, {"entry": m1.id, "prov_refs": m1.prov_refs}, ME,
-                                note=f"candidate, judged by the analysis agent: {v.get('reason', '')}")
-            if rel == "contradicts":
-                did, new = self._diagnose("contradiction", f"{e.id}|{m1.id}",
-                                          f"New result {m1.text} appears to contradict: {e.text}",
-                                          "scientific_contradiction", "candidate_explanation", [e.id, m1.id],
-                                          m1.prov_refs, context={"reason": v.get("reason")})
-                if new:
-                    self._guide(f"The new result {m1.text} appears to contradict the statement \"{e.text}\". "
-                                "Take both into account; the statement may need revision.",
-                                "scientific_contradiction", "candidate_explanation", [did, e.id, m1.id],
-                                m1.prov_refs)
+            res = verification.check(rec["claim"], good, bad)
+            prev = verification.record(self.s, kid, rec["claim"], res, f"new result {m1.id}")
+            k = self.s.get(kid)
+            if res["verdict"] == "contradicted" and prev != "contradicted" and k is not None:
+                self._report_contradiction(k, res, "claim_contradicted_by_new_result", f"{kid}|{m1.id}", "*",
+                                           f"The new result {m1.text} contradicts the statement \"{k.text}\"",
+                                           [m1.id])
 
+    # ================================================================== failures
     def _on_failure(self, p: dict) -> None:
         f = self.s.get(p["entry"])
         if f is None:
             return
-        key, fclass = f.key, f.data["context"].get("failure_class", "other")
-        smiles = f.data["context"].get("smiles", key)
-        same_mol = [e for e in self.s.by_key("M2", key) if e.kind == "failure"]
-        if len(same_mol) > 1:                       # repeated: the same molecule failed again
+        key, fclass, smiles = f.key, f.data["failure_class"], f.data.get("spelling") or f.key
+        same = [e for e in self.s.by_key("M2", key) if e.kind == "failure"]
+        if len(same) > 1:                        # the same molecule failed again
             confirmed = chem.confirm_cause(fclass, smiles)
-            did, new = self._diagnose("repeated_failure", key, f"{key} failed {len(same_mol)} times ({fclass})",
-                                      "technical_failure", "confirmed_cause" if confirmed else "observed_fact",
-                                      [e.id for e in same_mol], [r for e in same_mol for r in e.prov_refs])
+            did, new = self._diagnose("repeated_failure", key, f"{key} failed {len(same)} times ({fclass})"
+                                      + ("; RDKit cannot read this SMILES" if confirmed else ""), "technical_failure",
+                                      "explanation" if confirmed else "observation", [e.id for e in same],
+                                      [r for e in same for r in e.prov_refs])
+            if confirmed and new:                # a cause confirmed by a deterministic check
+                verification.record(self.s, did, {"form": "rdkit_parse", "smiles": smiles},
+                                    {"verdict": "supported", "reason": "RDKit cannot read the SMILES",
+                                     "checkable": True, "evidence": [e.id for e in same]}, "RDKit check")
             if new:
-                why = " RDKit cannot parse this SMILES (confirmed)." if confirmed else ""
-                self._guide(f"{key} has failed {len(same_mol)} times ({fclass}).{why} Do not propose it again.",
-                            "technical_failure", "confirmed_cause" if confirmed else "observed_fact",
-                            [did], f.prov_refs, check={"avoid_keys": [key]})
-        # recurring failure class across different molecules
-        same_class = [e for e in self.s.all("M2") if e.kind == "failure"
-                      and e.data["context"].get("failure_class") == fclass]
-        mols = sorted({e.key for e in same_class})
-        if len(mols) > 1:
-            if not self._fired("recurring_failure_class", fclass):
-                # LLM steps first: if the LLM is unavailable nothing is written and the event is retried later
-                expl = self._llm_json(EXPLAIN_FAILURES, "Error class: " + fclass + "\n" + "\n".join(
-                    f"{e.key}: {e.data['outcome'].get('error', '')[:200]}" for e in same_class[:10]))
-                draft = self._draft_procedure(fclass, same_class)
-                did, _ = self._diagnose("recurring_failure_class", fclass,
-                                        f"{len(mols)} different molecules failed with {fclass}: {', '.join(mols[:8])}",
-                                        "technical_failure", "observed_fact", [e.id for e in same_class],
-                                        [r for e in same_class for r in e.prov_refs])
-                if expl.get("explanation"):
-                    self._diagnose("failure_explanation", fclass, f"Candidate explanation for {fclass} failures: "
-                                   f"{expl['explanation']}", "technical_failure", "candidate_explanation", [did], [])
-                self._guide(f"Computations fail repeatedly with {fclass} ({', '.join(mols[:5])}). "
-                            + (expl.get("advice") or "Avoid similar molecules."), "technical_failure",
-                            "candidate_explanation" if expl else "observed_fact", [did],
-                            [r for e in same_class for r in e.prov_refs][:10],
-                            check={"failure_class": fclass, "avoid_keys": mols})
-                self._store_procedure(fclass, same_class, draft)
-            else:
-                did = self._fired("recurring_failure_class", fclass)
-                self.s.update(did, ME, "new occurrence",
-                              lambda e: e.refs.append(f.id) if f.id not in e.refs else None)
-                # no procedure yet (the LLM answer was unusable): try again, nothing is lost
-                if self.cfg.structured and not self.s.by_key("M4", fclass):
-                    self._store_procedure(fclass, same_class, self._draft_procedure(fclass, same_class))
-        # a procedure already exists for this situation: apply it as guidance to this agent
-        for proc in self.s.by_key("M4", fclass):
-            if self.s.r.sadd(self.s._k("analyzer", "applied"), f"{proc.id}|{f.author}|{fclass}"):
-                self._guide(f"Procedure for {fclass}: {proc.data['actions']} (expected: "
-                            f"{proc.data['expected_outcome']}; limits: {proc.data['limitations']})",
-                            "technical_failure", "observed_fact", [proc.id, f.id], f.prov_refs, target=f.author,
-                            check={"failure_class": fclass}, procedure_id=proc.id)
+                self._guide(f"{key} has failed {len(same)} times ({fclass})."
+                            + (" RDKit cannot read this SMILES (confirmed)." if confirmed else "")
+                            + " Do not propose it again.", "technical_failure",
+                            "explanation" if confirmed else "observation", [did], check={"avoid_keys": [key]})
+        motif, failures = self._pattern(f)
+        if failures:
+            self._recurring(fclass, motif, failures)
+        proc = next(iter(self.s.by_key("M4", f"{fclass}|{motif or '*'}")), None)
+        if proc is not None and proc.created_at < f.created_at and self.s.r.sadd(
+                self.s._k("analyzer", "applied"), f"{proc.id}|{f.author}"):
+            self._guide(f"Procedure for {fclass} failures" + (f" of molecules with a {motif}" if motif else "")
+                        + f": {proc.data['actions']} (expected: {proc.data['expected_outcome']}; limits: "
+                        f"{proc.data['limitations']})", "technical_failure", "observation", [proc.id], f.author,
+                        {"failure_class": fclass, "motif": motif})
 
-    def _draft_procedure(self, key: str, episodes: list[Entry]) -> dict:
-        """LLM draft of a procedure from experiences showing the same pattern (empty if one exists already)."""
-        if not self.cfg.structured or self.s.by_key("M4", key):
-            return {}
-        return self._llm_json(DRAFT_PROCEDURE, "\n".join(
-            f"- [{e.id}] {e.text}: {json.dumps(e.data['outcome'])[:200]}" for e in episodes[:10]))
+    def _pattern(self, f: Entry) -> tuple[str | None, list[Entry]]:
+        """Recurring failures of f's class: on molecules sharing one of f's motifs (through the graph), or else on
+        any molecules. The motif chosen is the one that most often fails among the molecules computed with it."""
+        fclass = f.data["failure_class"]
 
-    def _store_procedure(self, key: str, episodes: list[Entry], d: dict) -> str | None:
-        """M4 procedure linked to the experiences it was derived from."""
-        if not d.get("actions") or self.s.by_key("M4", key):
-            return None
-        kind = d.get("kind") if d.get("kind") in ("procedure", "strategy", "recommendation") else "procedure"
-        f = {k: _as_text(d.get(k, "")) for k in ("text", "trigger", "preconditions", "actions",
-                                                  "expected_outcome", "limitations")}
-        m4 = procedure(kind, f["text"], f["trigger"], f["preconditions"], f["actions"],
-                       f["expected_outcome"], f["limitations"], [e.id for e in episodes], ME,
-                       key=key, prov_refs=[r for e in episodes for r in e.prov_refs][:20],
-                       campaign_id=self.cfg.campaign_id)
-        pid, _ = self.s.add(m4)
-        self.stats["procedures"] += 1
-        return pid
+        def failing(mol_node: str) -> list[Entry]:
+            out = [self.s.get(e["source"]) for e in self.g.incoming(mol_node, ["ABOUT"])]
+            return [e for e in out if e is not None and e.kind == "failure" and e.data["failure_class"] == fclass]
+        best = None
+        for m in sorted(DOMAIN.motifs(f.key) if DOMAIN.valid(f.key) else ()):
+            mols = [e["source"] for e in self.g.incoming(motif_node(m), ["HAS_MOTIF"])]
+            fails = [x for mol in mols for x in failing(mol)]
+            n_fail = len({x.key for x in fails})
+            n_ok = sum(1 for mol in mols if any(r.data.get("value") is not None and unreliable(self.s, r) is None
+                                                for r in self.s.by_key("M1", mol[4:])))
+            score = (n_fail / (n_fail + n_ok), n_fail)
+            if n_fail >= 2 and (best is None or score > best[0]):
+                best = (score, m, fails)
+        if best:
+            return best[1], best[2]
+        fails = [e for e in self.s.all("M2") if e.kind == "failure" and e.data["failure_class"] == fclass]
+        return None, fails if len({e.key for e in fails}) >= 2 else []
 
-    def _propose_procedure(self, key: str, episodes: list[Entry]) -> str | None:
-        return self._store_procedure(key, episodes, self._draft_procedure(key, episodes))
-
-    def _on_proposals(self, p: dict) -> None:
-        agent = p.get("agent", "")
-        # inefficient exploration: proposing what the team already measured or saw fail (as known to the memory
-        # when the proposals were made: the agent's own later results must not count)
-        known, failed = list(p.get("known", [])), list(p.get("failed", []))
-        if known or failed:
-            refs = [e.id for k in known + failed for e in self.s.by_key("M1", k) + self.s.by_key("M2", k)][:20]
-            did, new = self._diagnose("repeated_proposals", f"{agent}|{p.get('iteration')}",
-                                      f"{agent} proposed {len(known)} already measured and {len(failed)} already "
-                                      f"failed molecule(s): {', '.join((known + failed)[:8])}", "workflow",
-                                      "observed_fact", refs, [])
-            if new:
-                self._guide(f"You proposed molecules the team has already measured ({', '.join(known[:5]) or '-'}) "
-                            f"or seen fail ({', '.join(failed[:5]) or '-'}). Check the team's results before "
-                            "proposing.", "workflow", "observed_fact", [did], [], target=agent,
-                            check={"avoid_keys": known + failed})
-
-    def _track_application(self, p: dict) -> None:
-        """Was guidance delivered to this agent applied in these proposals? (No proposal at all, e.g. the LLM gave
-        no tool call: nothing to judge yet.)"""
-        agent, keys = p.get("agent", ""), list(p.get("keys", []))
-        for g in self.s.all_guidance() if keys else []:
-            if not any(d["agent"] == agent for d in g.delivered) or agent in g.applied:
-                continue
-            avoid, fclass = set(g.check.get("avoid_keys", [])), g.check.get("failure_class")
-            if fclass == "invalid_smiles":
-                # the guidance asks for valid SMILES: applied = every new proposal is read by RDKit
-                applied = all(chem.parses(k) for k in keys) if chem.Chem is not None and keys else None
-            else:
-                applied = (not (avoid & set(keys))) if avoid else None
-            self.s.update_guidance(g.id, lambda x: x.applied.__setitem__(agent, applied))
-
-    def _track_effectiveness(self, p: dict) -> None:
-        """Guidance effectiveness, judged on what this agent did since the guidance was delivered."""
-        agent = p.get("agent", "")
-        for g in self.s.all_guidance():
-            deliveries = [d for d in g.delivered if d["agent"] == agent]
-            if not deliveries or agent in g.effective or agent not in g.applied:
-                continue
-            since = deliveries[0]["t"]
-            mine = [e for c in ("M1", "M2") for e in self.s.all(c) if e.author == agent and e.created_at >= since]
-            avoid, fclass = set(g.check.get("avoid_keys", [])), g.check.get("failure_class")
-            separable = fclass != "invalid_smiles"
-            if (not avoid and not fclass) or g.applied.get(agent) is False:
-                effective = None        # nothing checkable, or not applied: the effect is not attributable
-            elif not separable:
-                effective = None        # the asked behaviour (only valid SMILES) is the outcome: no separate effect
-            else:
-                recomputed = [e for e in mine if e.key in avoid and e.category == "M1"
-                              and any(r.get("task_id") for r in e.prov_refs)]
-                refailed = [e for e in mine if e.kind == "failure" and fclass
-                            and e.data["context"].get("failure_class") == fclass]
-                effective = not recomputed and not refailed
-            self.s.update_guidance(g.id, lambda x: x.effective.__setitem__(agent, effective))
-            applied = g.applied.get(agent)
-            verdict = {True: "applied", False: "not applied"}.get(applied, "not checkable")
-            if applied and not separable:
-                verdict += " (its effect is the applied behaviour itself)"
-            else:
-                verdict += " and " + {True: "effective", False: "not effective"}.get(effective, "of unknown effect")
-            out = experience("outcome", f"Guidance to {agent} was {verdict}: {g.message[:160]}", ME, key=agent,
-                             context={"guidance": g.id},
-                             outcome={"applied": g.applied.get(agent), "effective": effective},
-                             refs=[e for e in [g.procedure_id] if e] + g.evidence[:5], campaign_id=self.cfg.campaign_id)
-            oid, _ = self.s.add(out, dedup=False)
-            if g.procedure_id:
-                self._record_application(g.procedure_id, agent, g.id, oid, effective, g.applied.get(agent))
-    def _on_attempt(self, p: dict) -> None:
-        """Repeated unsuccessful strategy: this attempt and the previous one did not improve the agent's best."""
-        agent = p.get("agent", "")
-        mine = sorted([e for e in self.s.by_key("M2", agent) if e.kind == "attempt"], key=lambda e: e.created_at)
-        last = mine[-2:]
-        if (len(last) == 2 and all(e.data["outcome"].get("improved") is False for e in last)
-                and not self._fired("no_improvement", f"{agent}|{last[-1].id}")):
-            best = sorted(self.s.all("M1"), key=lambda e: -(e.data.get("value") or float("-inf")))[:5]
-            fails = [e.text for e in self.s.all("M2") if e.kind == "failure"][-5:]
-            know = [e.text for e in self.s.recent("M3", self.cfg.retrieval_limit)]
-            adv = self._llm_json(SUGGEST_DIRECTION, "Recent iterations:\n" + "\n".join(
-                e.text for e in last) + "\nTeam best results:\n" + "\n".join(e.text for e in best) +
-                "\nFailures:\n" + "\n".join(fails) + "\nKnowledge:\n" + "\n".join(know))
-            did, new = self._diagnose("no_improvement", f"{agent}|{last[-1].id}",
-                                      f"{agent}: two consecutive iterations without improvement", "workflow",
-                                      "observed_fact", [e.id for e in last], [r for e in last for r in e.prov_refs])
-            if new:
-                if adv.get("advice"):
-                    self._guide(adv["advice"], "workflow", "candidate_explanation", [did] + [e.id for e in best],
-                                [], target=agent)
-
-    def _record_application(self, pid: str, agent: str, gid: str, outcome_id: str, effective, applied=None) -> None:
-        proc = self.s.get(pid)
-        if proc is None:
+    def _recurring(self, fclass: str, motif: str | None, failures: list[Entry]) -> None:
+        key, mols = f"{fclass}|{motif or '*'}", sorted({e.key for e in failures})
+        what = f"molecules with a {motif.replace('_', ' ')} group" if motif else "different molecules"
+        about = self.s.motif(motif) if motif else None
+        if self._fired("recurring_failure", key):
+            did, _ = self._diagnose("recurring_failure", key, "", "technical_failure", "observation",
+                                    [e.id for e in failures])
+            if self.cfg.structured and not self.s.by_key("M4", key):   # the earlier draft was unusable: again
+                self._store_procedure(key, fclass, motif, failures, self._draft_procedure(fclass, motif, failures))
             return
-        was_effective = any(a.get("effective") is True for a in proc.data.get("applications", []))
-        self.s.update(pid, ME, "application recorded", lambda e: e.data["applications"].append(
-            {"agent": agent, "guidance": gid, "outcome": outcome_id, "applied": applied, "effective": effective,
-             "t": time.time()}))
-        if effective is False and was_effective:   # it worked before and did not work this time
-            self._diagnose("procedure_no_longer_effective", f"{pid}|{outcome_id}",
-                           f"Procedure {pid} was effective before but not in its last application "
-                           f"({validation_status(self.s.get(pid))})", "workflow", "observed_fact",
-                           [pid, outcome_id], [])
-            self._guide(f"The procedure \"{proc.text}\" did not have its expected effect in its last application "
-                        "although it worked before: it may be outdated.", "workflow", "observed_fact",
-                        [pid, outcome_id], [])
+        # LLM steps first: if the LLM is unavailable nothing is written and the event is retried later
+        context = self.investigate(about, 2, 20) if about else ""
+        expl = self._llm_json(EXPLAIN_FAILURES, f"Error class: {fclass}\nMotif: {motif or 'none'}\n" + "\n".join(
+            f"{e.key}: {e.data['error'][:200]}" for e in failures[:10]) + (f"\nGraph context:\n{context}" if context
+                                                                            else ""))
+        draft = self._draft_procedure(fclass, motif, failures)
+        did, _ = self._diagnose("recurring_failure", key, f"{len(mols)} {what} failed with {fclass}: "
+                                + ", ".join(mols[:8]), "technical_failure", "observation", [e.id for e in failures],
+                                [r for e in failures for r in e.prov_refs][:20], {"failure_class": fclass,
+                                                                                  "motif": motif}, about)
+        if expl.get("explanation"):
+            eid, _ = self._diagnose("failure_explanation", key, f"Proposed explanation of the {fclass} failures of "
+                                    f"{what}: {_as_text(expl['explanation'])}", "technical_failure", "explanation",
+                                    [did], about=about)
+            for e in failures:
+                self.s.link(eid, e.id, "EXPLAINS", ME, "llm")
+        self._guide(f"Computations of {what} fail repeatedly with {fclass} ({', '.join(mols[:5])}). "
+                    + (_as_text(expl.get("advice")) or "Avoid similar molecules."), "technical_failure",
+                    "hypothesis" if expl else "observation", [did],
+                    check={"failure_class": fclass, "motif": motif, "avoid_keys": mols})
+        self._store_procedure(key, fclass, motif, failures, draft)
 
+    def _draft_procedure(self, fclass: str, motif: str | None, failures: list[Entry]) -> dict:
+        """LLM draft of a procedure, given the failures and the team's knowledge about the motif (from the graph)."""
+        if not self.cfg.structured:
+            return {}
+        know = [self.s.get(e["source"]) for e in self.g.incoming(motif_node(motif), ["ABOUT"])] if motif else []
+        know = [k for k in know if k is not None and k.category == "M3"][:10]
+        return self._llm_json(DRAFT_PROCEDURE, f"Failure class: {fclass}\nMotif: {motif or 'none'}\nFailures:\n"
+                              + "\n".join(f"- [{e.id}] {e.text}: {e.data['error'][:200]}" for e in failures[:10])
+                              + "\nKnowledge about the motif:\n"
+                              + ("\n".join(f"- [{k.id}] {describe(self.s, k)}" for k in know) or "- none"))
+
+    def _store_procedure(self, key: str, fclass: str, motif: str | None, failures: list[Entry], d: dict) -> None:
+        if not d.get("actions") or self.s.by_key("M4", key):
+            return
+        f = {k: _as_text(d.get(k, "")) for k in ("text", "trigger", "preconditions", "actions", "expected_outcome",
+                                                  "limitations")}
+        pid, _ = self.s.add(procedure(f["text"] or f"Procedure for {key}", f["trigger"], f["preconditions"],
+                                      f["actions"], f["expected_outcome"], f["limitations"], ME, key, fclass, motif,
+                                      [r for e in failures for r in e.prov_refs][:20], self.cfg.campaign_id))
+        if motif:
+            self.s.link(pid, self.s.motif(motif), "ABOUT", ME)
+        for e in failures:
+            self.s.link(pid, e.id, "DERIVED_FROM", ME)
+        justified = d.get("justified_by") if isinstance(d.get("justified_by"), list) else []
+        for kid in justified:                    # proposed by the LLM, among the statements it was shown
+            if isinstance(kid, str) and kid.startswith("m3:") and self.s.exists(kid):
+                self.s.link(pid, kid, "JUSTIFIED_BY", ME, "llm")
+
+    # ================================================================== knowledge
     def _on_knowledge(self, p: dict) -> None:
-        """New knowledge resting on a result already known to be unreliable."""
+        good, bad = verification.results(self.s)
+        measured = ", ".join(sorted({e.key for e in self.s.all("M1")}))[:3000]
         for kid in p.get("entries", []):
             k = self.s.get(kid)
             if k is None:
                 continue
-            for ev in k.data.get("supporting_evidence", []) + k.data.get("contradicting_evidence", []):
-                m1 = self.s.get(ev.get("entry", "")) if ev.get("entry") else None
-                if m1 and m1.data.get("notes"):
-                    self._diagnose("knowledge_on_unreliable_result", f"{k.id}|{m1.id}",
-                                   f"Knowledge \"{k.text}\" relies on a result with a data-quality problem "
-                                   f"({m1.text}); it should be reassessed", "data_quality", "observed_fact",
-                                   [k.id, m1.id], m1.prov_refs)
+            for edge in self.g.outgoing(kid, ["SUPPORTED_BY"]):     # a statement resting on an unreliable result
+                m1 = self.s.get(edge["target"])
+                why = unreliable(self.s, m1) if m1 is not None and m1.category == "M1" else None
+                if why:
+                    did, new = self._diagnose("knowledge_on_unreliable_result", f"{kid}|{m1.id}",
+                                              f"The statement \"{k.text}\" rests on an unreliable result ({m1.text}: "
+                                              f"{why})", "data_quality", "observation", [kid, m1.id], m1.prov_refs)
+                    if new:
+                        self._guide(f"Your statement \"{k.text}\" rests on an unreliable result ({m1.text}); "
+                                    "reassess it.", "data_quality", "observation", [did], k.author)
+            if self.cfg.structured and not self.s.get_verification(kid):
+                claim = verification.normalize(self._llm_json(verification.extraction_prompt(),
+                                                              f"Statement: {k.text}\nMeasured molecules: {measured}"))
+                res = verification.check(claim, good, bad)
+                verification.record(self.s, kid, claim, res, "new statement")
+                if res["verdict"] == "contradicted":
+                    self._report_contradiction(k, res, "claim_contradicted", kid, k.author,
+                                               f"Your statement \"{k.text}\" is contradicted by the team's results")
 
-    # ================================================================== claim-evidence verification
-    def _verify_knowledge(self, p: dict) -> None:
-        """New statements: the LLM gives their structured form, the check against the results is deterministic."""
-        if not self.cfg.structured:
+    def _report_contradiction(self, k: Entry, res: dict, rule: str, key: str, target: str, lead: str,
+                              extra: list[str] | None = None) -> None:
+        impact = self._impact(k.id)
+        did, new = self._diagnose(rule, key, f"{lead}: {res['reason']}", "scientific_contradiction", "observation",
+                                  [k.id] + (extra or []) + res["evidence"], context={"subject": k.id,
+                                                                                    "affected": impact})
+        if not new:
             return
-        measured = ", ".join(sorted({e.key for e in self.s.all("M1")}))[:3000]
-        for kid in p.get("entries", []):
-            k = self.s.get(kid)
-            if k is None or self.s.get_verification(kid):
-                continue
-            raw = self._llm_json(verification.extraction_prompt(),
-                                 f"Statement: {k.text}\nMeasured molecules: {measured}")
-            claim = verification.normalize(raw)
-            result = verification.check(claim, self.s)
-            rec, _ = verification.record(self.s, kid, claim, result, "new knowledge")
-            self.stats[f"verification:{result['verdict']}"] += 1
-            if result["verdict"] == "contradicted":
-                self._report_contradiction(k, result, "claim_contradicted", kid, target=k.author,
-                                           lead=f"Your statement \"{k.text}\" is contradicted by the team's results")
+        self._guide(f"{lead} ({res['reason']}). Treat it as not established; revise or test it.",
+                    "scientific_contradiction", "observation", [did], target)
+        procs = [d["node"] for d in impact if d["node"].startswith("m4:")]
+        if procs:
+            self._guide(f"The statement \"{k.text}\" is contradicted, and procedures rest on it: "
+                        f"{self._impact_text(impact)}. Apply them with caution.", "scientific_contradiction",
+                        "observation", [did] + procs)
 
-    def _reverify_for_result(self, p: dict) -> None:
-        """A new result: check again the statements whose scope it falls in."""
-        m1 = self.s.get(p["entry"])
-        if m1 is None or not self.cfg.structured:
+    # ================================================================== proposals and attempts
+    def _on_proposals(self, p: dict) -> None:
+        """Proposals of what the team already measured or saw fail (as known when the proposals were made)."""
+        agent, known, failed = p.get("agent", ""), list(p.get("known", [])), list(p.get("failed", []))
+        if not (known or failed):
             return
-        for kid, rec in self.s.all_verifications().items():
-            claim = rec.get("claim", {})
-            if not verification.in_scope(claim, m1.key):
-                continue
-            result = verification.check(claim, self.s)
-            _, prev = verification.record(self.s, kid, claim, result, f"new result {m1.id}")
-            if result["verdict"] == "contradicted" and prev != "contradicted":
-                k = self.s.get(kid)
-                if k is not None:
-                    self._report_contradiction(k, result, "claim_contradicted_by_new_result", f"{kid}|{m1.id}",
-                                               target="*", lead=f"The new result {m1.text} makes the statement "
-                                                                f"\"{k.text}\" contradicted by the team's results",
-                                               extra_refs=[m1.id])
-
-    def _report_contradiction(self, k: Entry, result: dict, rule: str, key: str, target: str, lead: str,
-                              extra_refs: list[str] | None = None) -> None:
-        refs = [k.id] + (extra_refs or []) + [i for i in result["evidence"] if i not in (extra_refs or [])]
-        prov = [r for i in result["evidence"] for r in (self.s.get(i).prov_refs if self.s.get(i) else [])]
-        did, new = self._diagnose(rule, key, f"{lead}: {result['reason']}", "scientific_contradiction",
-                                  "observed_fact", refs, prov)
+        based = [e.id for k in known + failed for e in self.s.by_key("M1", k) + self.s.by_key("M2", k)
+                 if e.category == "M1" or e.kind == "failure"][:20]
+        did, new = self._diagnose("repeated_proposals", f"{agent}|{p.get('iteration')}",
+                                  f"{agent} proposed {len(known)} already measured and {len(failed)} already failed "
+                                  f"molecule(s): {', '.join((known + failed)[:8])}", "workflow", "observation", based)
         if new:
-            self._guide(f"{lead} ({result['reason']}). Treat it as not established; revise or test it.",
-                        "scientific_contradiction", "observed_fact", [did] + refs, prov, target=target)
+            self._guide(f"You proposed molecules the team has already measured ({', '.join(known[:5]) or '-'}) "
+                        f"or seen fail ({', '.join(failed[:5]) or '-'}). Check the team's results before proposing.",
+                        "workflow", "observation", [did], agent, {"avoid_keys": known + failed})
 
-    # ================================================================== rules on provenance records
+    def _judge_guidance(self, p: dict) -> None:
+        """Was the guidance delivered to this agent applied in its next proposals (none of the molecules or motif it
+        warns against), and effective in their outcome (no recomputation of those molecules, no new failure of the
+        class it is about)? Judged once per guidance and agent, on the first attempt whose proposals came after the
+        delivery; recorded as an APPLIED_IN edge."""
+        a = self.s.get(p.get("entry", ""))
+        if a is None or not a.data.get("proposed") or a.data.get("proposed_at") is None:
+            return                               # no proposals in this iteration: nothing to judge yet
+        agent, keys = a.author, set(a.data["proposed"])
+        part = [self.s.get(e["source"]) for e in self.g.incoming(a.id, ["PART_OF"])]
+        part = [e for e in part if e is not None and e.created_at >= a.data["proposed_at"]]   # outcome of the proposals
+        for g in self.s.all_guidance():
+            first = min((d["t"] for d in g.delivered if d["agent"] == agent), default=None)
+            if first is None or first > a.data["proposed_at"] or any(
+                    e["props"].get("agent") == agent for e in self.g.outgoing(g.id, ["APPLIED_IN"])):
+                continue
+            avoid, fclass, motif = set(g.check.get("avoid_keys", [])), g.check.get("failure_class"), g.check.get("motif")
+            if fclass == "invalid_smiles":       # the asked behaviour (valid SMILES) is itself the outcome
+                applied, effective = all(DOMAIN.valid(k) for k in keys), None
+            else:
+                carries = motif is not None and any(motif in DOMAIN.motifs(k) for k in keys)
+                applied = (not avoid & keys and not carries) if (avoid or motif) else None
+                effective = None
+                if applied and (avoid or fclass):
+                    recomputed = [e for e in part if e.category == "M1" and e.key in avoid]
+                    # the expected outcome is no new failure of the class, whatever the molecule: a procedure for
+                    # one motif that no longer prevents the class (the failing motif changed) is not effective
+                    refailed = [e for e in part if e.kind == "failure" and e.data["failure_class"] == fclass]
+                    effective = not recomputed and not refailed
+            self.s.link(g.id, a.id, "APPLIED_IN", ME, agent=agent, applied=applied, effective=effective)
+            if effective is False:
+                for edge in self.g.outgoing(g.id, ["APPLIES"]):
+                    if edge["target"].startswith("m4:"):
+                        self._procedure_outcome(edge["target"], a, g.id)
+
+    def _procedure_outcome(self, pid: str, a: Entry, gid: str) -> None:
+        """A procedure that worked before and did not this time: a diagnosis, guidance to every agent, and the
+        statements that justify it named for reassessment."""
+        apps = [x for e in self.g.incoming(pid, ["APPLIES"]) for x in self.g.outgoing(e["source"], ["APPLIED_IN"])]
+        if not any(x["props"].get("effective") is True for x in apps):
+            return
+        proc = self.s.get(pid)
+        did, new = self._diagnose("procedure_no_longer_effective", f"{pid}|{a.id}",
+                                  f"The procedure \"{proc.text}\" worked before but not in its last application "
+                                  f"({procedure_history(self.s, pid)})", "workflow", "observation", [pid, a.id, gid])
+        if new:
+            just = [self.s.get(e["target"]) for e in self.g.outgoing(pid, ["JUSTIFIED_BY"])]
+            self._guide(f"The procedure \"{proc.text}\" did not have its expected effect in its last application "
+                        "although it worked before: it may be outdated."
+                        + "".join(f" The statement it rests on may need reassessment: \"{k.text}\"." for k in just
+                                  if k is not None), "workflow", "observation", [did, pid])
+
+    def _on_attempt(self, p: dict) -> None:
+        """Two consecutive iterations of an agent without improving its best result: advice from the LLM."""
+        agent = p.get("agent", "")
+        mine = sorted((e for e in self.s.by_key("M2", agent) if e.kind == "attempt"), key=lambda e: e.created_at)
+        last = mine[-2:]
+        if len(last) < 2 or any(e.data.get("improved") is not False for e in last) or self._fired(
+                "no_improvement", f"{agent}|{last[-1].id}"):
+            return
+        best = sorted((e for e in self.s.all("M1") if e.data.get("value") is not None),
+                      key=lambda e: -e.data["value"])[:5]
+        fails = [e.text for e in self.s.all("M2") if e.kind == "failure"][-5:]
+        know = [describe(self.s, e) for e in self.s.recent("M3", self.cfg.retrieval_limit)]
+        adv = self._llm_json(SUGGEST_DIRECTION, "Recent iterations:\n" + "\n".join(e.text for e in last)
+                             + "\nTeam best results:\n" + "\n".join(e.text for e in best) + "\nFailures:\n"
+                             + "\n".join(fails) + "\nKnowledge:\n" + "\n".join(know))
+        did, new = self._diagnose("no_improvement", f"{agent}|{last[-1].id}",
+                                  f"{agent}: two consecutive iterations without improvement", "workflow",
+                                  "observation", [e.id for e in last])
+        if new and adv.get("advice"):
+            self._guide(_as_text(adv["advice"]), "workflow", "hypothesis", [did], agent)
+
+    # ================================================================== provenance records
     def _on_provenance(self, rec: dict) -> None:
-        sub, status = rec.get("subtype"), str(rec.get("status", ""))
-        if is_computation(rec) and rec.get("subtype") == "parsl_task":
+        sub = rec.get("subtype")
+        if is_computation(rec) and sub == "parsl_task":
             key = chem.canonical(smiles_of(rec) or "")
-            runs = [r for r in self.index.computations() if chem.canonical(smiles_of(r) or "") == key
-                    and r.get("campaign_id") == rec.get("campaign_id")]
-            ids = sorted({r.get("task_id") for r in runs if r.get("subtype") == "parsl_task"})
+            ids = sorted({r["task_id"] for r in self.index.computations() if r.get("subtype") == "parsl_task"
+                          and r.get("campaign_id") == rec.get("campaign_id")
+                          and chem.canonical(smiles_of(r) or "") == key})
             if len(ids) > 1:
-                self._diagnose("redundant_computation", key, f"{key} was computed {len(ids)} times",
-                               "workflow", "observed_fact", [e.id for e in self.s.by_key("M1", key)],
-                               [{"task_id": t} for t in ids])
+                self._diagnose("redundant_computation", key, f"{key} was computed {len(ids)} times", "workflow",
+                               "observation", [e.id for e in self.s.by_key("M1", key)], [{"task_id": t} for t in ids])
         elif sub == "llm_call":
-            gen = as_dict(rec.get("generated"))
-            used = as_dict(rec.get("used"))
-            if used.get("has_tools") and not gen.get("tool_calls"):
+            if as_dict(rec.get("used")).get("has_tools") and not as_dict(rec.get("generated")).get("tool_calls"):
                 wf = rec.get("workflow_id", "")
-                self._diagnose("llm_without_tool_calls", wf, "An LLM call asked for tool calls returned none "
-                               "(the agent retries)", "workflow", "observed_fact", [],
+                self._diagnose("llm_without_tool_calls", wf, "An LLM call asked for tool calls returned none (the "
+                               "agent retries)", "workflow", "observation", [],
                                [{"task_id": rec.get("task_id"), "subtype": "llm_call", "workflow_id": wf}])
-        elif status == "ERROR":
+        elif str(rec.get("status", "")) == "ERROR":
             self._diagnose("task_error", str(rec.get("activity_id")), f"Tasks {rec.get('activity_id')} ended in "
-                           f"ERROR (first error: {str(rec.get('stderr'))[:200]})", "technical_failure", "observed_fact", [],
-                           [{"task_id": rec.get("task_id"), "subtype": sub}])
+                           f"ERROR (first error: {str(rec.get('stderr'))[:200]})", "technical_failure",
+                           "observation", [], [{"task_id": rec.get("task_id"), "subtype": sub}])
 
-    # ================================================================== post-execution analysis
-    def post_execution(self, records: list[dict] | None = None) -> dict:
-        """Broader analysis after a run: provenance summary (Flowcept's own analysis functions), consolidation of
-        memory (procedures from recurring failure experiences), strategy and guidance effectiveness."""
+    # ================================================================== post-execution report
+    def post_execution(self) -> dict:
+        """After a run: provenance summary (Flowcept's own analysis functions), findings, procedures with their
+        history, guidance outcomes, strategy, coordination and the size of the memory graph."""
         if self.source is not None:
             for rec in self.source.poll():
                 self._on_provenance(rec)
-        records = records if records is not None else self.index.records()
+        records = self.index.records()
         report: dict = {"namespace": self.s.ns, "campaign_id": self.cfg.campaign_id}
         try:
             from flowcept.agents.prov_analysis import core as pa
@@ -547,42 +548,32 @@ class Analyzer:
             report["provenance_errors"] = pa.analyze_errors(records)
         except Exception as exc:  # noqa: BLE001
             report["provenance_summary_error"] = str(exc)
+        # GAIED records each computation as a parsl_task; files written before that fix only have the tool_call
         comps = [r for r in records if is_computation(r) and r.get("subtype") == "parsl_task"] or \
                 [r for r in records if is_computation(r)]
         per_mol = Counter(chem.canonical(smiles_of(r) or "") for r in comps)
         report["computations"] = {"total": len(comps), "distinct_molecules": len(per_mol),
                                   "redundant": sum(n - 1 for n in per_mol.values() if n > 1)}
-        by_class = defaultdict(list)
-        for e in self.s.all("M2"):
-            if e.kind == "failure":
-                by_class[e.data["context"].get("failure_class", "other")].append(e)
-        report["procedures_proposed"] = [pid for c, eps in by_class.items()
-                                         if len({e.key for e in eps}) > 1 and (pid := self._propose_procedure(c, eps))]
-        report["procedures"] = [{"id": e.id, "text": e.text, "validation_status": validation_status(e)}
+        report["findings"] = [{"id": e.id, "rule": e.data["rule"], "text": e.text,
+                               "problem_type": e.data["problem_type"], "epistemic_status": e.data["epistemic_status"],
+                               "based_on": len(self.g.outgoing(e.id, ["DIAGNOSED_FROM"]))}
+                              for e in self.s.all("M2") if e.kind == "diagnosis"]
+        report["procedures"] = [{"id": e.id, "text": e.text, "history": procedure_history(self.s, e.id)}
                                 for e in self.s.all("M4")]
-        attempts = [e for e in self.s.all("M2") if e.kind == "attempt"]
-        report["strategy"] = {"attempts": len(attempts),
-                              "improving": sum(1 for e in attempts if e.data["outcome"].get("improved")),
-                              "by_agent": dict(Counter(e.key for e in attempts))}
+        judged = [x for g in self.s.all_guidance() for x in self.g.outgoing(g.id, ["APPLIED_IN"])]
         gs = self.s.all_guidance()
-        report["guidance"] = {
-            # created / delivered count guidance messages; the others count (guidance, agent) pairs
-            "created": len(gs), "delivered": sum(1 for g in gs if g.delivered),
-            "deliveries_to_agents": sum(len({d["agent"] for d in g.delivered}) for g in gs),
-            "applied": sum(1 for g in gs for v in g.applied.values() if v is True),
-            "not_applied": sum(1 for g in gs for v in g.applied.values() if v is False),
-            "effective": sum(1 for g in gs for v in g.effective.values() if v is True),
-            "not_effective": sum(1 for g in gs for v in g.effective.values() if v is False)}
-        diags = [e for e in self.s.all("M2") if e.kind == "diagnosis"]
-        report["findings"] = [{"id": e.id, "rule": e.data["context"].get("rule"), "text": e.text,
-                               "problem_type": e.data.get("problem_type"), "basis": e.data.get("basis"),
-                               "occurrences": e.data["outcome"].get("occurrences")} for e in diags]
+        report["guidance"] = {"created": len(gs), "delivered": sum(1 for g in gs if g.delivered),
+                              "judged": len(judged),
+                              **{f"{k}_{v}": sum(1 for x in judged if x["props"].get(k) is b)
+                                 for k in ("applied", "effective") for v, b in (("yes", True), ("no", False))}}
+        attempts = [e for e in self.s.all("M2") if e.kind == "attempt"]
+        report["strategy"] = {"attempts": len(attempts), "improving": sum(1 for e in attempts if e.data["improved"])}
         waits = [json.loads(f.get("payload") or "{}") for _, f in self.s.r.xrange(self.stream)
                  if f.get("event") == "waited"]
         report["coordination"] = {"waits": len(waits), **{o: sum(1 for w in waits if w.get("outcome") == o)
                                                           for o in ("result", "failure", "computes")}}
         report["memory"] = {c: self.s.count(c) for c in ("M1", "M2", "M3", "M4")}
-        report["llm_calls"] = getattr(self.llm, "calls", 0)
+        report["edges"] = self.g.count_by_type()
         return report
 
 
@@ -592,13 +583,12 @@ def write_report(report: dict, out_dir: str) -> str:
     with open(path, "w") as fh:
         json.dump(report, fh, indent=1, default=str)
     lines = [f"# Post-execution analysis ({report.get('namespace')})", "",
-             f"- memory: {report.get('memory')}", f"- computations: {report.get('computations')}",
-             f"- coordination (waits for a molecule being computed): {report.get('coordination')}",
+             f"- memory: {report.get('memory')}", f"- edges: {report.get('edges')}",
+             f"- computations: {report.get('computations')}", f"- coordination: {report.get('coordination')}",
              f"- guidance: {report.get('guidance')}", f"- strategy: {report.get('strategy')}", "", "## Findings", ""]
-    lines += [f"- [{f['problem_type']} / {f['basis']}] {f['text']} (x{f['occurrences']})"
+    lines += [f"- [{f['problem_type']} / {f['epistemic_status']}] {f['text']} (based on {f['based_on']})"
               for f in report.get("findings", [])]
-    lines += ["", "## Procedures", ""] + [f"- {p['text']} — {p['validation_status']}"
-                                         for p in report.get("procedures", [])]
+    lines += ["", "## Procedures", ""] + [f"- {p['text']}: {p['history']}" for p in report.get("procedures", [])]
     with open(path[:-5] + ".md", "w") as fh:
         fh.write("\n".join(lines) + "\n")
     return path
@@ -620,7 +610,7 @@ def latest_campaign(pattern: str) -> str | None:
 
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description="Provenance and memory analysis agent")
-    ap.add_argument("--post", action="store_true", help="post-execution analysis, then exit")
+    ap.add_argument("--post", action="store_true", help="post-execution report, then exit")
     ap.add_argument("--out", default="results/analysis", help="where the post-execution report is written")
     ap.add_argument("--jsonl", default=None, help="Flowcept JSONL files to read (glob)")
     ap.add_argument("--campaign", default=os.environ.get("PGMEM_CAMPAIGN"),
@@ -631,16 +621,15 @@ def main(argv: list[str] | None = None) -> None:
     if cfg.mode == "off":
         cfg.mode = "full"                        # the analysis agent is only started when it is wanted
     store = MemoryStore.connect(cfg.redis_host, cfg.redis_port, cfg.namespace)
-    campaign = args.campaign
-    if args.post and not campaign:
-        campaign = latest_campaign(args.jsonl or cfg.jsonl_glob)
+    campaign = args.campaign or (latest_campaign(args.jsonl or cfg.jsonl_glob) if args.post else None)
     cfg.campaign_id = campaign
     kind = "none" if "provenance" not in cfg.analysis_sources else ("jsonl" if args.post else cfg.provenance_source)
     source = make_source(kind, cfg.redis_host, cfg.redis_port, args.jsonl or cfg.jsonl_glob, campaign,
                          online=not args.post)
     an = Analyzer(store, cfg, source=source)
     if args.post:
-        an.step(block_ms=10, retry_idle_ms=0)   # finish pending memory events first
+        an.count_provenance = False              # reading the whole provenance again is not what was received online
+        an.step(block_ms=10, retry_idle_ms=0)    # finish pending memory events (and read the provenance) first
         print("report:", write_report(an.post_execution(), args.out))
         return
     an.run_forever()

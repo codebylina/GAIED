@@ -613,11 +613,11 @@ class XTBSimulationAgent(Agent):
 
         memory = getattr(self, 'memory', None)  # [pgmem]
 
-        def _pgm(node: str, query: str = '') -> str:  # [pgmem] memory section of a node's prompt
+        def _pgm(node: str, query: str | None = None) -> str:  # [pgmem] memory section of a node's prompt
             from pgmem.agent_client import CURRENT_NODE, CURRENT_AGENT
             CURRENT_NODE.set(node)
             CURRENT_AGENT.set(getattr(self, 'agent_name', None))
-            if memory is None:
+            if memory is None or query is None:  # no query: the node is only recorded (nothing read or delivered)
                 return ''
             try:
                 return memory.context(node, query)

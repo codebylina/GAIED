@@ -31,7 +31,7 @@ Check in PowerShell: `git --version`, `docker --version` and `docker compose ver
 ```powershell
 git clone https://github.com/codebylina/GAIED.git GAIED
 cd GAIED
-git switch prov-memory-analysis-v2
+git switch pgmem-v3
 ```
 
 ## 3. Build the image (once, 10 to 30 minutes)
@@ -52,9 +52,12 @@ docker compose exec ollama ollama pull qwen3.5:4b
 docker compose exec redis redis-cli ping        # PONG
 ```
 
-To use a model already served by Ollama installed on the computer itself (instead of the `ollama` container), add
-`--no-deps -e OLLAMA_URL=http://host.docker.internal:11434 -e OLLAMA_MODEL=<model> -e LLM_MODEL=<model>` to the
-`docker compose run` commands below.
+The semantic retrieval of the memory uses an embedding model:
+`docker compose exec ollama ollama pull nomic-embed-text` (or set `PGMEM_EMBED_MODEL` to another one).
+
+To use models already served by Ollama installed on the computer itself (instead of the `ollama` container), add
+`--no-deps -e OLLAMA_URL=http://host.docker.internal:11434 -e OLLAMA_MODEL=<model> -e LLM_MODEL=<model>
+-e PGMEM_EMBED_MODEL=<embedding model>` to the `docker compose run` commands below.
 
 ### Optional: an online API instead of the local model
 
@@ -103,6 +106,6 @@ With a local model on CPU a campaign can take an hour or more; a progress report
 
 ## Working with Git
 
-Work on a branch of your own, created from `prov-memory-analysis-v2`, and open a pull request to merge it. Never commit
+Work on a branch of your own, created from `pgmem-v3`, and open a pull request to merge it. Never commit
 `docker/.env`, a token or a key. Campaign outputs (`runinfo/`, `output/flowcept_buffer_*.jsonl`, `results/`) are
 ignored by Git.

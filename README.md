@@ -1,8 +1,10 @@
 ## Provenance-grounded memory and analysis for scientific agents (this fork)
 
-This fork adds `pgmem`: a shared, persistent memory for GAIED's agents, organized in four categories (evidence and
-results, experiences, knowledge, procedures) whose entries reference Flowcept provenance records, and an independent
-analysis agent that analyzes provenance and memory together and sends guidance to the agents during execution.
+This fork adds `pgmem`: a shared, persistent memory for GAIED's agents, built as a property graph in Redis (typed
+entries for results, experiences, knowledge and procedures, molecule and motif nodes, and typed relations between
+them) whose entries reference Flowcept provenance records; a hybrid retrieval (keywords, embeddings, chemical
+similarity, graph); and an independent analysis agent that reads provenance and the graph together, traces what
+rests on a problem, and sends guidance to the agents during execution.
 
 - Design, configuration and usage: [`docs/PGMEM.md`](docs/PGMEM.md)
 - Running everything locally with Docker: [`INSTALLATION.md`](INSTALLATION.md)

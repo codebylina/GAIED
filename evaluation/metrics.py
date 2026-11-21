@@ -10,12 +10,14 @@ Metrics (the specification's list):
   redundant computations      xTB computations of a molecule beyond the first (provenance)
   inefficient exploration     proposals of a molecule whose computation had already ended (provenance)
   repeated technical failures failed computations of a molecule that had already failed (provenance)
+  learning and adaptation     failing-motif share of the proposals, per phase (motif_failures)
   diagnostic accuracy         precision / recall of the analysis agent's findings against ground truth sets
   provenance traceability     share of memory references to Flowcept tasks that resolve to a recorded task
-  procedure applicability     procedures given, applied, effective
-  intervention effectiveness  guidance delivered, applied, effective
-  knowledge maintenance       statements resting on corrupted results that were flagged
-  memory retrieval            what was put in the prompts (counts only: relevance needs a definition, see docs)
+  provenance coverage         provenance records received online by the analysis agent / records recorded
+  memory retrieval            relevance of what was retrieved (structural criterion), per channel and access mode
+  procedures, interventions   procedures given, applied, effective; guidance delivered, applied, effective (edges)
+  knowledge maintenance       statements resting on corrupted results and whether they were flagged, directly or
+                              through the graph; verdicts against the true values
   system overhead             campaign duration, LLM calls of the agents and of the analysis agent, analysis time,
                               memory size
 """
@@ -30,10 +32,7 @@ import sys
 from collections import Counter, defaultdict
 
 from pgmem import chem
-from pgmem.provenance import as_dict, as_float, smiles_of
-
-FAILURE_RULES = ("repeated_failure", "recurring_failure_class", "failure_explanation")
-
+from pgmem.provenance import as_dict, as_float, is_relevant, smiles_of
 
 def load_jsonl(path: str) -> list[dict]:
     out = []
@@ -63,17 +62,58 @@ def prf(truth: set, detected: set) -> dict:
             "recall": tp / len(truth) if truth else None}
 
 
+class Export:
+    """An exported memory (memory.json) with its graph."""
+
+    def __init__(self, mem: dict) -> None:
+        self.entries = {e["id"]: e for c in ("M1", "M2", "M3", "M4") for e in mem["entries"].get(c, [])}
+        self.edges = mem.get("edges", [])
+        self.out, self.inc = defaultdict(list), defaultdict(list)
+        for e in self.edges:
+            self.out[e["source"]].append(e)
+            self.inc[e["target"]].append(e)
+        self.guidance = mem.get("guidance", [])
+        self.verification = mem.get("verification") or {}
+        self.stats = mem.get("analyzer_stats") or {}
+
+    def of(self, category: str, kind: str | None = None) -> list[dict]:
+        return [e for e in self.entries.values() if e["category"] == category and (kind is None or e["kind"] == kind)]
+
+    def targets(self, node: str, *types: str) -> list[str]:
+        return [e["target"] for e in self.out[node] if e["type"] in types]
+
+    def sources(self, node: str, *types: str) -> list[str]:
+        return [e["source"] for e in self.inc[node] if e["type"] in types]
+
+    def diagnoses(self) -> list[dict]:
+        return self.of("M2", "diagnosis")
+
+    def unreliable(self, m1: dict) -> bool:
+        if m1["data"].get("conditions", {}).get("converged") is False:
+            return True
+        return any(self.entries.get(d, {}).get("data", {}).get("context", {}).get("subject") == m1["id"]
+                   for d in self.sources(m1["id"], "DIAGNOSED_FROM"))
+
+    def keys_of(self, node: str) -> tuple[set, set]:
+        """Molecules and motifs an entry is ABOUT."""
+        about = self.targets(node, "ABOUT")
+        return {a[4:] for a in about if a.startswith("mol:")}, {a[6:] for a in about if a.startswith("motif:")}
+
+    def judged(self) -> list[dict]:
+        return [e for e in self.edges if e["type"] == "APPLIED_IN"]
+
+
 def run_metrics(run_dir: str) -> dict:
     meta = json.load(open(os.path.join(run_dir, "meta.json")))
-    tasks = merged_tasks(load_jsonl(os.path.join(run_dir, "provenance.jsonl")))
+    records = load_jsonl(os.path.join(run_dir, "provenance.jsonl"))
+    tasks = merged_tasks(records)
     fault_log = load_jsonl(os.path.join(run_dir, "faults.jsonl"))
     computation_log = [f for f in fault_log if f["fault"] == "computation"]
-    faults = [f for f in fault_log if f["fault"] != "computation"]
-    mem = json.load(open(os.path.join(run_dir, "memory.json"))) if os.path.exists(
-        os.path.join(run_dir, "memory.json")) else {"entries": {}, "guidance": []}
+    faults = [f for f in fault_log if f["fault"] not in ("computation", "switch")]
+    mem_path = os.path.join(run_dir, "memory.json")
+    x = Export(json.load(open(mem_path)) if os.path.exists(mem_path) else {"entries": {}})
     events = json.load(open(os.path.join(run_dir, "events.json"))) if os.path.exists(
         os.path.join(run_dir, "events.json")) else []
-    entries = {e["id"]: e for c in ("M1", "M2", "M3", "M4") for e in mem["entries"].get(c, [])}
     m = {k: meta.get(k) for k in ("run_id", "scenario", "condition", "repetition", "status", "llm", "model")}
 
     # ---------------------------------------------------------------- provenance: what actually happened
@@ -102,12 +142,11 @@ def run_metrics(run_dir: str) -> dict:
     late = [p for p in proposals if (k := chem.canonical(smiles_of(p) or "")) in ended
             and ended[k] < (as_float(p.get("started_at")) or 0)]
     n_agents = len(meta["seeds"].split(","))
-    # one should_continue node ends each iteration (the last conclude nodes are not always in the provenance)
-    iterations = sum(1 for t in tasks.values() if t.get("subtype") == "langgraph_node"
-                     and t.get("activity_id") == "should_continue")
     m.update({
         "duration_s": round((meta.get("campaign_ended_at") or meta["ended_at"]) - meta["started_at"], 1),
-        "iterations_completed": iterations,
+        # one should_continue node ends each iteration
+        "iterations_completed": sum(1 for t in tasks.values() if t.get("subtype") == "langgraph_node"
+                                    and t.get("activity_id") == "should_continue"),
         "iterations_expected": n_agents * meta["max_iterations"],
         "computations": len(comps), "distinct_molecules": len(per_key),
         "redundant_computations": sum(n - 1 for n in per_key.values() if n > 1),
@@ -122,74 +161,77 @@ def run_metrics(run_dir: str) -> dict:
     })
 
     # ---------------------------------------------------------------- memory (conditions with a memory)
-    task_ids = set(tasks)
-    refs = [(e["category"], r["task_id"]) for e in entries.values() for r in e.get("prov_refs", []) if r.get("task_id")]
+    refs = [r["task_id"] for e in x.entries.values() for r in e.get("prov_refs", []) if r.get("task_id")]
     m["prov_refs"] = len(refs)
-    m["prov_refs_resolved"] = sum(1 for _, t in refs if t in task_ids)
+    m["prov_refs_resolved"] = sum(1 for t in refs if t in tasks)
     m["traceability"] = m["prov_refs_resolved"] / len(refs) if refs else None
-    m["memory_entries"] = len(entries)
-    m["memory_bytes"] = os.path.getsize(os.path.join(run_dir, "memory.json")) if os.path.exists(
-        os.path.join(run_dir, "memory.json")) else 0
-    stats = mem.get("analyzer_stats") or {}
-    m["analyzer_llm_calls"] = int(float(stats.get("llm_calls", 0)))
-    m["analyzer_event_seconds"] = round(float(stats.get("event_seconds", 0)), 2)
+    m["memory_entries"] = len(x.entries)
+    m["memory_edges"] = len(x.edges)
+    m["memory_edges_llm"] = sum(1 for e in x.edges if e["origin"] == "llm")
+    m["memory_bytes"] = os.path.getsize(mem_path) if os.path.exists(mem_path) else 0
+    m["analyzer_llm_calls"] = int(float(x.stats.get("llm_calls", 0)))
+    m["analyzer_event_seconds"] = round(float(x.stats.get("event_seconds", 0)), 2)
+    if "provenance_records" in x.stats:   # absent: not measured (no provenance source)
+        expected = {r["task_id"] for r in records if r.get("task_id") and is_relevant(r)}
+        m["provenance_expected"] = len(expected)
+        m["provenance_received"] = int(float(x.stats["provenance_records"]))
+        m["provenance_coverage"] = m["provenance_received"] / len(expected) if expected else None
 
-    gs = mem.get("guidance", [])
-    m["guidance_created"] = len(gs)
-    m["guidance_deliveries"] = sum(len({d["agent"] for d in g["delivered"]}) for g in gs)
-    m["guidance_applied"] = sum(1 for g in gs for v in g["applied"].values() if v is True)
-    m["guidance_not_applied"] = sum(1 for g in gs for v in g["applied"].values() if v is False)
-    m["guidance_effective"] = sum(1 for g in gs for v in g["effective"].values() if v is True)
-    m["guidance_not_effective"] = sum(1 for g in gs for v in g["effective"].values() if v is False)
-    procs = mem["entries"].get("M4", [])
-    apps = [a for p in procs for a in p["data"].get("applications", [])]
-    m.update({"procedures": len(procs), "procedure_given": len(apps),
-              "procedure_applied": sum(1 for a in apps if a.get("applied") is True),
-              "procedure_effective": sum(1 for a in apps if a.get("effective") is True),
-              "procedure_not_effective": sum(1 for a in apps if a.get("effective") is False)})
+    judged = x.judged()
+    m["guidance_created"] = len(x.guidance)
+    m["guidance_deliveries"] = sum(len({d["agent"] for d in g["delivered"]}) for g in x.guidance)
+    for k in ("applied", "effective"):
+        m[f"guidance_{k}"] = sum(1 for e in judged if e["props"].get(k) is True)
+        m[f"guidance_not_{k}"] = sum(1 for e in judged if e["props"].get(k) is False)
+    procs = x.of("M4")
+    apps = [a for p in procs for g in x.sources(p["id"], "APPLIES") for a in x.out[g] if a["type"] == "APPLIED_IN"]
+    m.update({"procedures": len(procs), "procedure_motifs": len({p["data"].get("motif") for p in procs}),
+              "procedure_judged": len(apps),
+              "procedure_applied": sum(1 for a in apps if a["props"].get("applied") is True),
+              "procedure_effective": sum(1 for a in apps if a["props"].get("effective") is True),
+              "procedure_not_effective": sum(1 for a in apps if a["props"].get("effective") is False),
+              "procedures_justified": sum(1 for p in procs if x.targets(p["id"], "JUSTIFIED_BY"))})
 
-    ctx = [e["payload"] for e in events if e["event"] == "context"]
-    m["retrievals"] = len(ctx)
-    for c in ("M1", "M2", "M3", "M4"):
-        m[f"retrieved_{c}"] = sum(len(p["entries"].get(c, [])) for p in ctx)
-
-    # knowledge maintenance: statements citing a corrupted result (truncated or offset), and whether they were flagged
+    # knowledge maintenance: statements resting on a corrupted result, and whether the analysis agent flagged them
     corrupted = {f["key"] for f in faults if f["fault"] in ("truncated", "offset")}
-    m1_corrupted = {e["id"] for e in entries.values() if e["category"] == "M1" and e["key"] in corrupted}
-    diags = [e for e in entries.values() if e["category"] == "M2" and e["kind"] == "diagnosis"]
-    flagged_m3 = {r for d in diags if d["data"]["context"].get("rule") in
-                  ("invalid_artifact", "knowledge_on_unreliable_result", "contradiction") for r in d.get("refs", [])}
-    on_corrupted = [e for e in entries.values() if e["category"] == "M3" and set(e.get("refs", [])) & m1_corrupted]
-    m["statements"] = sum(1 for e in entries.values() if e["category"] == "M3")
+    m1_corrupted = {e["id"] for e in x.of("M1") if e["key"] in corrupted}
+    diags = x.diagnoses()
+    flagged, indirect = set(), set()
+    for d in diags:
+        for a in d["data"].get("context", {}).get("affected", []):
+            flagged.add(a["node"])
+            if a["depth"] > 1:
+                indirect.add(a["node"])
+        if d["data"]["rule"] in ("knowledge_on_unreliable_result", "claim_contradicted",
+                                 "claim_contradicted_by_new_result"):
+            flagged.update(x.targets(d["id"], "DIAGNOSED_FROM"))
+    on_corrupted = [e for e in x.of("M3") if set(x.targets(e["id"], "SUPPORTED_BY")) & m1_corrupted]
+    m["statements"] = len(x.of("M3"))
     m["statements_on_corrupted_results"] = len(on_corrupted)
-    m["statements_on_corrupted_flagged"] = sum(
-        1 for e in on_corrupted if e["id"] in flagged_m3
-        or any(ev.get("added_by") == "analysis-agent" for ev in e["data"].get("contradicting_evidence", [])))
+    m["statements_on_corrupted_flagged"] = sum(1 for e in on_corrupted if e["id"] in flagged)
+    m["indirectly_flagged"] = len(indirect)
 
     # ---------------------------------------------------------------- diagnostic accuracy (analysis agent runs)
-    if any(e["author"] == "analysis-agent" for e in entries.values()) or meta["condition"].startswith("full"):
+    if meta["condition"].startswith("full"):
         by_rule = defaultdict(set)
         for d in diags:
-            by_rule[d["data"]["context"].get("rule")].add(d["key"])
-        acc = {}
-        acc["redundant_computation"] = prf({k for k, n in per_key.items() if n > 1}, by_rule["redundant_computation"])
+            by_rule[d["data"]["rule"]].add(d["key"])
+        m1_key = {e["id"]: e["key"] for e in x.of("M1")}
+        acc = {"redundant_computation": prf({k for k, n in per_key.items() if n > 1}, by_rule["redundant_computation"])}
         fails = Counter(t["_key"] for t in comps if not t["_ok"])
         acc["repeated_failure"] = prf({k for k, n in fails.items() if n > 1}, by_rule["repeated_failure"])
-        classes = defaultdict(set)
-        for t in comps:
-            if not t["_ok"]:
-                classes[chem.failure_class(str(t.get("stderr")))].add(t["_key"])
-        acc["recurring_failure_class"] = prf({c for c, ks in classes.items() if len(ks) > 1},
-                                             by_rule["recurring_failure_class"])
+        names = {smarts: name for name, smarts in chem.FEATURES.items()}
+        failing = {t["_key"] for t in comps if not t["_ok"]}
+        truth = {f"scf_not_converged|{names[s]}" for s in meta.get("motifs") or []
+                 if s in names and sum(1 for k in failing if names[s] in chem.features(k)) >= 2}
+        if truth:
+            acc["recurring_failure"] = prf(truth, {k for k in by_rule["recurring_failure"] if not k.endswith("|*")})
         not_converged = {t["_key"] for t in comps if t["_ok"]
                          and as_dict(as_dict(t.get("generated")).get("conditions")).get("converged") is False}
-        m1_key = {e["id"]: e["key"] for e in entries.values() if e["category"] == "M1"}
         acc["invalid_artifact"] = prf(not_converged, {m1_key.get(k, k) for k in by_rule["invalid_artifact"]})
-        # the earlier LLM judgement (rule "contradiction") and claim verification against a new result
-        contra = ({m1_key.get(k.split("|")[-1]) for k in by_rule["contradiction"]}
-                  | {m1_key.get(k.split("|")[-1]) for k in by_rule["claim_contradicted_by_new_result"]}) - {None}
-        computed_offsets = {k for k in offsets if any(k == kk for kk, _ in values)}
-        acc["contradiction"] = prf(computed_offsets, contra)
+        revealed = {m1_key[t] for d in diags if d["data"]["rule"].startswith("claim_contradicted")
+                    for t in x.targets(d["id"], "DIAGNOSED_FROM") if t in m1_key}
+        acc["corrupted_result"] = prf({k for k in offsets if any(k == kk for kk, _ in values)}, revealed)
         truth_prop = set()
         for ev in events:
             if ev["event"] == "proposals":
@@ -197,26 +239,22 @@ def run_metrics(run_dir: str) -> dict:
                 if any(k in ended and ended[k] < t for k in p.get("keys", [])):
                     truth_prop.add(f"{p['agent']}|{p.get('iteration')}")
         acc["repeated_proposals"] = prf(truth_prop, by_rule["repeated_proposals"])
-        confirmed = [d for d in diags if d["data"].get("basis") == "confirmed_cause"]
+        confirmed = [d for d in diags if x.verification.get(d["id"], {}).get("claim", {}).get("form") == "rdkit_parse"]
         m["confirmed_cause_findings"] = len(confirmed)
         m["confirmed_cause_correct"] = (sum(1 for d in confirmed if not chem.parses(d["key"])) / len(confirmed)
                                         if confirmed else None)
-        m["procedure_ineffective_switch"] = bool(meta.get("fault_switch_at"))
         m["procedure_ineffective_detected"] = bool(by_rule["procedure_no_longer_effective"])
         for rule, v in acc.items():
             for k in ("truth", "detected", "precision", "recall"):
                 m[f"diag_{rule}_{k}"] = v[k]
-    m.update(adaptation_metrics(meta, comps, proposals, computation_log, diags, gs))
-    m.update(retrieval_metrics(events, entries))
-    m.update(verification_metrics(mem, entries, offsets))
-    m["_guidance_by_rule"] = guidance_by_rule(gs, entries)
+    m.update(adaptation_metrics(meta, comps, proposals, computation_log, diags, x.guidance))
+    m.update(retrieval_metrics(events, x))
+    m.update(verification_metrics(x, offsets))
+    m["_guidance_by_rule"] = guidance_by_rule(x)
     return m
 
 
 # ---------------------------------------------------------------------------------------------- helpers
-GENERIC = {"fluorine", "ring", "carbonyl", "alkene", "aromatic_ring"}
-
-
 def _has(smiles: str, smarts: str) -> bool:
     from rdkit import Chem
     mol, patt = Chem.MolFromSmiles(smiles or ""), Chem.MolFromSmarts(smarts)
@@ -227,10 +265,13 @@ def _share(items: list, smarts: str) -> float | None:
     return sum(_has(k, smarts) for k in items) / len(items) if items else None
 
 
+FAILURE_RULES = ("repeated_failure", "recurring_failure", "failure_explanation")
+
+
 def adaptation_metrics(meta: dict, comps: list, proposals: list, computation_log: list, diags: list,
                        gs: list) -> dict:
-    """Scenario with a failing motif that changes (faults with phases): do proposals move away from the failing
-    motif within a phase, how fast does the analysis agent notice the change, and is old guidance still given?"""
+    """Scenario with a failing motif that changes: do proposals move away from the failing motif within a phase,
+    how fast does the analysis agent notice the change, and is old guidance still given?"""
     motifs = meta.get("motifs")
     if not motifs:
         return {}
@@ -238,8 +279,7 @@ def adaptation_metrics(meta: dict, comps: list, proposals: list, computation_log
     props = sorted(((as_float(p.get("started_at")) or 0, chem.canonical(smiles_of(p) or "")) for p in proposals))
     out = {"phase_switch_reached": switch_t is not None}
     for i, motif in enumerate(motifs):
-        lo = props[0][0] if props else 0
-        hi = float("inf")
+        lo, hi = (props[0][0] if props else 0), float("inf")
         if i == 0 and switch_t is not None:
             hi = switch_t
         if i == 1:
@@ -254,8 +294,8 @@ def adaptation_metrics(meta: dict, comps: list, proposals: list, computation_log
         out[f"phase{i + 1}_failures"] = sum(1 for t in comps if not t["_ok"]
                                             and lo <= (as_float(t.get("started_at")) or 0) < hi)
     if switch_t is not None:
-        after = [d for d in diags if d["author"] == "analysis-agent" and d["created_at"] > switch_t
-                 and d["data"]["context"].get("rule") in FAILURE_RULES + ("procedure_no_longer_effective",)]
+        after = [d for d in diags if d["created_at"] > switch_t
+                 and d["data"]["rule"] in FAILURE_RULES + ("procedure_no_longer_effective",)]
         first = min((d["created_at"] for d in after), default=None)
         out["computations_to_detect_change"] = (sum(1 for f in computation_log if switch_t <= f["t"] < first)
                                                 if first else None)
@@ -266,46 +306,37 @@ def adaptation_metrics(meta: dict, comps: list, proposals: list, computation_log
     return out
 
 
-def entry_keys(e: dict, entries: dict) -> list[str]:
-    """Molecules an exported memory entry is about (as in pgmem/retrieval.py, from the export)."""
-    c, kind, d = e["category"], e["kind"], e["data"]
-    if c == "M1" or (c == "M2" and kind == "failure"):
-        return [e["key"]]
-    if c == "M2" and kind == "attempt":
-        return list(d.get("context", {}).get("proposed", []))
-    if c == "M3":
-        ids = [ev["entry"] for ev in d["supporting_evidence"] + d["contradicting_evidence"]]
-        return [entries[i]["key"] for i in ids if i in entries] + chem.molecules_in(e["text"])
-    if c == "M4":
-        return [entries[i]["key"] for i in d.get("supporting_episodes", []) if i in entries]
-    return chem.molecules_in(e["text"])
-
-
-def relevant(e: dict, query_mols: list[str], entries: dict) -> bool:
+def relevant(x: Export, entry_id: str, query_mols: list[str]) -> bool:
     """Relevance criterion of the evaluation: the entry is about one of the task's molecules, a structurally similar
-    one (Tanimoto >= 0.4), or shares a specific functional group with them (generic groups left out)."""
-    keys = entry_keys(e, entries)
-    if not keys or not query_mols:
+    one (Tanimoto >= 0.4), or a specific motif of them (directly, or through the molecules it is about)."""
+    mols, motifs = x.keys_of(entry_id)
+    if not query_mols or not (mols or motifs):
         return False
-    if set(keys) & set(query_mols) or any(chem.similarity(a, b) >= 0.4 for a in query_mols for b in keys):
+    if mols & set(query_mols) or any(chem.similarity(a, b) >= 0.4 for a in query_mols for b in mols):
         return True
-    qf = set().union(*(chem.features(q) for q in query_mols)) - GENERIC
-    ef = set().union(*(chem.features(k) for k in keys)) - GENERIC
+    qf = set().union(*(chem.features(q) for q in query_mols)) - chem.GENERIC
+    ef = motifs | (set().union(*(chem.features(k) for k in mols)) - chem.GENERIC if mols else set())
     return bool(qf & ef)
 
 
-def retrieval_metrics(events: list, entries: dict) -> dict:
+CHANNELS = ("bm25", "semantic", "chem", "graph")
+
+
+def retrieval_metrics(events: list, x: Export) -> dict:
     """What the memory gave the agents (scheduled sections and on-demand answers), how relevant it was to their
-    task, whether they asked themselves, and whether they proposed again what they had just been shown."""
+    task, which channels found it, whether the agents asked themselves, and whether they proposed again what they
+    had just been shown."""
     out = {}
     for kind in ("context", "memory_query"):
-        evs = [e["payload"] for e in events if e["event"] == kind and e["payload"].get("molecules") is not None]
-        ret = [(p, eid) for p in evs for c in ("M1", "M2", "M3", "M4") for eid in p["entries"].get(c, [])
-               if eid in entries]
+        evs = [e["payload"] for e in events if e["event"] == kind]
+        ret = [(p, i) for p in evs for c in ("M1", "M2", "M3", "M4") for i in p["entries"].get(c, [])
+               if i in x.entries]
         name = "scheduled" if kind == "context" else "on_demand"
         out[f"retrieved_{name}"] = len(ret)
-        out[f"retrieval_precision_{name}"] = (sum(relevant(entries[i], p["molecules"], entries) for p, i in ret)
-                                              / len(ret) if ret else None)
+        out[f"retrieval_precision_{name}"] = (sum(relevant(x, i, p["molecules"]) for p, i in ret) / len(ret)
+                                              if ret else None)
+        for ch in CHANNELS:
+            out[f"retrieved_{name}_by_{ch}"] = sum(1 for p in evs for r in p.get("ranks", {}).values() if ch in r)
     props = [e for e in events if e["event"] == "proposals"]
     queries = [e for e in events if e["event"] == "memory_query"]
     out["memory_queries"] = len(queries)
@@ -318,67 +349,59 @@ def retrieval_metrics(events: list, entries: dict) -> dict:
     for p in props:
         prior = [e for e in events if e["event"] in ("context", "memory_query") and e["t"] <= p["t"]
                  and e["payload"]["agent"] == p["payload"]["agent"]]
-        if not prior:
-            continue
-        last = prior[-1]["payload"]["entries"]
-        shown = {entries[i]["key"] for c in ("M1", "M2") for i in last.get(c, []) if i in entries
-                 and (c == "M1" or entries[i]["kind"] == "failure")}
-        shown_again += sum(1 for k in p["payload"].get("keys", []) if k in shown)
+        if prior:
+            last = prior[-1]["payload"]["entries"]
+            shown = {x.entries[i]["key"] for c in ("M1", "M2") for i in last.get(c, []) if i in x.entries
+                     and (c == "M1" or x.entries[i]["kind"] == "failure")}
+            shown_again += sum(1 for k in p["payload"].get("keys", []) if k in shown)
     out["proposals_of_molecules_just_shown"] = shown_again
     return out
 
 
-class _ExportStore:
-    """The part of MemoryStore that pgmem.verification.check reads, over an exported memory."""
-
-    def __init__(self, entries: dict) -> None:
-        from types import SimpleNamespace
-        self._m1 = [SimpleNamespace(id=e["id"], key=e["key"], data=e["data"]) for e in entries.values()
-                    if e["category"] == "M1"]
-
-    def all(self, category: str) -> list:
-        return self._m1 if category == "M1" else []
-
-
-def verification_metrics(mem: dict, entries: dict, offsets: dict) -> dict:
-    """Claim verification: how many statements the LLM could turn into checkable claims, their verdicts, and, with
-    the true values (offsets removed), which verdicts the corrupted results changed."""
+def verification_metrics(x: Export, offsets: dict) -> dict:
+    """Verdicts of the statements, and, with the true values (offsets removed), which verdicts the corrupted results
+    changed."""
     from pgmem import verification
-    recs = mem.get("verification") or {}
+    recs = {k: r for k, r in x.verification.items() if k.startswith("m3:")}
     if not recs:
         return {}
-    store = _ExportStore(entries)
-    true_values = {e["key"]: e["data"]["value"] - offsets[e["key"]] for e in entries.values()
-                   if e["category"] == "M1" and e["key"] in offsets and e["data"].get("value") is not None}
-    checkable = [r for r in recs.values() if r.get("claim", {}).get("form") not in (None, "none")]
+    good, bad, true = {}, set(), {}
+    for e in x.of("M1"):
+        v = e["data"].get("value")
+        if isinstance(v, (int, float)) and not x.unreliable(e):
+            good.setdefault(e["key"], (v, e["id"]))
+            true.setdefault(e["key"], (v - offsets.get(e["key"], 0.0), e["id"]))
+        else:
+            bad.add(e["key"])
+    bad -= set(good)
+    checkable = [r for r in recs.values() if r.get("checkable")]
     out = {"statements_verified": len(recs), "statements_checkable": len(checkable)}
     for v in ("supported", "contradicted", "inconclusive"):
-        out[f"verdict_{v}"] = sum(1 for r in checkable if r.get("verdict") == v)
+        out[f"verdict_{v}"] = sum(1 for r in recs.values() if r.get("verdict") == v)
     changed = genuine = 0
     for r in checkable:
-        now = verification.check(r["claim"], store)["verdict"]
-        true = verification.check(r["claim"], store, values=true_values)["verdict"] if true_values else now
-        changed += now != true
-        genuine += true == "contradicted"
+        now = verification.check(r["claim"], good, bad)["verdict"]
+        with_true = verification.check(r["claim"], true, bad)["verdict"]
+        changed += now != with_true
+        genuine += with_true == "contradicted"
     out["verdicts_changed_by_corrupted_results"] = changed
     out["statements_contradicted_by_true_values"] = genuine
     return out
 
 
-def guidance_by_rule(gs: list, entries: dict) -> dict:
-    """Guidance outcomes by the rule that produced it (from the diagnosis it cites first)."""
+def guidance_by_rule(x: Export) -> dict:
+    """Guidance outcomes by what it applies: the rule of its diagnosis, or "procedure"."""
     out = defaultdict(Counter)
-    for g in gs:
-        rule = next((entries[i]["data"]["context"].get("rule") for i in g.get("evidence", [])
-                     if i in entries and entries[i]["kind"] == "diagnosis"), "procedure" if g.get("procedure_id")
-                    else "other")
-        c = out[rule]
+    for g in x.guidance:
+        applies = x.targets(g["id"], "APPLIES")
+        rule = next((x.entries[i]["data"]["rule"] for i in applies if i.startswith("m2:") and i in x.entries),
+                    "procedure" if any(i.startswith("m4:") for i in applies) else "other")
+        c, judged = out[rule], [e for e in x.out[g["id"]] if e["type"] == "APPLIED_IN"]
         c["created"] += 1
         c["delivered"] += len({d["agent"] for d in g["delivered"]})
-        c["applied"] += sum(1 for v in g["applied"].values() if v is True)
-        c["not_applied"] += sum(1 for v in g["applied"].values() if v is False)
-        c["effective"] += sum(1 for v in g["effective"].values() if v is True)
-        c["not_effective"] += sum(1 for v in g["effective"].values() if v is False)
+        for k in ("applied", "effective"):
+            c[k] += sum(1 for e in judged if e["props"].get(k) is True)
+            c[f"not_{k}"] += sum(1 for e in judged if e["props"].get(k) is False)
     return {k: dict(v) for k, v in out.items()}
 
 
@@ -409,16 +432,21 @@ SUMMARY_COLUMNS = [
     ("analysis LLM calls", "analyzer_llm_calls"),
 ]
 MEMORY_COLUMNS = [
-    ("traceability", "traceability"), ("memory queries", "memory_queries"),
-    ("decisions after a query", "decisions_after_a_query"),
-    ("precision scheduled", "retrieval_precision_scheduled"), ("precision on demand", "retrieval_precision_on_demand"),
+    ("traceability", "traceability"), ("provenance coverage", "provenance_coverage"), ("edges", "memory_edges"),
+    ("memory queries", "memory_queries"), ("decisions after a query", "decisions_after_a_query"),
     ("re-proposed just shown", "proposals_of_molecules_just_shown"),
     ("guidance delivered", "guidance_deliveries"), ("applied", "guidance_applied"),
     ("not applied", "guidance_not_applied"), ("effective", "guidance_effective"),
     ("not effective", "guidance_not_effective"),
-    ("statements on corrupted / flagged", None),
+    ("procedures (motifs)", ("procedures", "procedure_motifs")), ("procedure effective / not", (
+        "procedure_effective", "procedure_not_effective")),
 ]
-VERIFICATION_COLUMNS = [
+RETRIEVAL_COLUMNS = [
+    ("precision scheduled", "retrieval_precision_scheduled"), ("precision on demand", "retrieval_precision_on_demand"),
+] + [(f"found by {c} (scheduled)", f"retrieved_scheduled_by_{c}") for c in CHANNELS]
+KNOWLEDGE_COLUMNS = [
+    ("statements on corrupted / flagged", ("statements_on_corrupted_results", "statements_on_corrupted_flagged")),
+    ("flagged through the graph", "indirectly_flagged"),
     ("statements verified", "statements_verified"), ("checkable", "statements_checkable"),
     ("supported", "verdict_supported"), ("contradicted", "verdict_contradicted"),
     ("inconclusive", "verdict_inconclusive"), ("contradicted with true values", "statements_contradicted_by_true_values"),
@@ -466,9 +494,6 @@ def _table(title: str, columns: list, groups: dict, scenario: str, only=None) ->
         for name, key in columns:
             if name == "runs ok":
                 cells.append(f"{sum(r['status'] == 'ok' for r in rs)}/{len(rs)}")
-            elif name.startswith("statements on corrupted"):
-                cells.append(f"{mean_sd([r.get('statements_on_corrupted_results') for r in rs]) or '-'} / "
-                             f"{mean_sd([r.get('statements_on_corrupted_flagged') for r in rs]) or '-'}")
             else:
                 cells.append(_cell(rs, key, ci=name in ("computations", "redundant", "failed", "repeated failures",
                                                         "proposals already known")))
@@ -505,9 +530,11 @@ def main(argv: list[str] | None = None) -> None:
     for s in sorted({k[0] for k in groups}):
         lines += [f"## {s}"]
         lines += _table("Outcomes", SUMMARY_COLUMNS, groups, s)
-        lines += _table("Memory use and guidance (conditions with a memory)", MEMORY_COLUMNS, groups, s,
+        lines += _table("Memory, guidance and procedures (conditions with a memory)", MEMORY_COLUMNS, groups, s,
                         only=has("traceability"))
-        lines += _table("Claim verification (conditions with the analysis agent)", VERIFICATION_COLUMNS, groups, s,
+        lines += _table("Retrieval (conditions with the structured memory)", RETRIEVAL_COLUMNS, groups, s,
+                        only=has("retrieval_precision_scheduled"))
+        lines += _table("Knowledge maintenance and verdicts", KNOWLEDGE_COLUMNS, groups, s,
                         only=has("statements_verified"))
         lines += _table("Adaptation to the failing motif and its change", ADAPTATION_COLUMNS, groups, s,
                         only=has("phase_switch_reached"))

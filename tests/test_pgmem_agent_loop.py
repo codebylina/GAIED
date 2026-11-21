@@ -82,7 +82,7 @@ def main() -> int:
     stop.set()
     th.join(timeout=5)
     an.step(block_ms=10, retry_idle_ms=0)
-    report = an.post_execution(records=[])
+    report = an.post_execution()
     dt = time.time() - t0
 
     m1 = store.all("M1")
@@ -95,13 +95,19 @@ def main() -> int:
         "invalid SMILES recorded as failures in M2, not M1": any(e.kind == "failure" for e in m2)
                                                           and not any(e.key == "C1CC" for e in m1),
         "an attempt (M2) per iteration": sum(1 for e in m2 if e.kind == "attempt") == 6,
-        "knowledge proposed at conclusion (M3) with evidence": any(
-            e.data["supporting_evidence"] for e in store.all("M3")),
+        "knowledge proposed at conclusion (M3), with the evidence its author cites": any(
+            store.graph.outgoing(e.id, ["SUPPORTED_BY"]) for e in store.all("M3")),
+        "results and failures are PART_OF their attempt": all(
+            store.graph.outgoing(e.id, ["PART_OF"]) for e in m1 + [x for x in m2 if x.kind == "failure"]),
+        "results are ABOUT their molecule": all(store.molecules_of(e.id) for e in m1),
         "second agent reused the first agent's results": len(reused) > 0,
         "analysis agent wrote diagnoses": any(e.kind == "diagnosis" for e in m2),
-        "recurring failure class produced a procedure (M4)": bool(store.all("M4")),
+        "recurring failures produced a procedure (M4) DERIVED_FROM them": bool(store.all("M4")) and all(
+            store.graph.outgoing(p.id, ["DERIVED_FROM"]) for p in store.all("M4")),
         "guidance delivered to an agent during execution": any(g.delivered for g in store.all_guidance()),
-        "guidance application was assessed": any(g.applied for g in store.all_guidance()),
+        "guidance was judged (APPLIED_IN)": any(store.graph.outgoing(g.id, ["APPLIED_IN"])
+                                                for g in store.all_guidance()),
+        "statements received a verdict": bool(store.all_verifications()),
         "agents consulted the memory on demand (query_memory tool)": any(
             b.get("event") == "memory_query" for _, b in store.r.xrange(store._k("events"))),
         "prompts received task-related results (context events with molecules)": any(
@@ -137,10 +143,10 @@ def main() -> int:
     print(f"two agents x 3 iterations in {dt:.1f} s; memory {report['memory']}; guidance {report['guidance']}")
     for e in m2:
         if e.kind == "diagnosis":
-            print(f"   diagnosis [{e.data['problem_type']} / {e.data['basis']}] {e.text}")
+            print(f"   diagnosis [{e.data['problem_type']} / {e.data['epistemic_status']}] {e.text}")
     for g in store.all_guidance():
-        print(f"   guidance -> {g.target}: delivered {len(g.delivered)}, applied {g.applied}, "
-              f"effective {g.effective}: {g.message[:90]}")
+        judged = [x["props"] for x in store.graph.outgoing(g.id, ["APPLIED_IN"])]
+        print(f"   guidance -> {g.target}: delivered {len(g.delivered)}, judged {judged}: {g.message[:90]}")
     failed = [k for k, ok in checks.items() if not ok]
     for k, ok in checks.items():
         print("ok  " if ok else "FAIL", k)

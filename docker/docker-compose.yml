@@ -44,6 +44,7 @@ services:
       # --- shared memory (pgmem): off | basic | structured | full (full = with the analysis agent's guidance) ---
       PGMEM_MODE: ${PGMEM_MODE:-off}
       PGMEM_NAMESPACE: ${PGMEM_NAMESPACE:-default}
+      PGMEM_EMBED_MODEL: ${PGMEM_EMBED_MODEL:-nomic-embed-text}   # Ollama embedding model (semantic retrieval)
     volumes:
       - ..:/app                                   # the whole GAIED folder
 

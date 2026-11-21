@@ -1,18 +1,21 @@
 """
-Entries of the shared memory. One envelope, four categories (M1-M4), each answering one question:
+Nodes of the shared memory. The memory is a property graph: its nodes are the entries M1-M4, the domain's entities
+(molecules, motifs) and the analysis agent's guidance; every relation between nodes is an edge of pgmem/graph.py,
+never a field of an entry. An entry holds only what describes it, plus its references to Flowcept (ProvRef), which
+are external identifiers, not nodes.
 
-  M1  What was observed?                       scientific evidence and results
-  M2  What happened during an experience?      attempts, successes, failures, investigations, diagnoses, outcomes
-  M3  What was learned scientifically?         hypotheses, claims, findings, rules, constraints, negative findings,
-                                               uncertainties, with scope, evidence for / against, epistemic status
-  M4  How should an agent act?                 procedures, strategies, recommendations, with trigger, preconditions,
-                                               actions, expected outcome, limitations, validation status, evidence
+  M1  result      What was observed?            a measured value with its experimental conditions
+  M2  attempt     What happened?                one iteration of an agent: what it proposed, whether it improved
+      failure                                   a computation that failed, with its failure class
+      diagnosis                                 the analysis agent's reading of a problem (rule, problem type)
+  M3  knowledge   What was learned?             a statement, its scope, epistemic status and uncertainty
+  M4  procedure   How should an agent act?      trigger, preconditions, actions, expected outcome, limitations
 
-Entries hold references to Flowcept (ProvRef), never copies of provenance records. Updates never overwrite: they
-append to `history` (who, when, what changed), so evidence and earlier states are kept.
-
-Guidance is the delivery record of a recommendation sent by the analysis agent to scientific agents; it is what lets
-the system track whether guidance was delivered, applied and effective.
+Reliability has two independent axes. The epistemic status is declared by the author of a statement (an agent or
+the analysis agent): observation (what was seen), hypothesis (what is supposed), explanation (a proposed cause). The
+verdict (supported, contradicted, inconclusive) is computed by code from the evidence and kept apart
+(pgmem/verification.py). An entry is never rewritten: a duplicate is merged into it by appending its Flowcept
+references, and the merge is written in its history.
 """
 from __future__ import annotations
 
@@ -21,17 +24,12 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from .domain import DOMAIN
+
 CATEGORIES = ("M1", "M2", "M3", "M4")
-
-M2_KINDS = ("attempt", "success", "failure", "investigation", "diagnosis", "outcome")
-M3_KINDS = ("hypothesis", "claim", "finding", "rule", "constraint", "negative_finding", "uncertainty")
-M4_KINDS = ("procedure", "strategy", "recommendation")
-
-# Distinction required for knowledge: observation-based, hypothesis, or explanation.
+KINDS = {"M1": ("result",), "M2": ("attempt", "failure", "diagnosis"), "M3": ("knowledge",), "M4": ("procedure",)}
 EPISTEMIC_STATUS = ("observation", "hypothesis", "explanation")
-# Distinction required for the analysis agent's own statements.
-FINDING_BASIS = ("observed_fact", "candidate_explanation", "confirmed_cause")
-# Problem types the analysis agent must tell apart.
+# problem types the analysis agent must tell apart in its diagnoses
 PROBLEM_TYPES = ("technical_failure", "data_quality", "workflow", "scientific_contradiction")
 
 
@@ -41,6 +39,14 @@ def new_id(prefix: str) -> str:
 
 def now() -> float:
     return time.time()
+
+
+def molecule_node(smiles: str) -> str:
+    return f"mol:{DOMAIN.canonical(smiles)}"
+
+
+def motif_node(name: str) -> str:
+    return f"motif:{name}"
 
 
 @dataclass
@@ -61,19 +67,18 @@ class Entry:
     category: str
     kind: str
     text: str                            # one human-readable sentence
-    key: str = ""                        # exact-retrieval key: canonical molecule, failure class, agent...
+    key: str = ""                        # exact-retrieval key: canonical molecule, agent, rule key...
     author: str = ""
     campaign_id: str | None = None
     prov_refs: list[dict] = field(default_factory=list)
-    refs: list[str] = field(default_factory=list)      # ids of other memory entries this one relies on
-    data: dict[str, Any] = field(default_factory=dict)  # category-specific fields (see the constructors below)
+    data: dict[str, Any] = field(default_factory=dict)  # what describes the entry (see the constructors below)
     id: str = ""
     created_at: float = 0.0
-    history: list[dict] = field(default_factory=list)
+    history: list[dict] = field(default_factory=list)   # merges of duplicates
 
     def __post_init__(self) -> None:
-        if self.category not in CATEGORIES:
-            raise ValueError(f"unknown category {self.category}")
+        if self.category not in CATEGORIES or self.kind not in KINDS[self.category]:
+            raise ValueError(f"unknown entry type {self.category}/{self.kind}")
         self.id = self.id or new_id(self.category)
         self.created_at = self.created_at or now()
 
@@ -85,97 +90,88 @@ class Entry:
         return cls(**d)
 
 
+def _status(s: str) -> str:
+    if s not in EPISTEMIC_STATUS:
+        raise ValueError(f"epistemic status must be one of {EPISTEMIC_STATUS}")
+    return s
+
+
 # --------------------------------------------------------------------------------------------- constructors
-def observation(entity: str, quantity: str, value: float, unit: str, conditions: dict, author: str,
-                prov: ProvRef, campaign_id: str | None = None) -> Entry:
-    """M1: a measurement with its experimental conditions and the reference to the task that produced it."""
-    return Entry("M1", "measurement", f"{quantity} of {entity} = {value:.6g} {unit}", key=entity, author=author,
+def result(entity: str, quantity: str, value: float, unit: str, conditions: dict, author: str, prov: ProvRef,
+           campaign_id: str | None = None, spelling: str = "") -> Entry:
+    """M1: a measurement, its conditions and the Flowcept task that produced it."""
+    return Entry("M1", "result", f"{quantity} of {entity} = {value:.6g} {unit}", key=entity, author=author,
                  campaign_id=campaign_id, prov_refs=[prov.to_dict()],
                  data={"entity": entity, "quantity": quantity, "value": value, "unit": unit,
-                       "conditions": conditions})
+                       "conditions": conditions, "spelling": spelling or entity})
 
 
-def experience(kind: str, text: str, author: str, key: str = "", context: dict | None = None,
-               outcome: dict | None = None, prov_refs: list[dict] | None = None, refs: list[str] | None = None,
-               problem_type: str | None = None, basis: str | None = None,
-               campaign_id: str | None = None) -> Entry:
-    """M2: what happened (not a raw log). `problem_type` and `basis` are set on the analysis agent's diagnoses."""
-    if kind not in M2_KINDS:
-        raise ValueError(f"M2 kind must be one of {M2_KINDS}")
-    if problem_type is not None and problem_type not in PROBLEM_TYPES:
-        raise ValueError(f"problem_type must be one of {PROBLEM_TYPES}")
-    if basis is not None and basis not in FINDING_BASIS:
-        raise ValueError(f"basis must be one of {FINDING_BASIS}")
-    return Entry("M2", kind, text, key=key, author=author, campaign_id=campaign_id, prov_refs=prov_refs or [],
-                 refs=refs or [], data={"context": context or {}, "outcome": outcome or {},
-                                        "problem_type": problem_type, "basis": basis})
+def attempt(text: str, author: str, iteration: int, proposed: list[str], proposed_at: float | None,
+            reused: list[str], improved: bool | None, best_before: float | None, best_after: float | None,
+            plan_excerpt: str = "", prov_refs: list[dict] | None = None, campaign_id: str | None = None) -> Entry:
+    """M2: one iteration of an agent. Its results and failures point to it (PART_OF edges)."""
+    return Entry("M2", "attempt", text, key=author, author=author, campaign_id=campaign_id,
+                 prov_refs=prov_refs or [],
+                 data={"iteration": iteration, "proposed": proposed, "proposed_at": proposed_at, "reused": reused,
+                       "improved": improved, "best_before": best_before, "best_after": best_after,
+                       "plan_excerpt": plan_excerpt})
 
 
-def knowledge(kind: str, statement: str, epistemic_status: str, author: str, scope: str = "",
-              supporting: list[dict] | None = None, contradicting: list[dict] | None = None,
-              uncertainty: str = "", prov_refs: list[dict] | None = None, key: str = "",
+def failure(entity: str, failure_class: str, error: str, author: str, iteration: int, spelling: str,
+            prov_refs: list[dict] | None = None, campaign_id: str | None = None) -> Entry:
+    """M2: a computation that failed."""
+    return Entry("M2", "failure", f"Simulation of {entity} failed ({failure_class})", key=entity, author=author,
+                 campaign_id=campaign_id, prov_refs=prov_refs or [],
+                 data={"failure_class": failure_class, "error": error[:500], "iteration": iteration,
+                       "spelling": spelling})
+
+
+def diagnosis(rule: str, key: str, text: str, problem_type: str, epistemic_status: str, author: str,
+              context: dict | None = None, prov_refs: list[dict] | None = None,
               campaign_id: str | None = None) -> Entry:
-    """M3: a scientific statement with its scope, evidence for and against (references to M1 entries and Flowcept
-    tasks), epistemic status and stated uncertainty."""
-    if kind not in M3_KINDS:
-        raise ValueError(f"M3 kind must be one of {M3_KINDS}")
-    if epistemic_status not in EPISTEMIC_STATUS:
-        raise ValueError(f"epistemic_status must be one of {EPISTEMIC_STATUS}")
-    sup, con = supporting or [], contradicting or []
-    return Entry("M3", kind, statement, key=key, author=author, campaign_id=campaign_id, prov_refs=prov_refs or [],
-                 refs=[e["entry"] for e in sup + con if e.get("entry")],
-                 data={"scope": scope, "epistemic_status": epistemic_status, "uncertainty": uncertainty,
-                       "supporting_evidence": sup, "contradicting_evidence": con})
+    """M2: the analysis agent's reading of a problem; what it is based on are DIAGNOSED_FROM edges."""
+    if problem_type not in PROBLEM_TYPES:
+        raise ValueError(f"problem type must be one of {PROBLEM_TYPES}")
+    return Entry("M2", "diagnosis", text, key=key, author=author, campaign_id=campaign_id,
+                 prov_refs=prov_refs or [],
+                 data={"rule": rule, "problem_type": problem_type, "epistemic_status": _status(epistemic_status),
+                       "context": context or {}})
 
 
-def procedure(kind: str, text: str, trigger: str, preconditions: str, actions: str, expected_outcome: str,
-              limitations: str, supporting_episodes: list[str], author: str, key: str = "",
+def knowledge(statement: str, epistemic_status: str, author: str, scope: str = "", uncertainty: str = "",
               prov_refs: list[dict] | None = None, campaign_id: str | None = None) -> Entry:
-    """M4: reusable guidance. Its validation status records what is known about it: the experiences it was derived
-    from and the observed outcomes of its applications (filled in as guidance is applied)."""
-    if kind not in M4_KINDS:
-        raise ValueError(f"M4 kind must be one of {M4_KINDS}")
-    return Entry("M4", kind, text, key=key, author=author, campaign_id=campaign_id, prov_refs=prov_refs or [],
-                 refs=list(supporting_episodes),
+    """M3: a scientific statement; its evidence are SUPPORTED_BY / CONTRADICTED_BY edges."""
+    return Entry("M3", "knowledge", statement, author=author, campaign_id=campaign_id, prov_refs=prov_refs or [],
+                 data={"scope": scope, "epistemic_status": _status(epistemic_status), "uncertainty": uncertainty})
+
+
+def procedure(text: str, trigger: str, preconditions: str, actions: str, expected_outcome: str, limitations: str,
+              author: str, key: str, failure_class: str, motif: str | None, prov_refs: list[dict] | None = None,
+              campaign_id: str | None = None) -> Entry:
+    """M4: reusable guidance for one failure class, on molecules with one motif (None: any molecule). The
+    experiences it comes from are DERIVED_FROM edges, the knowledge that justifies it JUSTIFIED_BY edges, and its
+    applications the APPLIED_IN edges of the guidance that applied it."""
+    return Entry("M4", "procedure", text, key=key, author=author, campaign_id=campaign_id, prov_refs=prov_refs or [],
                  data={"trigger": trigger, "preconditions": preconditions, "actions": actions,
                        "expected_outcome": expected_outcome, "limitations": limitations,
-                       "supporting_episodes": list(supporting_episodes), "applications": []})
-
-
-def validation_status(m4: Entry) -> str:
-    """Descriptive validation status of a procedure, computed from the evidence held, with no threshold."""
-    apps = m4.data.get("applications", [])
-    eff = [a for a in apps if a.get("effective") is True]
-    inef = [a for a in apps if a.get("effective") is False]
-    n = len(m4.data.get("supporting_episodes", []))
-    if not apps:
-        return f"derived from {n} experience(s); not given to an agent yet"
-    applied = [a for a in apps if a.get("applied") is True]
-    not_applied = [a for a in apps if a.get("applied") is False]
-    text = f"derived from {n} experience(s); given {len(apps)} time(s): applied {len(applied)}"
-    if applied:
-        text += f" ({len(eff)} effective, {len(inef)} not effective, {len(applied) - len(eff) - len(inef)} effect unknown)"
-    return text + f", not applied {len(not_applied)}"
+                       "failure_class": failure_class, "motif": motif})
 
 
 @dataclass
 class Guidance:
-    """A recommendation from the analysis agent to scientific agents, and its tracking."""
+    """A message of the analysis agent to scientific agents. It is a node of the graph: what it applies or is based
+    on (APPLIES) and where it was applied (APPLIED_IN) are edges; `delivered` is its delivery log."""
     message: str
     problem_type: str | None
-    basis: str
+    epistemic_status: str
     target: str = "*"                    # an agent name, or "*" for every agent
-    evidence: list[str] = field(default_factory=list)       # memory entry ids
-    prov_refs: list[dict] = field(default_factory=list)
     check: dict = field(default_factory=dict)   # machine-checkable part: {"avoid_keys": [...], "failure_class": ...}
-    procedure_id: str | None = None
     id: str = ""
     created_at: float = 0.0
     delivered: list[dict] = field(default_factory=list)     # {agent, node, t}
-    applied: dict = field(default_factory=dict)              # agent -> True / False / None (not checkable)
-    effective: dict = field(default_factory=dict)            # agent -> True / False / None
 
     def __post_init__(self) -> None:
+        _status(self.epistemic_status)
         self.id = self.id or new_id("G")
         self.created_at = self.created_at or now()
 

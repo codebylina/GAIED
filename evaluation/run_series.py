@@ -4,6 +4,7 @@ each, one after the other, each in its own memory namespace. Meant to run inside
 
     python -m evaluation.run_series smoke                      # scripted LLM, a few minutes
     python -m evaluation.run_series pilot                      # the model of OLLAMA_URL / OLLAMA_MODEL
+                                                               # (and PGMEM_EMBED_MODEL for embeddings)
     python -m evaluation.run_series main --only full           # a subset of conditions
 
 For each run, results/eval/<series>/<run id>/ receives: meta.json, campaign.log, analyzer.log, flowcept_settings.yaml,
@@ -165,6 +166,7 @@ def run_one(series: str, cfg: dict, scenario: str, condition: str, rep: int, out
             "namespace": namespace, "seeds": sc["seeds"], "faults": sc["faults"], "llm": cfg["llm"],
             "model": env.get("OLLAMA_MODEL") or env.get("LLM_MODEL"), "max_iterations": max_iterations,
             "llm_seed": env["LLM_SEED"], "motifs": sc.get("motifs"),
+            "embed_model": env.get("PGMEM_EMBED_MODEL", "nomic-embed-text"),
             "git_commit": git_commit(), "started_at": time.time(), "status": "running"}
     json.dump(meta, open(meta_path, "w"), indent=1)
     print(f"run {run_id} (namespace {namespace})", flush=True)

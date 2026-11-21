@@ -2,7 +2,8 @@
 LLM access for the analysis agent: the same client as GAIED's agents (docker/local_llm.py: Ollama or an OpenAI-format
 API), or a scripted model (LLM_PROVIDER=scripted) for fast tests without any model.
 
-The analysis agent uses the LLM only where interpretation is needed; everything it returns is labelled a candidate.
+The analysis agent uses the LLM only where interpretation is needed; what it returns is stored as proposed
+(epistemic status hypothesis or explanation, edges of origin "llm"), never as a checked fact.
 """
 from __future__ import annotations
 
@@ -13,24 +14,20 @@ import os
 import re
 
 EXPLAIN_FAILURES = """You analyze failed simulations of a molecular design workflow.
-Given molecules whose computation failed with the same error class, give a candidate explanation of what they have in
-common and one short piece of advice for the agents. You only propose; nothing you say is taken as a confirmed cause.
+Given molecules whose computation failed with the same error class (and the motif they share, if any), propose a
+candidate explanation of why they fail and one short piece of advice for the agents. You only propose; nothing you say
+is taken as a confirmed cause.
 Answer with ONLY a JSON object: {"explanation": "...", "advice": "..."}"""
-
-JUDGE_RESULT = """You compare a new experimental result with statements of the team's scientific knowledge.
-For each statement, say whether the new result supports it, contradicts it, or is unrelated to it, with a one-sentence
-reason. Only say "contradicts" when the result is inside the statement's scope and goes against it.
-Answer with ONLY a JSON object: {"verdicts": [{"id": "<statement id>", "relation": "supports|contradicts|unrelated",
-"reason": "..."}]}"""
 
 SUGGEST_DIRECTION = """You advise a computational chemistry agent whose recent iterations did not improve its best
 result. Using the team's results, failures and knowledge given below, suggest one concrete change of direction.
 Answer with ONLY a JSON object: {"advice": "..."}"""
 
-DRAFT_PROCEDURE = """From several experiences of a molecular design workflow that show the same pattern, write one
-reusable procedure for future agents. Be specific; state its limits.
-Answer with ONLY a JSON object: {"kind": "procedure|strategy|recommendation", "text": "...", "trigger": "...",
-"preconditions": "...", "actions": "...", "expected_outcome": "...", "limitations": "..."}"""
+DRAFT_PROCEDURE = """From several failed computations of a molecular design workflow that show the same pattern,
+write one reusable procedure for future agents. Be specific; state its limits. The team's knowledge related to the
+pattern is listed with ids: give the ids of the statements that justify the procedure, if any.
+Answer with ONLY a JSON object: {"text": "...", "trigger": "...", "preconditions": "...", "actions": "...",
+"expected_outcome": "...", "limitations": "...", "justified_by": ["<statement id>", ...]}"""
 
 EXTRACT_CLAIM = """You turn one scientific statement about ionization energies into a structured claim that can be
 checked against measured values. Use exactly one of these forms, or "none" if the statement cannot be checked this way:
@@ -90,19 +87,6 @@ def scripted(system: str, user: str) -> str:
     if system == EXPLAIN_FAILURES:
         return json.dumps({"explanation": "The failing molecules share the error class reported by the workflow.",
                            "advice": "Avoid proposing molecules similar to the failing ones."})
-    if system == JUDGE_RESULT:
-        ids = re.findall(r"\[(m3:[0-9a-f]+)\]", user)
-        val = re.search(r"value: (-?[0-9.]+)", user)
-        verdicts = []
-        for i in ids:
-            m = re.search(rf"\[{re.escape(i)}\][^\n]*?(above|below) (-?[0-9.]+)", user)
-            if m and val:
-                v, thr = float(val.group(1)), float(m.group(2))
-                ok = v > thr if m.group(1) == "above" else v < thr
-                verdicts.append({"id": i, "relation": "supports" if ok else "contradicts", "reason": "scripted"})
-            else:
-                verdicts.append({"id": i, "relation": "unrelated", "reason": "scripted"})
-        return json.dumps({"verdicts": verdicts})
     if system.startswith("You turn one scientific statement"):
         m = re.search(r"ionization energy of (\S+) is (above|below) (-?[0-9.]+)", user)
         if m:
@@ -112,10 +96,11 @@ def scripted(system: str, user: str) -> str:
     if system == SUGGEST_DIRECTION:
         return json.dumps({"advice": "Explore a different scaffold than the last iterations (scripted advice)."})
     if system == DRAFT_PROCEDURE:
-        return json.dumps({"kind": "procedure", "text": "Avoid molecules that repeatedly fail with this error class.",
+        return json.dumps({"text": "Avoid molecules that repeatedly fail with this error class.",
                            "trigger": "a proposed molecule resembles molecules that failed with this error class",
                            "preconditions": "the error class has been observed at least twice",
                            "actions": "replace the molecule by one without the shared feature",
                            "expected_outcome": "no new failure of this class",
-                           "limitations": "based only on the failures observed in this memory"})
+                           "limitations": "based only on the failures observed in this memory",
+                           "justified_by": re.findall(r"\[(m3:[0-9a-f]+)\]", user)[:1]})
     return "{}"

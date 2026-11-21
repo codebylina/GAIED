@@ -1,6 +1,6 @@
 """
 Gather everything about the campaigns of one memory namespace into one zip file, to share the results:
-  - the memory export (all entries M1-M4 and the guidance) as JSON;
+  - the memory export (entries M1-M4, relations, guidance, verdicts) as JSON;
   - the event stream (proposals, results, failures, reuses, waits...) as JSON;
   - the Flowcept provenance files (JSONL) of the campaigns recorded in that memory;
   - the post-execution analysis reports (JSON and Markdown) of that namespace;

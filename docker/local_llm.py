@@ -201,7 +201,7 @@ def scripted_answer(chat: list[dict], tools: bool, memory_tool: bool = False) ->
         text = "Conclusion: the measured molecules differ in ionization energy."
         if "KNOWLEDGE" in system and rows:
             items = [{"statement": f"The ionization energy of {s} is above {float(v) - 1:.2f} eV",
-                      "kind": "finding", "epistemic_status": "observation", "scope": "GFN2-xTB",
+                      "epistemic_status": "observation", "scope": "GFN2-xTB",
                       "supporting_molecules": [s], "contradicting_molecules": [], "uncertainty": "single run"}
                      for s, v in rows[:2]]
             text += "\n\nKNOWLEDGE\n" + json.dumps(items)
