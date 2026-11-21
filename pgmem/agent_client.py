@@ -156,8 +156,9 @@ class MemoryClient:
         key = chem.canonical(smiles)
         prov = ProvRef(task_id=task_id, workflow_id=workflow_id, campaign_id=campaign_id, subtype="parsl_task",
                        activity_id="compute_ionization_energy")
-        eid, merged = self.s.add(observation(key, QUANTITY, value, UNIT, {**conditions, "smiles_given": smiles},
-                                             self.agent, prov, campaign_id))
+        obs = observation(key, QUANTITY, value, UNIT, conditions, self.agent, prov, campaign_id)
+        obs.data["smiles_given"] = smiles      # the spelling used, kept out of the conditions (deduplication)
+        eid, merged = self.s.add(obs)
         self._seen(value)
         self._iter_results.append(eid)
         self.s.emit("result", {"entry": eid, "agent": self.agent, "key": key, "task_id": task_id,
@@ -255,8 +256,7 @@ class MemoryClient:
         if know:
             parts.append("Team knowledge (M3), with its evidence:\n" + "\n".join(f"- {_knowledge_line(e)}"
                                                                                for e in know))
-        exps = [e for e in self.s.search("M2", query, limit=3 * n)
-                if e.kind in ("failure", "diagnosis", "outcome")][:n] if "M2" in cats else []
+        exps = self.s.search("M2", query, limit=n, kinds=("failure", "diagnosis", "outcome")) if "M2" in cats else []
         if exps:
             parts.append("Relevant experiences (M2):\n" + "\n".join(f"- [{e.kind}] {e.text}" for e in exps))
         procs = self.s.search("M4", query, limit=n) if "M4" in cats else []

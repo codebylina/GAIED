@@ -111,7 +111,8 @@ def drain(store: MemoryStore, timeout_s: float) -> bool:
 
 
 def watch_procedure(store: MemoryStore, faults_path: str, switch: dict, meta: dict, stop: threading.Event) -> None:
-    """Scenario "ineffective_procedure": change the injected faults once a procedure has been effective."""
+    """Scenario "ineffective_procedure": change the injected faults once a procedure has been effective (the faults
+    file is re-read at every computation)."""
     while not stop.wait(3):
         for m4 in store.all("M4"):
             if any(a.get("effective") is True for a in m4.data.get("applications", [])):
@@ -135,6 +136,7 @@ def run_one(series: str, cfg: dict, scenario: str, condition: str, rep: int, out
         shutil.rmtree(run_dir)
     os.makedirs(run_dir)
     sc, cond = SCENARIOS[scenario], CONDITIONS[condition]
+    max_iterations = sc.get("max_iterations", cfg["max_iterations"])
     namespace = f"eval-{series}-{run_id}".replace("__", "-")
     store = MemoryStore.connect(REDIS_HOST, REDIS_PORT, namespace)
     store.reset()
@@ -145,7 +147,7 @@ def run_one(series: str, cfg: dict, scenario: str, condition: str, rep: int, out
     open(faults_log, "w").close()
 
     env = {**os.environ, **cond["env"], "PGMEM_NAMESPACE": namespace, "SEEDS": sc["seeds"],
-           "MAX_ITERATIONS": str(cfg["max_iterations"]), "FLOWCEPT_SETTINGS_PATH": flowcept_settings(run_dir),
+           "MAX_ITERATIONS": str(max_iterations), "FLOWCEPT_SETTINGS_PATH": flowcept_settings(run_dir),
            "PGMEM_FAULTS": faults_path, "PGMEM_FAULTS_LOG": faults_log, "PYTHONPATH": os.pathsep.join(x for x in (ROOT, os.path.join(ROOT, "docker"), os.environ.get("PYTHONPATH")) if x)}
     if not sc["faults"]:
         env.pop("PGMEM_FAULTS")
@@ -154,7 +156,7 @@ def run_one(series: str, cfg: dict, scenario: str, condition: str, rep: int, out
                     "SCRIPTED_DELAY_S": env.get("SCRIPTED_DELAY_S", "1")})
     meta = {"series": series, "run_id": run_id, "scenario": scenario, "condition": condition, "repetition": rep,
             "namespace": namespace, "seeds": sc["seeds"], "faults": sc["faults"], "llm": cfg["llm"],
-            "model": env.get("OLLAMA_MODEL") or env.get("LLM_MODEL"), "max_iterations": cfg["max_iterations"],
+            "model": env.get("OLLAMA_MODEL") or env.get("LLM_MODEL"), "max_iterations": max_iterations,
             "git_commit": git_commit(), "started_at": time.time(), "status": "running"}
     json.dump(meta, open(meta_path, "w"), indent=1)
     print(f"run {run_id} (namespace {namespace})", flush=True)

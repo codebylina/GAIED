@@ -59,11 +59,14 @@ class Analyzer:
         self.s, self.cfg = store, cfg
         self.llm = llm if (llm is not None or not cfg.analyzer_llm) else AnalysisLLM()
         self.source = source
+        self.count_provenance = True        # provenance records received during the run (evaluation coverage)
         self.index: ProvenanceIndex = source.index if source is not None else ProvenanceIndex()
         self.stream = store._k("events")
         self.group = cfg.analyzer_group
         self.consumer = consumer or f"{socket.gethostname()}-{os.getpid()}"
         self.stats = Counter()
+        if source is not None:          # 0 until records arrive, so that "none received" differs from "not measured"
+            self.s.r.hsetnx(self.s._k("analyzer", "stats"), "provenance_records", 0)
         try:
             self.s.r.xgroup_create(self.stream, self.group, id="0", mkstream=True)
         except redis.exceptions.ResponseError as exc:
@@ -87,6 +90,9 @@ class Analyzer:
         if self.source is not None:
             for rec in self.source.poll():
                 self._on_provenance(rec)
+                # received during the run: compared with the evaluation's recorder, so that a loss is visible
+                if self.count_provenance:
+                    self.s.r.hincrby(self.s._k("analyzer", "stats"), "provenance_records", 1)
                 n += 1
         return n
 
@@ -591,6 +597,7 @@ def main(argv: list[str] | None = None) -> None:
                          online=not args.post)
     an = Analyzer(store, cfg, source=source)
     if args.post:
+        an.count_provenance = False             # the post-execution reading is not what was received online
         an.step(block_ms=10, retry_idle_ms=0)   # finish pending memory events first
         print("report:", write_report(an.post_execution(), args.out))
         return

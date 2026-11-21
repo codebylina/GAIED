@@ -16,6 +16,7 @@ Metrics (the specification's list):
   intervention effectiveness  guidance delivered, applied, effective
   knowledge maintenance       statements resting on corrupted results that were flagged
   memory retrieval            what was put in the prompts (counts only: relevance needs a definition, see docs)
+  provenance coverage         provenance records received online by the analysis agent / records kept by the recorder
   system overhead             campaign duration, LLM calls of the agents and of the analysis agent, analysis time,
                               memory size
 """
@@ -30,7 +31,7 @@ import sys
 from collections import Counter, defaultdict
 
 from pgmem import chem
-from pgmem.provenance import as_dict, as_float, smiles_of
+from pgmem.provenance import as_dict, as_float, is_relevant, smiles_of
 
 FAILURE_RULES = ("repeated_failure", "recurring_failure_class", "failure_explanation")
 
@@ -65,7 +66,8 @@ def prf(truth: set, detected: set) -> dict:
 
 def run_metrics(run_dir: str) -> dict:
     meta = json.load(open(os.path.join(run_dir, "meta.json")))
-    tasks = merged_tasks(load_jsonl(os.path.join(run_dir, "provenance.jsonl")))
+    records = load_jsonl(os.path.join(run_dir, "provenance.jsonl"))
+    tasks = merged_tasks(records)
     faults = load_jsonl(os.path.join(run_dir, "faults.jsonl"))
     mem = json.load(open(os.path.join(run_dir, "memory.json"))) if os.path.exists(
         os.path.join(run_dir, "memory.json")) else {"entries": {}, "guidance": []}
@@ -130,6 +132,13 @@ def run_metrics(run_dir: str) -> dict:
     stats = mem.get("analyzer_stats") or {}
     m["analyzer_llm_calls"] = int(float(stats.get("llm_calls", 0)))
     m["analyzer_event_seconds"] = round(float(stats.get("event_seconds", 0)), 2)
+    # provenance received online by the analysis agent, against what the recorder kept (the Flowcept channel keeps
+    # nothing for a reader that is not listening, so a loss would otherwise be silent)
+    if "provenance_records" in stats:     # absent: not measured (no provenance source, or a run of an earlier version)
+        expected = {r["task_id"] for r in records if r.get("task_id") and is_relevant(r)}
+        m["provenance_expected"] = len(expected)
+        m["provenance_received"] = int(float(stats.get("provenance_records", 0)))
+        m["provenance_coverage"] = m["provenance_received"] / len(expected) if expected else None
 
     gs = mem.get("guidance", [])
     m["guidance_created"] = len(gs)
@@ -220,7 +229,7 @@ SUMMARY_COLUMNS = [
     ("best value (true)", "best_value_true"), ("guidance applied", "guidance_applied"),
     ("guidance effective", "guidance_effective"), ("traceability", "traceability"),
     ("duration (s)", "duration_s"), ("agent LLM calls", "agent_llm_calls"),
-    ("analysis LLM calls", "analyzer_llm_calls"),
+    ("analysis LLM calls", "analyzer_llm_calls"), ("provenance coverage", "provenance_coverage"),
 ]
 
 

@@ -5,13 +5,14 @@ PGMEM_FAULTS is a JSON object, or the path of a JSON file re-read at every compu
 it during a run for the "procedure becomes ineffective" scenario). Each fault selects molecules by a SMARTS pattern
 and/or a deterministic fraction (a hash of the canonical SMILES and a salt, independent of the LLM's proposals):
 
-  {"fail":     {"smarts": "C#N", "fraction": 0.3, "salt": "a", "message": "SCF not converged (injected)"},
+  {"fail":     {"smarts": "C#N", "fraction": 0.3, "salt": "a", "message": "SCF not converged"},
    "truncate": {"fraction": 0.2, "salt": "b", "steps": 3},          # incomplete artifact: optimization cut short
    "offset":   {"fraction": 0.2, "salt": "c", "value": -3.0}}       # wrong value (contradictory result), in eV
 
-With both "smarts" and "fraction", a molecule must match the pattern and fall in the fraction. Every injected fault is
-appended to PGMEM_FAULTS_LOG (JSONL) as ground truth; nothing about it is written into the provenance or the memory,
-so the analysis agent cannot see it.
+With both "smarts" and "fraction", a molecule must match the pattern and fall in the fraction; with "smarts" only,
+every matching molecule is selected. Every injected fault is appended to PGMEM_FAULTS_LOG (JSONL) as ground truth;
+nothing about it is written into the provenance or the memory (the failure message is the ordinary xTB one), so neither
+the agents nor the analysis agent can see what was injected.
 """
 from __future__ import annotations
 
@@ -71,7 +72,7 @@ def before(smiles: str, steps: int) -> int:
     f = _load()
     if selected(f.get("fail"), smiles):
         _log("failure", smiles, salt=f["fail"].get("salt"))
-        raise RuntimeError(f["fail"].get("message", "SCF not converged (injected)"))
+        raise RuntimeError(f["fail"].get("message", "SCF not converged"))
     if selected(f.get("truncate"), smiles):
         n = int(f["truncate"].get("steps", 3))
         _log("truncated", smiles, steps=n)

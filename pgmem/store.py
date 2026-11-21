@@ -164,13 +164,16 @@ class MemoryStore:
         ids = self.r.zrange(self._k("cat", category), 0, -1)
         return [e for e in (self.get(i) for i in ids) if e]
 
-    def search(self, category: str, query: str, limit: int = 5, scan: int = 500) -> list[Entry]:
-        """Keyword retrieval over the most recent entries of a category (ties: newest first)."""
+    def search(self, category: str, query: str, limit: int = 5, scan: int = 500,
+               kinds: Iterable[str] | None = None) -> list[Entry]:
+        """Keyword retrieval over the most recent entries of a category (ties: newest first); `kinds` filters
+        before ranking, so that entries of other kinds cannot push the wanted ones out of the limit."""
         q = tokens(query)
+        pool = [e for e in self.recent(category, scan) if kinds is None or e.kind in kinds]
         if not q:
-            return self.recent(category, limit)
+            return pool[:limit]
         scored = []
-        for e in self.recent(category, scan):
+        for e in pool:
             s = len(q & tokens(f"{e.text} {e.key} {json.dumps(e.data)}"))
             if s:
                 scored.append((s, e.created_at, e))

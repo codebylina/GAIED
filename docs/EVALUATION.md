@@ -18,22 +18,29 @@ analysis agent does not analyze memory events; guidance tracking is kept so that
 
 ## Scenarios
 
-Two agents, three iterations each. Faults are injected by `pgmem/faults.py` on a deterministic 30 % of the
-molecules (a hash of the canonical SMILES), whatever molecules the LLM proposes; the injected faults are logged as
-ground truth and never written to provenance or memory.
+Two agents, three iterations each (five for `ineffective_procedure`). Faults are injected by `pgmem/faults.py`,
+whatever molecules the LLM proposes. Technical failures follow a chemical motif, since failures of random molecules
+leave no pattern to learn from (first pilot); incomplete artifacts and corrupted values hit a deterministic 30 % of the
+molecules (a hash of the canonical SMILES). The failure message is xTB's ordinary one. The injected faults are logged
+as ground truth and never written to provenance or memory, so agents and the analysis agent can only discover them.
 
 | Scenario | Seeds | Injected |
 |---|---|---|
-| `repeated_failures` | different | 30 % of the computations fail with "SCF not converged" |
+| `repeated_failures` | different | every molecule with a nitrile (`C#N`) fails with "SCF not converged" |
 | `redundant_computations` | the same seed for both agents | nothing |
 | `inefficient_exploration` | different | nothing |
 | `invalid_artifacts` | different | 30 % of the optimizations are cut after 3 steps (not converged) |
-| `contradictory_results` | different | 30 % of the values are shifted by -3 eV |
-| `ineffective_procedure` | different | as `repeated_failures`; once a procedure has been effective, the failing molecules change |
+| `corrupted_results` | different | 30 % of the values are shifted by -3 eV |
+| `ineffective_procedure` | different | nitriles fail; once a procedure has been effective, molecules with a CF3 group fail instead |
 
-The fractions, the offset and the switch rule are parameters of the experimental design and are reported with the
-results. `ineffective_procedure` only differs from `repeated_failures` where procedures exist (conditions with the
-analysis agent).
+The motifs, fractions, offset, iteration counts and switch rule are parameters of the experimental design and are
+reported with the results. `ineffective_procedure` only differs from `repeated_failures` where procedures exist
+(conditions with the analysis agent): the switch needs an effective procedure.
+
+`corrupted_results` is not a test of contradiction detection between measurements: with a memory a molecule is
+computed once, so no second measurement contradicts the wrong one. It tests the maintenance of knowledge built on
+corrupted results (statements resting on them, and whether they are flagged). The analysis agent has no rule that
+recognizes a wrong value by itself; only a later result that an LLM judges contradictory can reveal it.
 
 ## Metrics
 
@@ -53,13 +60,15 @@ agent being evaluated.
 | Scientific knowledge maintenance | statements resting on a corrupted result (truncated or offset) and the share of them flagged by the analysis agent |
 | Memory retrieval relevance | **not yet defined**: what each prompt received is logged (`context` events, per category); a relevance criterion must be chosen before it is reported |
 | System overhead | campaign duration; LLM calls of the agents and of the analysis agent; analysis time; memory size |
+| Provenance coverage | provenance records received online by the analysis agent, against those kept by the evaluation's recorder (Flowcept's channel keeps nothing for a reader that is not listening; a loss is reported instead of being silent) |
 
 ## Series
 
 | Series | LLM | Runs | Purpose |
 |---|---|---|---|
 | `smoke` | scripted | 6 scenarios × 8 conditions × 1 | check that everything runs (about 45 s per run) |
-| `pilot` | Ollama model | 6 × 4 × 1 = 24 | first real measurements, estimate of variance and duration |
+| `pilot` | Ollama model | 6 × 4 × 1 = 24 | first real measurements, estimate of variance and duration (done; it led to the fixes in `docs/DEVELOPMENT_LOG.md`) |
+| `pilot2` | Ollama model | 6 × 4 × 1 = 24 | the pilot again after those fixes, in its own folder |
 | `main` | Ollama model | 6 × 4 × 3 = 72 | the paper's comparison |
 | `ablations` | Ollama model | 6 × 4 × 1 = 24 | contribution of memory categories and of cross-source analysis |
 
@@ -69,8 +78,8 @@ From `GAIED/docker`, with Redis started (`docker compose up -d redis`), the eval
 model of your setup (here a model served by Ollama on the host):
 
 ```bash
-docker compose run --rm --no-deps -e OLLAMA_URL=http://host.docker.internal:11434 -e OLLAMA_MODEL=qwen3.5:9b -e LLM_MODEL=qwen3.5:9b gaied python -m evaluation.run_series pilot
-docker compose run --rm --no-deps gaied python -m evaluation.metrics results/eval/pilot
+docker compose run --rm --no-deps -e OLLAMA_URL=http://host.docker.internal:11434 -e OLLAMA_MODEL=qwen3.5:9b -e LLM_MODEL=qwen3.5:9b gaied python -m evaluation.run_series pilot2
+docker compose run --rm --no-deps gaied python -m evaluation.metrics results/eval/pilot2
 ```
 
 The scripted check needs no model: `... gaied python -m evaluation.run_series smoke`. It checks the plumbing, not

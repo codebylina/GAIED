@@ -453,6 +453,66 @@ def test_analysis_without_the_memory_source_keeps_only_guidance_tracking():
     drain(an)
     assert not diagnoses(s) and not s.all_guidance()
 
+
+# --------------------------------------------------------------------------------------------- fixes after the pilot
+def test_m1_deduplication_ignores_the_smiles_spelling():
+    cfg, s, _ = setup()
+    a1, a2 = client(s, cfg, "a1"), client(s, cfg, "a2")
+    e1 = a1.record_result("OCC", 9.5, {**COND, "converged": True}, "t1", "w1", "c1")
+    e2 = a2.record_result("CCO", 9.5, {**COND, "converged": True}, "t2", "w2", "c1")
+    assert e1 == e2 and len(s.all("M1")) == 1
+    e = s.get(e1)
+    assert "smiles_given" not in e.data["conditions"] and e.data["smiles_given"] == "OCC"
+    assert [r["task_id"] for r in e.prov_refs] == ["t1", "t2"]
+
+
+def test_m2_kinds_are_filtered_before_ranking():
+    from pgmem.schema import experience
+    cfg, s, _ = setup()
+    s.add(experience("failure", "CC#N failed: SCF not converged", "a1", key="CC#N"))
+    for i in range(20):                       # more recent entries of another kind, matching the query better
+        s.add(experience("attempt", f"CC#N CC#N attempt {i}", "a1", key="CC#N"))
+    got = s.search("M2", "CC#N", limit=3, kinds=("failure", "diagnosis", "outcome"))
+    assert [e.kind for e in got] == ["failure"]
+    assert "CC#N failed" in client(s, cfg, "a1").context("plan", "CC#N")
+
+
+def test_injected_failure_message_is_the_ordinary_xtb_one():
+    from pgmem import faults
+    from evaluation.config import SCENARIOS
+    assert "injected" not in json.dumps(SCENARIOS).lower()
+    os.environ["PGMEM_FAULTS"] = json.dumps({"fail": {"smarts": "C#N"}})
+    try:
+        faults.before("CC#N", 250)
+        raise AssertionError("no failure injected")
+    except RuntimeError as exc:
+        assert str(exc) == "SCF not converged"
+    finally:
+        os.environ.pop("PGMEM_FAULTS")
+
+
+def test_motif_scenarios_select_by_chemical_group():
+    from pgmem import faults
+    from evaluation.config import SCENARIOS
+    rep = SCENARIOS["repeated_failures"]["faults"]["fail"]
+    assert faults.selected(rep, "NCC#N") and faults.selected(rep, "N#CC#N") and not faults.selected(rep, "CCO")
+    ip = SCENARIOS["ineffective_procedure"]
+    p1, p2 = ip["faults"]["fail"], ip["switch_when_procedure_effective"]["fail"]
+    assert faults.selected(p1, "NC#N") and not faults.selected(p1, "OC(=O)C(F)(F)F")
+    assert faults.selected(p2, "OC(=O)C(F)(F)F") and not faults.selected(p2, "NC#N")
+    assert not faults.selected(p2, "FC(F)C")                 # CHF2 is not CF3
+    assert ip["max_iterations"] == 5 and "corrupted_results" in SCENARIOS and "contradictory_results" not in SCENARIOS
+
+
+def test_provenance_records_received_online_are_counted():
+    src = FakeSource()
+    cfg, s, an = setup(source=src)
+    src.pending = [{"type": "task", "subtype": "parsl_task", "task_id": f"t{i}", "activity_id":
+                    "compute_ionization_energy", "status": "FINISHED", "used": {"smiles": "CCO"}} for i in range(3)]
+    drain(an)
+    assert int(s.r.hget(s._k("analyzer", "stats"), "provenance_records")) == 3
+
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 if __name__ == "__main__":

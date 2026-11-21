@@ -6,19 +6,24 @@ with the structured four-category memory (structured), and with structured memor
 analysis agent (full). Ablations remove memory categories from the agents' prompts, or one of the analysis agent's
 two sources.
 
-Scenarios follow the specification's list. Faults are injected by pgmem/faults.py on a deterministic fraction of the
-molecules (hash of the canonical SMILES), so that a scenario is exercised whatever molecules the LLM proposes. The
-fractions and the offset are parameters of the experimental design, stated here and in the results.
+Scenarios follow the specification's list. Faults are injected by pgmem/faults.py, so that a scenario is exercised
+whatever molecules the LLM proposes. Technical failures follow a chemical motif (a SMARTS pattern), since failures of
+random molecules leave no pattern to learn from; incomplete artifacts and corrupted values hit a deterministic fraction
+of the molecules (hash of the canonical SMILES). The failure message is xTB's ordinary one. Motifs, fractions, offset
+and iteration counts are parameters of the experimental design, stated here and in the results.
 """
 from __future__ import annotations
 
 DIFFERENT_SEEDS = "CNC(N)=O,CC1=C(O)N=C(O)N1"     # GAIED's default seeds: two agents exploring different regions
 SAME_SEEDS = "CNC(N)=O,CNC(N)=O"                  # two agents starting from the same molecule
 
+NITRILE, CF3 = "C#N", "[CX4](F)(F)F"
+
 SCENARIOS: dict[str, dict] = {
+    # every molecule with a nitrile fails
     "repeated_failures": {
         "seeds": DIFFERENT_SEEDS,
-        "faults": {"fail": {"fraction": 0.3, "salt": "repeated", "message": "SCF not converged (injected)"}},
+        "faults": {"fail": {"smarts": NITRILE, "message": "SCF not converged"}},
     },
     "redundant_computations": {"seeds": SAME_SEEDS, "faults": {}},
     "inefficient_exploration": {"seeds": DIFFERENT_SEEDS, "faults": {}},
@@ -26,17 +31,21 @@ SCENARIOS: dict[str, dict] = {
         "seeds": DIFFERENT_SEEDS,
         "faults": {"truncate": {"fraction": 0.3, "salt": "artifacts", "steps": 3}},
     },
-    "contradictory_results": {
+    # wrong values (same molecule, same conditions, value shifted): with a memory a molecule is computed once, so no
+    # second measurement contradicts it; what is tested is the maintenance of knowledge built on corrupted results
+    "corrupted_results": {
         "seeds": DIFFERENT_SEEDS,
         "faults": {"offset": {"fraction": 0.3, "salt": "contradiction", "value": -3.0}},
     },
-    # phase 1: a failure pattern the analysis agent turns into a procedure; once that procedure has been effective,
-    # the failing molecules change (phase 2), so applying the procedure no longer prevents failures
+    # phase 1: nitriles fail, a pattern the analysis agent turns into a procedure; once that procedure has been
+    # effective, molecules with a CF3 group fail instead (phase 2), so applying the procedure no longer prevents
+    # failures. Five iterations leave room for both phases. The switch needs a procedure, so it can only happen in
+    # conditions with the analysis agent.
     "ineffective_procedure": {
         "seeds": DIFFERENT_SEEDS,
-        "faults": {"fail": {"fraction": 0.3, "salt": "phase1", "message": "SCF not converged (injected)"}},
-        "switch_when_procedure_effective": {"fail": {"fraction": 0.3, "salt": "phase2",
-                                                     "message": "SCF not converged (injected)"}},
+        "max_iterations": 5,
+        "faults": {"fail": {"smarts": NITRILE, "message": "SCF not converged"}},
+        "switch_when_procedure_effective": {"fail": {"smarts": CF3, "message": "SCF not converged"}},
     },
 }
 
@@ -61,6 +70,9 @@ SERIES: dict[str, dict] = {
               "repetitions": 1, "max_iterations": 3},
     "pilot": {"llm": "ollama", "scenarios": list(SCENARIOS), "conditions": MAIN_CONDITIONS,
               "repetitions": 1, "max_iterations": 3},
+    # the pilot again, after the fixes it led to (its own folder: the first pilot's runs are kept and not skipped)
+    "pilot2": {"llm": "ollama", "scenarios": list(SCENARIOS), "conditions": MAIN_CONDITIONS,
+               "repetitions": 1, "max_iterations": 3},
     "main": {"llm": "ollama", "scenarios": list(SCENARIOS), "conditions": MAIN_CONDITIONS,
              "repetitions": 3, "max_iterations": 3},
     "ablations": {"llm": "ollama", "scenarios": list(SCENARIOS), "conditions": ABLATIONS,
